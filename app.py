@@ -109,8 +109,11 @@ def generate():
 
 @app.route('/download/<filename>')
 def download_file(filename):
-    secure_file = secure_filename(filename)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_file)
+    """Secure endpoint allowing users to pull individual output sheets."""
+    # Use os.path.basename instead of secure_filename to prevent directory traversal
+    # without destroying the spaces in our file names!
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
     
     if os.path.exists(file_path):
         return send_file(file_path, as_attachment=True)
