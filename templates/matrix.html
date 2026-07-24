@@ -29,7 +29,6 @@
 
 <div class="container">
     <h1>📦 Packing Sheet Engine</h1>
-    <a href="{{ url_for('dashboard') }}" style="display: inline-block; margin-bottom: 20px; padding: 10px 15px; background-color: #3498db; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">🗂️ Dashboard</a>
     <div style="margin-bottom: 20px; display: flex; gap: 15px;">
         <a href="/" style="text-decoration: none; color: #7f8c8d; font-weight: bold;">← Main Menu</a>
         {% if tabs or previews %}
@@ -48,7 +47,6 @@
         </form>
     </div>
     {% endif %}
-    
 
     {% if tabs %}
     <h3>✅ File Detected: {{ filename }}</h3>
@@ -117,8 +115,7 @@
                             <input type="checkbox" 
                                 name="packs_{{ bp.sheet_name }}" 
                                 value="{{ pack.name }}" 
-                                id="pack_{{ bp.sheet_name }}_{{ pack.name }}" 
-                                unchecked>
+                                id="pack_{{ bp.sheet_name }}_{{ pack.name }}">
                             <label for="pack_{{ bp.sheet_name }}_{{ pack.name }}">
                                 {{ pack.label }}
                             </label>
@@ -130,6 +127,9 @@
         {% endfor %}
         
         <input type="hidden" name="filename" value="{{ filename }}">
+        <!-- Hidden field passing the single-pass blueprint to the backend -->
+        <input type="hidden" name="blueprints_json" value="{{ blueprints_json }}">
+        
         {% for tab in tabs %}
             <input type="hidden" name="all_tabs" value="{{ tab }}">
             {% if user_inputs and user_inputs[tab].selected %}
@@ -139,18 +139,11 @@
             <input type="hidden" name="job_{{ tab }}" value="{{ user_inputs[tab].job if user_inputs else 'E1' }}">
             <input type="hidden" name="store_{{ tab }}" value="{{ user_inputs[tab].store if user_inputs else 'A' }}">
         {% endfor %}
-        <div style="margin-top: 20px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef;">
-            <label for="campaign_name" style="font-weight: bold; font-size: 16px; display: block; margin-bottom: 8px;">
-                🏷️ Campaign Name
-            </label>
-            <input type="text" id="campaign_name" name="campaign_name" required 
-                   placeholder="e.g., Summer Promo 2026" 
-                   style="width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-        </div>
+
         <button type="submit" style="background-color: #2ecc71; width: 100%; margin-top: 20px; font-size: 18px;">Generate Packing Sheet</button>
-    
     </form> 
     {% endif %}
+
     {% if generation_complete %}
     <div style="margin-top: 30px; background: #e8f4f8; padding: 25px; border-radius: 8px; border: 1px solid #bee3f8; text-align: center;">
         <h2 style="color: #2b6cb0; margin-top: 0;">🎉 Matrices Successfully Generated!</h2>
