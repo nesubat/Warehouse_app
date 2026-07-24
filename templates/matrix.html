@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Warehouse Matrix Engine</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; padding: 40px; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; }
+        .upload-box { border: 2px dashed #bdc3c7; padding: 20px; text-align: center; border-radius: 8px; margin-bottom: 20px; background: #ecf0f1; }
+        button { background-color: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        button:hover { background-color: #2980b9; }
+        
+        .tab-card { background: #fff; padding: 20px; margin-bottom: 15px; border-radius: 6px; border: 1px solid #dcdde1; border-left: 5px solid #3498db; }
+        .tab-title { font-size: 18px; font-weight: bold; cursor: pointer; margin-bottom: 15px; display: block; color: #2c3e50; }
+        
+        .input-group { display: flex; gap: 20px; }
+        .input-field { display: flex; flex-direction: column; width: 100%; }
+        .input-field label { font-size: 13px; font-weight: bold; color: #7f8c8d; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;}
+        .input-field input { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px; }
+        
+        .blueprint-card { background: #f8f9fa; padding: 15px; margin-bottom: 15px; border-radius: 6px; border-left: 5px solid #2ecc71; border-right: 1px solid #dcdde1; border-top: 1px solid #dcdde1; border-bottom: 1px solid #dcdde1;}
+        .blueprint-error { border-left: 5px solid #e74c3c; }
+        .pack-list { margin-left: 20px; color: #555; }
+        .metrics-bar { display: flex; gap: 15px; background: #ecf0f1; padding: 10px; border-radius: 4px; margin-top: 10px; font-size: 14px; font-weight: bold; color: #2c3e50; }
+        .metric-badge { background: #fff; padding: 5px 10px; border-radius: 4px; border: 1px solid #bdc3c7; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📦 Packing Sheet Engine</h1>
+    <a href="{{ url_for('dashboard') }}" style="display: inline-block; margin-bottom: 20px; padding: 10px 15px; background-color: #3498db; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">🗂️ Dashboard</a>
+    <div style="margin-bottom: 20px; display: flex; gap: 15px;">
+        <a href="/" style="text-decoration: none; color: #7f8c8d; font-weight: bold;">← Main Menu</a>
+        {% if tabs or previews %}
+        <span style="color: #ccc;">|</span>
+        <a href="/matrix" style="text-decoration: none; color: #e74c3c; font-weight: bold;">↻ Start Over (Clear File)</a>
+        {% endif %}
+    </div>
+
+    {% if not tabs and not generation_complete %}
+    <div class="upload-box">
+        <p>Upload a Distribution file to begin.</p>
+        <form method="POST" enctype="multipart/form-data">
+            <input type="file" name="file" accept=".xlsx, .xls" required>
+            <br><br>
+            <button type="submit">Scan File</button>
+        </form>
+    </div>
+    {% endif %}
+    
+
+    {% if tabs %}
+    <h3>✅ File Detected: {{ filename }}</h3>
+    
+    <form action="/preview" method="POST">
+        <input type="hidden" name="filename" value="{{ filename }}">
+        
+        {% for tab in tabs %}
+        <input type="hidden" name="all_tabs" value="{{ tab }}">
+        <div class="tab-card">
+            <label class="tab-title">
+                <input type="checkbox" name="selected_tabs" value="{{ tab }}" 
+                       {% if not user_inputs or user_inputs[tab].selected %}checked{% endif %}>
+                Tab: {{ tab }}
+            </label>
+            
+            <div class="input-group">
+                <div class="input-field">
+                    <label>Start Cell (Stocks)</label>
+                    <input type="text" name="start_{{ tab }}" value="{{ user_inputs[tab].start if user_inputs else 'B8' }}" required>
+                </div>
+                <div class="input-field">
+                    <label>Job ID Cell</label>
+                    <input type="text" name="job_{{ tab }}" value="{{ user_inputs[tab].job if user_inputs else 'E1' }}" required>
+                </div>
+                <div class="input-field">
+                    <label>Store Name Col</label>
+                    <input type="text" name="store_{{ tab }}" value="{{ user_inputs[tab].store if user_inputs else 'A' }}" required>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+        
+        <button type="submit" style="width: 100%; margin-bottom: 30px;">{% if previews %}Update Previews{% else %}Map Blueprints{% endif %}</button>
+    </form>
+    {% endif %}
+
+{% if previews %}
+    <hr style="border: 1px solid #ecf0f1; margin-bottom: 20px;">
+    <h3>🗺️ Blueprint Previews</h3>
+    <p>Verify the grid boundaries below. Edit coordinates above and click "Update Previews" if anything looks wrong.</p>
+    
+    <form action="/generate" method="POST">
+        
+        {% for bp in previews %}
+            {% if bp.error %}
+            <div class="blueprint-card blueprint-error">
+                <h4>❌ {{ bp.sheet_name }}</h4>
+                <p style="color: #e74c3c;">{{ bp.error }}</p>
+            </div>
+            {% else %}
+            <div class="blueprint-card">
+                <h4 style="margin-top: 0;">✅ {{ bp.sheet_name }}</h4>
+                
+                <div class="metrics-bar">
+                    <span class="metric-badge">Last Column: {{ bp.last_col }}</span>
+                    <span class="metric-badge">Last Row: {{ bp.last_row }}</span>
+                    <span class="metric-badge">Total Stores: {{ bp.total_stores }}</span>
+                </div>
+
+                <p style="margin-bottom: 5px; margin-top: 15px;"><strong>Stocks:</strong> {{ bp.stocks_map }}</p>
+                <p style="margin-bottom: 5px;"><strong>Packages:</strong> <span style="text-decoration: underline; text-decoration-color: red;">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
+                <ul class="pack-list" style="margin-top: 5px; list-style-type: none; padding-left: 0;">
+                    {% for pack in bp.packages_map %}
+                        <li style="margin-bottom: 5px;">
+                            <input type="checkbox" 
+                                name="packs_{{ bp.sheet_name }}" 
+                                value="{{ pack.name }}" 
+                                id="pack_{{ bp.sheet_name }}_{{ pack.name }}" 
+                                unchecked>
+                            <label for="pack_{{ bp.sheet_name }}_{{ pack.name }}">
+                                {{ pack.label }}
+                            </label>
+                        </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        {% endfor %}
+        
+        <input type="hidden" name="filename" value="{{ filename }}">
+        {% for tab in tabs %}
+            <input type="hidden" name="all_tabs" value="{{ tab }}">
+            {% if user_inputs and user_inputs[tab].selected %}
+                <input type="hidden" name="selected_tabs" value="{{ tab }}">
+            {% endif %}
+            <input type="hidden" name="start_{{ tab }}" value="{{ user_inputs[tab].start if user_inputs else 'B8' }}">
+            <input type="hidden" name="job_{{ tab }}" value="{{ user_inputs[tab].job if user_inputs else 'E1' }}">
+            <input type="hidden" name="store_{{ tab }}" value="{{ user_inputs[tab].store if user_inputs else 'A' }}">
+        {% endfor %}
+        <div style="margin-top: 20px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef;">
+            <label for="campaign_name" style="font-weight: bold; font-size: 16px; display: block; margin-bottom: 8px;">
+                🏷️ Campaign Name
+            </label>
+            <input type="text" id="campaign_name" name="campaign_name" required 
+                   placeholder="e.g., Summer Promo 2026" 
+                   style="width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+        </div>
+        <button type="submit" style="background-color: #2ecc71; width: 100%; margin-top: 20px; font-size: 18px;">Generate Packing Sheet</button>
+    
+    </form> 
+    {% endif %}
+    {% if generation_complete %}
+    <div style="margin-top: 30px; background: #e8f4f8; padding: 25px; border-radius: 8px; border: 1px solid #bee3f8; text-align: center;">
+        <h2 style="color: #2b6cb0; margin-top: 0;">🎉 Matrices Successfully Generated!</h2>
+        <p>Your distro file has been safely parsed. Download your outputs below:</p>
+        
+        <div style="display: flex; gap: 15px; justify-content: center; margin-top: 20px;">
+            <a href="/download/{{ file1 }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                📊 Download File 1<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file1 }}</span>
+            </a>
+            
+            <a href="/download/{{ file2 }}" style="background: #e67e22; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                🖨️ Download File 2<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file2 }}</span>
+            </a>
+            
+            <a href="/download/{{ file3 }}" style="background: #319795; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                🔗 Download File 3<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file3 }}</span>
+            </a>
+        </div>
+        <br>
+        <a href="/matrix" style="color: #4a5568; font-size: 14px; text-decoration: none;">← Process Another File</a>
+    </div>
+    {% endif %}
+
+</div>
+
+</body>
+</html>

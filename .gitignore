@@ -1,0 +1,11 @@
+# Ignore all Excel files
+*.xlsx
+*.xls
+*.csv
+
+# Ignore your uploads folder (if that's where test files go)
+input_files/
+uploads/
+
+# Ignore Python background files
+__pycache__/
