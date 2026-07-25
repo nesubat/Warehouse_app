@@ -39,7 +39,9 @@ def clean_old_projects():
                     print(f"Could not delete {folder_name}: {e}")
 
 clean_old_projects()  # Retry cleanup if deletion fails
-app = Flask(__name__)
+app = Flask(__name__, 
+            template_folder=os.path.join(BASE_DIR, 'templates'),
+            static_folder=os.path.join(BASE_DIR, 'static'))
 app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
