@@ -44,17 +44,20 @@ This tool eliminates manual data entry by parsing raw distributions, mapping sto
 
 ### 1. Clone the Repository
 ```bash
-git clone [https://github.com/nesubat/Warehouse_app.git](https://github.com/nesubat/Warehouse_app.git)
-cd Warehouse_app ```
-
-2. Create and activate a virtual environment
+git clone https://github.com/nesubat/Warehouse_app.git
+cd Warehouse_app 
+```
+### 2. Create and activate a virtual environment
 ```bash
-python -m venv venv```
+python -m venv venv 
 venv\Scripts\activate
-3. Install dependencies
+```
+### 3. Install dependencies
 ```bash
-pip install flask pandas openpyxl xlwings werkzeug xlsxwriter```
-4. Run the application
+pip install flask pandas openpyxl xlwings werkzeug xlsxwriter 
+```
+### 4.Run application
 ```bash
-python app.py```
+python app.py 
+```
 The app will be available in your browser at http://127.0.0.1:5000
