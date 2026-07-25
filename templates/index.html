@@ -64,7 +64,7 @@
                 {% endfor %}
                 
                 <form action="/delete/{{ project.name }}" method="POST" class="delete-form" style="display: flex; height: 100%;">
-                    <button type="submit" class="btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this project?');" title="Delete Project">
+                    <button type="submit" class="tooltip-btn btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this project?');" title="Delete Project" data-title="Delete Project">
                         🗑️ Delete
                     </button>
                 </form>

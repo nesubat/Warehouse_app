@@ -145,7 +145,7 @@
         <div class="success-actions actions-grid">
         {% for file in generated_files %}
         <a href="{{ url_for('download_file', folder_name=project_folder, filename=file) }}" 
-           class="tooltip-btn btn-action btn-download download-btn" 
+           class="tooltip-btn btn-action btn-download" 
            data-title="{{ file }}">
             📊 Download File {{ loop.index }}<br>
             <span class="download-sub">{{ file[:25] }}{% if file|length > 25 %}...{% endif %}</span>
