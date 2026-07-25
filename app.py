@@ -24,7 +24,7 @@ def clean_old_projects():
         return
         
     current_time = time.time()
-    seven_days_in_seconds = 1
+    seven_days_in_seconds = 7 * 24 * 60 * 60  # 7 days in seconds
     
     for folder_name in os.listdir(PROJECTS_FOLDER):
         folder_path = os.path.join(PROJECTS_FOLDER, folder_name)

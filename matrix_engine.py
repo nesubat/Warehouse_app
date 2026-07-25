@@ -42,7 +42,14 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         raw_job_id = sheet[job_id_cell].value
         store_col_idx = column_index_from_string(store_col)
         
-        max_col = sheet.max_column
+        true_max_col = 1
+        for col in range(sheet.max_column, 0, -1):
+            cell_val = sheet.cell(row=job_id_row, column=col).value
+            if cell_val is not None and str(cell_val).strip() != "":
+                true_max_col = col
+                break
+                
+        max_col = true_max_col
         last_col_letter = get_column_letter(max_col)
             
         last_row = sheet.max_row
@@ -242,6 +249,24 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     sheet1_xw.range(f"{col_letter}:{col_letter}").api.EntireColumn.AutoFit()
                     
                     sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").value = f"Code for {p_name}"
+                    pack_group_row = tab_info["pack_group_row"]
+                    pack_name_cell = sheet1_xw.range((pack_group_row, p_start+1))
+                    original_color = pack_name_cell.color
+                    
+                    new_pack_range = sheet1_xw.range((pack_group_row, p_start), (pack_group_row, p_end + 1))
+                    
+                    try:
+                        new_pack_range.unmerge()
+                    except Exception:
+                        pass
+                        
+                    new_pack_range.merge()
+                    
+                    if original_color:
+                        new_pack_range.color = original_color
+                        
+                    new_pack_range.api.HorizontalAlignment = -4108
+                    new_pack_range.api.VerticalAlignment = -4108
                     
                     # --- THE BATCH WRITE FIX ---
                     # Bundle all the letters into a 2D array (a vertical column list)
@@ -310,6 +335,10 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     
                 sheet2.range((job_id_row, p_end + 1)).value = "Count"
                 sheet2.range((job_id_row, p_end + 2)).value = f"Code for {p_name}"
+                
+                # --- 1. AUTOFIT THE NEW COLUMNS ---
+                sheet2.range(f"{col_letter_1}:{col_letter_2}").api.EntireColumn.AutoFit()
+                
                 
                 write_data = []
                 num_items = len(p_sum["unique_sigs"][0])
