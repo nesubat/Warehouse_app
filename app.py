@@ -155,13 +155,16 @@ def generate():
     file1_name, file2_name, file3_name = generate_all_outputs(
         new_filepath, filename, selected_tabs, user_inputs, blueprints, project_dir
     )
-    
-    return render_template('matrix.html', 
+    raw_files = [file1_name, file2_name, file3_name]
+
+    # Filter the list to ONLY keep actual file names (removes None/Empty strings)
+    files_to_download = [f for f in raw_files if f]
+
+    # 3. Pass the clean list to the template
+    return render_template('matrix.html',
                            generation_complete=True,
                            project_folder=final_folder_name,
-                           file1=file1_name,
-                           file2=file2_name,
-                           file3=file3_name)
+                           generated_files=files_to_download)
 
 @app.route('/download/<folder_name>/<filename>')
 def download_file(folder_name, filename):

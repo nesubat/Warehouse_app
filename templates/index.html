@@ -2,34 +2,20 @@
 <html>
 <head>
     <title>Warehouse Automation Suite</title>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; padding: 40px; color: #333; text-align: center; }
-        .container { max-width: 800px; margin: 0 auto; padding: 30px; }
-        h1 { color: #2c3e50; font-size: 36px; margin-bottom: 10px; }
-        p { color: #7f8c8d; font-size: 18px; margin-bottom: 40px; }
-        
-        .portal-grid { display: flex; gap: 30px; justify-content: center; }
-        
-        .portal-card {
-            background: white; padding: 40px 30px; border-radius: 12px;
-            box-shadow: 0 6px 12px rgba(0,0,0,0.1); width: 100%; max-width: 350px;
-            text-decoration: none; color: #333; transition: transform 0.2s, box-shadow 0.2s;
-            border-top: 6px solid #3498db;
-        }
-        .portal-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.15); }
-        
-        .portal-card.pdf-card { border-top-color: #e67e22; }
-        
-        .portal-icon { font-size: 50px; margin-bottom: 20px; }
-        .portal-title { font-size: 22px; font-weight: bold; margin-bottom: 10px; color: #2c3e50; }
-        .portal-desc { font-size: 15px; color: #7f8c8d; line-height: 1.5; }
-    </style>
+    <!-- Link to external CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
 
-<div class="container">
+<!-- Sticky Header Navigation -->
+<nav class="sticky-nav">
+    <a href="/">🏠 Home</a>
+    <a href="/#dashboard-section">📊 Dashboard</a>
+</nav>
+
+<div class="container text-center">
     <h1>Packaging Automation Suite</h1>
-    <p>Select a tool to begin processing your distributions.</p>
+    <p class="subtitle">Select a tool to begin processing your distributions.</p>
 
     <div class="portal-grid">
         <a href="/matrix" class="portal-card">
@@ -44,38 +30,49 @@
             <div class="portal-desc">Upload raw labels and sort them perfectly based on Signature Code groups.</div>
         </a>
     </div>
-</div>
-<h2>Recent Projects</h2>
+
+    <!-- Added ID for anchor scrolling -->
+    <h2 id="dashboard-section" style="margin-top: 60px;">Recent Projects</h2>
     
     {% if not projects %}
-        <p style="color: #7f8c8d; font-style: italic;">No recent projects found. Click above to begin a job.</p>
+        <p class="no-projects">No recent projects found. Click above to begin a job.</p>
     {% endif %}
 
     <!-- THE LOOP MUST START HERE -->
     {% for project in projects %}
-        <div class="project-card" style="background: #f8f9fa; padding: 20px; border-radius: 6px; border: 1px solid #dcdde1; border-left: 5px solid #3498db; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+        <div class="project-card">
             
-            <div class="project-info">
-                <h3>{{ project.display_name }} <span style="color: #7f8c8d; font-size: 16px; font-weight: normal;">(Job: {{ project.job_id }})</span></h3>
-                <p>Created: {{ project.date }}</p>
-                <p style="margin-top: 5px; font-size: 12px;">Files: {{ project.files | length }}</p>
+            <!-- Top Section: Info & Meta -->
+            <div class="project-header">
+                <h3 class="project-title">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span></h3>
+                <div class="project-meta">
+                    <span>Created: {{ project.date }}</span>
+                    <span>•</span>
+                    <span>Files: {{ project.files | length }}</span>
+                </div>
             </div>
             
-            <div class="actions" style="display: flex; gap: 10px;">
+            <!-- Bottom Section: Responsive Grid for Buttons -->
+            <div class="actions-grid">
                 {% for file in project.files %}
-                    {% if '.xlsx' in file or '.xls' in file %}
-                        <a href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" style="background: #3498db; color: white; padding: 8px 12px; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 13.3px;">↓ {{ file[:15] }}...</a>
+                    {% if '.xlsx' in file or '.xls' in file or '.pdf' in file %}
+                        <!-- The 'datatitle' attribute creates the hover tooltip -->
+                        <a class="tooltip-btn btn-action btn-download" href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" data-title="{{ file }}">
+                            ↓ {{ file[:15] }}{% if file|length > 15 %}...{% endif %}
+                        </a>
                     {% endif %}
                 {% endfor %}
                 
-                <form action="/delete/{{ project.name }}" method="POST" style="margin: 0;">
-                    <button type="submit" style="background: #e74c3c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;" onclick="return confirm('Are you sure you want to permanently delete this project?');">🗑️ Delete</button>
+                <form action="/delete/{{ project.name }}" method="POST" class="delete-form" style="display: flex; height: 100%;">
+                    <button type="submit" class="btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this project?');" title="Delete Project">
+                        🗑️ Delete
+                    </button>
                 </form>
             </div>
 
         </div>
-    <!-- THE LOOP MUST END HERE -->
     {% endfor %}
+</div>
 
 </body>
 </html>

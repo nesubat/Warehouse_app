@@ -2,38 +2,24 @@
 <html>
 <head>
     <title>Warehouse Matrix Engine</title>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; padding: 40px; color: #333; }
-        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-        h1 { color: #2c3e50; }
-        .upload-box { border: 2px dashed #bdc3c7; padding: 20px; text-align: center; border-radius: 8px; margin-bottom: 20px; background: #ecf0f1; }
-        button { background-color: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
-        button:hover { background-color: #2980b9; }
-        
-        .tab-card { background: #fff; padding: 20px; margin-bottom: 15px; border-radius: 6px; border: 1px solid #dcdde1; border-left: 5px solid #3498db; }
-        .tab-title { font-size: 18px; font-weight: bold; cursor: pointer; margin-bottom: 15px; display: block; color: #2c3e50; }
-        
-        .input-group { display: flex; gap: 20px; }
-        .input-field { display: flex; flex-direction: column; width: 100%; }
-        .input-field label { font-size: 13px; font-weight: bold; color: #7f8c8d; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;}
-        .input-field input { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px; }
-        
-        .blueprint-card { background: #f8f9fa; padding: 15px; margin-bottom: 15px; border-radius: 6px; border-left: 5px solid #2ecc71; border-right: 1px solid #dcdde1; border-top: 1px solid #dcdde1; border-bottom: 1px solid #dcdde1;}
-        .blueprint-error { border-left: 5px solid #e74c3c; }
-        .pack-list { margin-left: 20px; color: #555; }
-        .metrics-bar { display: flex; gap: 15px; background: #ecf0f1; padding: 10px; border-radius: 4px; margin-top: 10px; font-size: 14px; font-weight: bold; color: #2c3e50; }
-        .metric-badge { background: #fff; padding: 5px 10px; border-radius: 4px; border: 1px solid #bdc3c7; }
-    </style>
+    <!-- Link to external CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
+
+<!-- Sticky Header Navigation -->
+<nav class="sticky-nav">
+    <a href="/">🏠 Home</a>
+    <a href="/#dashboard-section">📊 Dashboard</a>
+</nav>
 
 <div class="container">
     <h1>📦 Packing Sheet Engine</h1>
     <div style="margin-bottom: 20px; display: flex; gap: 15px;">
-        <a href="/" style="text-decoration: none; color: #7f8c8d; font-weight: bold;">← Dashboard</a>
+        <a href="/" class="nav-link">← Home</a>
         {% if tabs or previews %}
-        <span style="color: #ccc;">|</span>
-        <a href="/matrix" style="text-decoration: none; color: #e74c3c; font-weight: bold;">↻ Start Over (Clear File)</a>
+        <span class="divider">|</span>
+        <a href="/matrix" class="nav-link-reset">↻ Start Over (Clear File)</a>
         {% endif %}
     </div>
 
@@ -80,16 +66,18 @@
         </div>
         {% endfor %}
         
-        <button type="submit" style="width: 100%; margin-bottom: 30px;">{% if previews %}Update Previews{% else %}Map Blueprints{% endif %}</button>
+        <button type="submit" class="btn-full">{% if previews %}Update Previews{% else %}Map Blueprints{% endif %}</button>
     </form>
     {% endif %}
 
-{% if previews %}
-    <hr style="border: 1px solid #ecf0f1; margin-bottom: 20px;">
+    {% if previews %}
+    <!-- Added ID for Preview Auto-Scroll -->
+    <hr class="hr-divider" id="preview-section">
     <h3>🗺️ Blueprint Previews</h3>
     <p>Verify the grid boundaries below. Edit coordinates above and click "Update Previews" if anything looks wrong.</p>
     
-    <form action="/generate" method="POST">
+    <!-- Added ID to the Generate Form -->
+    <form action="/generate" method="POST" id="generate-form">
         
         {% for bp in previews %}
             {% if bp.error %}
@@ -99,7 +87,7 @@
             </div>
             {% else %}
             <div class="blueprint-card">
-                <h4 style="margin-top: 0;">✅ {{ bp.sheet_name }}</h4>
+                <h4>✅ {{ bp.sheet_name }}</h4>
                 
                 <div class="metrics-bar">
                     <span class="metric-badge">Last Column: {{ bp.last_col }}</span>
@@ -107,11 +95,11 @@
                     <span class="metric-badge">Total Stores: {{ bp.total_stores }}</span>
                 </div>
 
-                <p style="margin-bottom: 5px; margin-top: 15px;"><strong>Stocks:</strong> {{ bp.stocks_map }}</p>
-                <p style="margin-bottom: 5px;"><strong>Packages:</strong> <span style="text-decoration: underline; text-decoration-color: red;">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
-                <ul class="pack-list" style="margin-top: 5px; list-style-type: none; padding-left: 0;">
+                <p class="blueprint-text"><strong>Stocks:</strong> {{ bp.stocks_map }}</p>
+                <p class="blueprint-subtext"><strong>Packages:</strong> <span class="blueprint-warning">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
+                <ul class="pack-list">
                     {% for pack in bp.packages_map %}
-                        <li style="margin-bottom: 5px;">
+                        <li>
                             <input type="checkbox" 
                                 name="packs_{{ bp.sheet_name }}" 
                                 value="{{ pack.name }}" 
@@ -127,7 +115,6 @@
         {% endfor %}
         
         <input type="hidden" name="filename" value="{{ filename }}">
-        <!-- Hidden field passing the single-pass blueprint to the backend -->
         <input type="hidden" name="blueprints_json" value="{{ blueprints_json }}">
         
         {% for tab in tabs %}
@@ -139,41 +126,88 @@
             <input type="hidden" name="job_{{ tab }}" value="{{ user_inputs[tab].job if user_inputs else 'E1' }}">
             <input type="hidden" name="store_{{ tab }}" value="{{ user_inputs[tab].store if user_inputs else 'A' }}">
         {% endfor %}
-        <div style="background: #fff; padding: 15px; border-radius: 6px; border: 1px solid #dcdde1; margin-top: 20px;">
-            <label style="font-weight: bold; color: #2c3e50; display: block; margin-bottom: 8px;">Name this Project / Job:</label>
-            <input type="text" name="project_name" placeholder="e.g. Campaign Name" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px;" required>
+        
+        <div class="project-name-group">
+            <label class="project-name-label">Name this Project / Job:</label>
+            <input type="text" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" required>
         </div>
         
-
-        <button type="submit" style="background-color: #2ecc71; width: 100%; margin-top: 20px; font-size: 18px;">Generate Packing Sheet</button>
+        <!-- Added ID to Generate Button -->
+        <button type="submit" class="btn-generate" id="generate-btn">Generate Packing Sheet</button>
     </form> 
     {% endif %}
 
     {% if generation_complete %}
-    <div style="margin-top: 30px; background: #e8f4f8; padding: 25px; border-radius: 8px; border: 1px solid #bee3f8; text-align: center;">
-        <h2 style="color: #2b6cb0; margin-top: 0;">🎉 Matrices Successfully Generated!</h2>
+    <div class="success-box">
+        <h2 class="success-title">🎉 Matrices Successfully Generated!</h2>
         <p>Your distro file has been safely parsed. Download your outputs below:</p>
         
-        <div style="display: flex; gap: 15px; justify-content: center; margin-top: 20px;">
-            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file1) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                📊 Download File 1<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file1 }}</span>
-            </a>
-            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file2) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                📊 Download File 2<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file2 }}</span>
-            </a>
-            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file3) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                📊 Download File 3<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file3 }}</span>
-            </a>
+        <div class="success-actions actions-grid">
+        {% for file in generated_files %}
+        <a href="{{ url_for('download_file', folder_name=project_folder, filename=file) }}" 
+           class="tooltip-btn btn-action btn-download download-btn" 
+           data-title="{{ file }}">
+            📊 Download File {{ loop.index }}<br>
+            <span class="download-sub">{{ file[:25] }}{% if file|length > 25 %}...{% endif %}</span>
+        </a>
+        {% endfor %}
         </div>
-        <div style="margin-top: 30px; display: flex; gap: 20px; justify-content: center;">
-            <a href="/matrix" style="color: #4a5568; font-size: 15px; text-decoration: none; font-weight: bold;">← Process Another File</a>
-            <span style="color: #bdc3c7;">|</span>
-            <a href="/" style="color: #3498db; font-size: 15px; text-decoration: none; font-weight: bold;">🏠 View on Dashboard</a>
+        <div class="success-nav">
+            <a href="/matrix" class="nav-bottom-link1">← Process Another File</a>
+            <span class="divider">|</span>
+            <a href="/#dashboard-section" class="nav-bottom-link2">🏠 View on Dashboard</a>
         </div>
+    </div>
     {% endif %}
 
 </div>
 
+<!-- Loading Overlay -->
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">Reading Matrix Data...</div>
+</div>
+
+<!-- Scripts for Overlay and Scrolling -->
+<script>
+    // 1. AUTO-SCROLL TO PREVIEW
+    document.addEventListener("DOMContentLoaded", function() {
+        const previewSection = document.getElementById('preview-section');
+        
+        if (previewSection) {
+            setTimeout(() => {
+                previewSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 100);
+        }
+    });
+
+    // 2. LOADING OVERLAY & TEXT CYCLER
+    const generateForm = document.getElementById('generate-form');
+    
+    if (generateForm) {
+        generateForm.addEventListener('submit', function() {
+            const btn = document.getElementById('generate-btn');
+            if (btn) btn.disabled = true;
+
+            document.getElementById('loading-overlay').style.display = 'flex';
+
+            const texts = [
+                "Mapping Signature Codes...",
+                "Formatting Excel Workbooks...",
+                "Finalizing Outputs...",
+                "Almost there..."
+            ];
+            
+            let currentIndex = 0;
+            const textElement = document.getElementById('loading-text');
+            
+            setInterval(() => {
+                textElement.innerText = texts[currentIndex];
+                currentIndex = (currentIndex + 1) % texts.length;
+            }, 2500);
+        });
+    }
+</script>
 
 </body>
 </html>
