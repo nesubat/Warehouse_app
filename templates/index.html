@@ -45,6 +45,37 @@
         </a>
     </div>
 </div>
+<h2>Recent Projects</h2>
+    
+    {% if not projects %}
+        <p style="color: #7f8c8d; font-style: italic;">No recent projects found. Click above to begin a job.</p>
+    {% endif %}
+
+    <!-- THE LOOP MUST START HERE -->
+    {% for project in projects %}
+        <div class="project-card" style="background: #f8f9fa; padding: 20px; border-radius: 6px; border: 1px solid #dcdde1; border-left: 5px solid #3498db; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+            
+            <div class="project-info">
+                <h3>{{ project.display_name }} <span style="color: #7f8c8d; font-size: 16px; font-weight: normal;">(Job: {{ project.job_id }})</span></h3>
+                <p>Created: {{ project.date }}</p>
+                <p style="margin-top: 5px; font-size: 12px;">Files: {{ project.files | length }}</p>
+            </div>
+            
+            <div class="actions" style="display: flex; gap: 10px;">
+                {% for file in project.files %}
+                    {% if '.xlsx' in file or '.xls' in file %}
+                        <a href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" style="background: #3498db; color: white; padding: 8px 12px; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 13.3px;">↓ {{ file[:15] }}...</a>
+                    {% endif %}
+                {% endfor %}
+                
+                <form action="/delete/{{ project.name }}" method="POST" style="margin: 0;">
+                    <button type="submit" style="background: #e74c3c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;" onclick="return confirm('Are you sure you want to permanently delete this project?');">🗑️ Delete</button>
+                </form>
+            </div>
+
+        </div>
+    <!-- THE LOOP MUST END HERE -->
+    {% endfor %}
 
 </body>
 </html>

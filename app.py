@@ -1,18 +1,47 @@
+import time
+from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, send_file
 import os
 import shutil
 import json
+import sys
+import stat
 from werkzeug.utils import secure_filename
-from matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs
+from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
 
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
+os.makedirs(PROJECTS_FOLDER, exist_ok=True)
+
+# --- 7-DAY AUTO CLEANUP function---
+def clean_old_projects():
+    """Deletes any project folder older than 7 days on system boot."""
+    if not os.path.exists(PROJECTS_FOLDER):
+        return
+        
+    current_time = time.time()
+    seven_days_in_seconds = 1
+    
+    for folder_name in os.listdir(PROJECTS_FOLDER):
+        folder_path = os.path.join(PROJECTS_FOLDER, folder_name)
+        
+        if os.path.isdir(folder_path):
+            creation_time = os.path.getctime(folder_path)
+            if (current_time - creation_time) > seven_days_in_seconds:
+                try:
+                    shutil.rmtree(folder_path, ignore_errors=True)
+                    print(f"Cleaned up old project: {folder_name}")
+                except Exception as e:
+                    print(f"Could not delete {folder_name}: {e}")
+
+clean_old_projects()  # Retry cleanup if deletion fails
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'input_files'
+app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# --- THE MAIN MENU ---
-@app.route('/')
-def index():
-    return render_template('index.html')
 
 # --- PART 1: MATRIX ENGINE ---
 @app.route('/matrix', methods=['GET', 'POST'])
@@ -98,28 +127,132 @@ def generate():
             "selected_packs": request.form.getlist(f"packs_{tab}") or request.form.getlist(f"packs_{safe_tab}")
         }
     
-    # Notice we now pass blueprints directly to the engine
-    file1_name, file2_name, file3_name = generate_all_outputs(filepath, filename, selected_tabs, user_inputs, blueprints)
+   # 1. Grab the user's custom project name from the form
+    raw_project_name = request.form.get('project_name', 'Untitled_Project')
+    safe_project_name = clean_file_name(raw_project_name)
+    
+    # 2. Extract the Job ID from the first selected tab's blueprint
+    first_tab = selected_tabs[0] if selected_tabs else None
+    job_id = "UNKNOWN"
+    if first_tab and first_tab in blueprints:
+        job_id = clean_file_name(blueprints[first_tab].get("raw_job_id", "UNKNOWN"))
+        
+    # 3. Create a clean, readable timestamp (YYMMDD_HHMM)
+    time_stamp = datetime.now().strftime("%y%m%d_%H%M")
+    
+    # 4. Build the final folder name: e.g., CampaignName_Job-12345_240725_1430
+    final_folder_name = f"{safe_project_name}_Job-{job_id}_{time_stamp}"
+    
+    project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
+    os.makedirs(project_dir, exist_ok=True)
+    
+    # 5. MOVE THE ORIGINAL FILE INTO THE PROJECT FOLDER
+    new_filepath = os.path.join(project_dir, filename)
+    if os.path.exists(filepath):
+        shutil.move(filepath, new_filepath)
+    
+    # 6. Pass the NEW filepath and project_dir to the engine
+    file1_name, file2_name, file3_name = generate_all_outputs(
+        new_filepath, filename, selected_tabs, user_inputs, blueprints, project_dir
+    )
     
     return render_template('matrix.html', 
                            generation_complete=True,
+                           project_folder=final_folder_name,
                            file1=file1_name,
                            file2=file2_name,
                            file3=file3_name)
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    """Secure endpoint allowing users to pull individual output sheets."""
-    # Use os.path.basename instead of secure_filename to prevent directory traversal
-    # without destroying the spaces in our file names!
+@app.route('/download/<folder_name>/<filename>')
+def download_file(folder_name, filename):
+    """Secure endpoint allowing users to pull individual output sheets from their specific project folder."""
+    safe_folder = os.path.basename(folder_name)
     safe_filename = os.path.basename(filename)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_folder, safe_filename)
     
     if os.path.exists(file_path):
         return send_file(file_path, as_attachment=True)
         
     return "File Not Found", 404
 
+
+@app.route('/')
+def dashboard():
+    """Main dashboard displaying job history."""
+    projects = []
+    if os.path.exists(app.config['UPLOAD_FOLDER']):
+        for folder_name in os.listdir(app.config['UPLOAD_FOLDER']):
+            folder_path = os.path.join(app.config['UPLOAD_FOLDER'], folder_name)
+            if os.path.isdir(folder_path):
+                
+                # Get files inside the project
+                files = os.listdir(folder_path)
+                
+                # --- THE ZOMBIE SWEEPER ---
+                if len(files) == 0:
+                    try:
+                        # If Windows has finally unlocked the folder, delete it permanently!
+                        shutil.rmdir(folder_path, ignore_errors=True)
+                    except Exception:
+                        pass
+                    continue # Always skip showing empty folders in the UI
+                
+                # Get human-readable date
+                timestamp = os.path.getctime(folder_path)
+                date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
+
+                # Extract the Job ID dynamically from File 2's name
+                job_id = "N/A"
+                for f in files:
+                    if f.startswith("Packing Sheet_"):
+                        job_id = f.replace("Packing Sheet_", "").rsplit(".", 1)[0]
+                        break
+                        
+                # --- CLEAN DISPLAY NAME ---
+                # Chops off "_Job-" and the timestamp for the UI header
+                display_name = folder_name.split('_Job-')[0] if '_Job-' in folder_name else folder_name
+                
+                projects.append({
+                    "name": folder_name,          # Keep full name for backend links
+                    "display_name": display_name, # Send clean name for the frontend
+                    "date": date_str,
+                    "timestamp": timestamp,
+                    "job_id": job_id,
+                    "files": files
+                })
+                
+    # Sort projects newest to oldest
+    projects.sort(key=lambda x: x['timestamp'], reverse=True)
+    
+    return render_template('index.html', projects=projects)
+
+@app.route('/delete/<folder_name>', methods=['POST'])
+def delete_project(folder_name):
+    """Aggressively deletes a specific project folder."""
+    safe_folder = os.path.basename(folder_name)
+    folder_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_folder)
+    
+    if os.path.exists(folder_path) and os.path.isdir(folder_path):
+        # 1. Forcefully delete all files inside and strip read-only locks
+        for root, dirs, files in os.walk(folder_path, topdown=False):
+            for name in files:
+                file_path = os.path.join(root, name)
+                try:
+                    os.chmod(file_path, stat.S_IWRITE)
+                    os.remove(file_path)
+                except Exception:
+                    pass
+        
+        # 2. Attempt to delete the main folder itself
+        try:
+            shutil.rmdir(folder_path, ignore_errors=True)
+        except Exception:
+            # If Windows still locks the empty folder (File Explorer is open),
+            # we just gracefully fail. The dashboard will automatically hide it anyway!
+            pass
+
+    return redirect(url_for('dashboard'))
 @app.route('/pdf')
 def pdf_shuffler():
     return "<h1 style='font-family:sans-serif; text-align:center; margin-top:50px;'>PDF Shuffler Engine Coming Soon!</h1><center><a href='/'>Go Back</a></center>"

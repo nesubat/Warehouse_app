@@ -15,7 +15,10 @@ import json
 def clean_file_name(raw_string):
     if not raw_string:
         return "UNKNOWN_JOB"
-    cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', str(raw_string))
+    # 1. Regex \s+ targets ALL weird whitespace (tabs, newlines, non-breaking spaces) and crushes them
+    string_val = re.sub(r'\s+', ' ', str(raw_string)).strip()
+    # 2. Strip invalid Windows filename characters
+    cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', string_val)
     return cleaned.strip()
 
 def scan_excel_tabs(file_path):
@@ -138,8 +141,7 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
 # THE CORE GENERATOR ENGINE (PHASE 1, 2, and 3)
 # =====================================================================
 
-def generate_all_outputs(file_path, original_filename, selected_tabs, user_inputs, tab_data_memory):
-    base_dir = os.path.dirname(file_path)
+def generate_all_outputs(file_path, original_filename, selected_tabs, user_inputs, tab_data_memory, project_dir):
     file_ext = os.path.splitext(file_path)[1]
     
     first_tab = selected_tabs[0]
@@ -160,9 +162,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     file2_name = f"Packing Sheet_{cleaned_job_id}{file_ext}"
     file3_name = f"Signature links_{cleaned_job_id}{file_ext}" if any_packs_selected else None
     
-    file1_path = os.path.join(base_dir, file1_name) if any_packs_selected else None
-    file2_path = os.path.join(base_dir, file2_name)
-    file3_path = os.path.join(base_dir, file3_name) if any_packs_selected else None
+    file1_path = os.path.join(project_dir, file1_name) if any_packs_selected else None
+    file2_path = os.path.join(project_dir, file2_name)
+    file3_path = os.path.join(project_dir, file3_name) if any_packs_selected else None
     
     if any_packs_selected:
         shutil.copy(file_path, file1_path)

@@ -30,7 +30,7 @@
 <div class="container">
     <h1>📦 Packing Sheet Engine</h1>
     <div style="margin-bottom: 20px; display: flex; gap: 15px;">
-        <a href="/" style="text-decoration: none; color: #7f8c8d; font-weight: bold;">← Main Menu</a>
+        <a href="/" style="text-decoration: none; color: #7f8c8d; font-weight: bold;">← Dashboard</a>
         {% if tabs or previews %}
         <span style="color: #ccc;">|</span>
         <a href="/matrix" style="text-decoration: none; color: #e74c3c; font-weight: bold;">↻ Start Over (Clear File)</a>
@@ -139,6 +139,11 @@
             <input type="hidden" name="job_{{ tab }}" value="{{ user_inputs[tab].job if user_inputs else 'E1' }}">
             <input type="hidden" name="store_{{ tab }}" value="{{ user_inputs[tab].store if user_inputs else 'A' }}">
         {% endfor %}
+        <div style="background: #fff; padding: 15px; border-radius: 6px; border: 1px solid #dcdde1; margin-top: 20px;">
+            <label style="font-weight: bold; color: #2c3e50; display: block; margin-bottom: 8px;">Name this Project / Job:</label>
+            <input type="text" name="project_name" placeholder="e.g. Campaign Name" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px;" required>
+        </div>
+        
 
         <button type="submit" style="background-color: #2ecc71; width: 100%; margin-top: 20px; font-size: 18px;">Generate Packing Sheet</button>
     </form> 
@@ -150,24 +155,25 @@
         <p>Your distro file has been safely parsed. Download your outputs below:</p>
         
         <div style="display: flex; gap: 15px; justify-content: center; margin-top: 20px;">
-            <a href="/download/{{ file1 }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file1) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
                 📊 Download File 1<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file1 }}</span>
             </a>
-            
-            <a href="/download/{{ file2 }}" style="background: #e67e22; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                🖨️ Download File 2<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file2 }}</span>
+            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file2) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                📊 Download File 2<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file2 }}</span>
             </a>
-            
-            <a href="/download/{{ file3 }}" style="background: #319795; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                🔗 Download File 3<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file3 }}</span>
+            <a href="{{ url_for('download_file', folder_name=project_folder, filename=file3) }}" style="background: #3182ce; color: white; padding: 12px 20px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                📊 Download File 3<br><span style="font-size: 11px; font-weight: normal; opacity: 0.8;">{{ file3 }}</span>
             </a>
         </div>
-        <br>
-        <a href="/matrix" style="color: #4a5568; font-size: 14px; text-decoration: none;">← Process Another File</a>
-    </div>
+        <div style="margin-top: 30px; display: flex; gap: 20px; justify-content: center;">
+            <a href="/matrix" style="color: #4a5568; font-size: 15px; text-decoration: none; font-weight: bold;">← Process Another File</a>
+            <span style="color: #bdc3c7;">|</span>
+            <a href="/" style="color: #3498db; font-size: 15px; text-decoration: none; font-weight: bold;">🏠 View on Dashboard</a>
+        </div>
     {% endif %}
 
 </div>
+
 
 </body>
 </html>
