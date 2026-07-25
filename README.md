@@ -42,6 +42,8 @@ This tool eliminates manual data entry by parsing raw distributions, mapping sto
 
 ## 🚀 Installation & Setup
 
+### Using VSCode
+
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/nesubat/Warehouse_app.git
@@ -61,3 +63,10 @@ pip install flask pandas openpyxl xlwings werkzeug xlsxwriter
 python app.py 
 ```
 The app will be available in your browser at http://127.0.0.1:5000
+
+### create .exec file
+```bash
+pyinstaller --onefile --name "WarehouseApp" app.py
+```
+
+
