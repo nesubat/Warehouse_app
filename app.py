@@ -248,15 +248,12 @@ def delete_project(folder_name):
                     os.remove(file_path)
                 except Exception:
                     pass
-        
-        # 2. Attempt to delete the main folder itself
         try:
-            shutil.rmdir(folder_path, ignore_errors=True)
-        except Exception:
-            # If Windows still locks the empty folder (File Explorer is open),
-            # we just gracefully fail. The dashboard will automatically hide it anyway!
-            pass
-
+            shutil.rmtree(folder_path)
+        except Exception as e1:
+            print(f"[DEBUG] FAILED: shutil.rmtree error -> {e1}")
+            print("[DEBUG] Falling back to Method B (os.rmdir)...")
+            
     return redirect(url_for('dashboard'))
 @app.route('/pdf')
 def pdf_shuffler():
