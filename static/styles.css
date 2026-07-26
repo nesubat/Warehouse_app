@@ -67,6 +67,12 @@ h2 { color: #2c3e50; }
 .nav-link-reset { text-decoration: none; color: #e74c3c; font-weight: bold; }
 .divider { color: #ccc; }
 
+.sticky-nav a.active {
+    color: #3498db; /* Highlights in your theme's light blue */
+    border-bottom: 2px solid #3498db; /* Adds a clean underline */
+    padding-bottom: 4px; /* Gives the underline some breathing room */
+}
+
 /* =========================================
    INDEX/DASHBOARD STYLES
 ========================================= */
@@ -187,6 +193,20 @@ h2 { color: #2c3e50; }
 .btn-delete:hover { background: #c0392b; }
 
 .delete-form { margin: 0; }
+
+
+/* Custom styling specifically for PDF download buttons */
+.btn-download.pdf-btn {
+    background-color: #e74c3c;
+    color: white;
+    border: 1px solid #c0392b;
+}
+
+.btn-download.pdf-btn:hover {
+    background-color: #c0392b;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(231, 76, 60, 0.3);
+}
 /* =========================================
    MATRIX ENGINE STYLES
 ========================================= */
@@ -332,6 +352,7 @@ button:hover { background-color: #2980b9; }
     transition: opacity 0.2s ease, visibility 0.2s ease;
     z-index: 100;
 }
+
 
 /* Show the tooltip and triangle on hover */
 .tooltip-btn:hover::after,

@@ -6,29 +6,36 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-
-<!-- Sticky Header Navigation -->
-<nav class="sticky-nav">
-    <a href="/">🏠 Home</a>
-    <a href="/#dashboard-section">📊 Dashboard</a>
-</nav>
+<!-- Consistent Top Navigation Bar -->
+    <div class="sticky-nav">
+        <!-- Notice there is no class="active" here anymore -->
+        <a href="/#home" id="nav-home">🏠 Home</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="/#dashboard-section" id="nav-dash">📊 Dashboard</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('matrix') }}">⚙️ Matrix Engine</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+    </div>
 
 <div class="container text-center">
-    <h1>Packaging Automation Suite</h1>
-    <p class="subtitle">Select a tool to begin processing your distributions.</p>
+    <div id="home">
+        <h1>Packaging Automation Suite</h1>
+        <p class="subtitle">Select a tool to begin processing your distributions.</p>
 
-    <div class="portal-grid">
-        <a href="/matrix" class="portal-card">
-            <div class="portal-icon">📊</div>
-            <div class="portal-title">1. Create Packing Sheets </div>
-            <div class="portal-desc">Upload raw Excel Distros, calculate allocations, and generate Packing sheets.</div>
-        </a>
+        <div class="portal-grid" id="home">
+            <a href="/matrix" class="portal-card">
+                <div class="portal-icon">📊</div>
+                <div class="portal-title">1. Create Packing Sheets </div>
+                <div class="portal-desc">Upload raw Excel Distros, calculate allocations, and generate Packing sheets.</div>
+            </a>
 
-        <a href="/pdf" class="portal-card pdf-card">
-            <div class="portal-icon">🖨️</div>
-            <div class="portal-title">2. Labels shuffler </div>
-            <div class="portal-desc">Upload raw labels and sort them perfectly based on Signature Code groups.</div>
-        </a>
+            <a href="/pdf" class="portal-card pdf-card">
+                <div class="portal-icon">🖨️</div>
+                <div class="portal-title">2. Labels shuffler </div>
+                <div class="portal-desc">Upload raw labels and sort them perfectly based on Signature Code groups.</div>
+            </a>
+        </div>
     </div>
 
     <!-- Added ID for anchor scrolling -->
@@ -55,11 +62,17 @@
             <!-- Bottom Section: Responsive Grid for Buttons -->
             <div class="actions-grid">
                 {% for file in project.files %}
-                    {% if '.xlsx' in file or '.xls' in file or '.pdf' in file %}
+                    {% if file.lower().endswith('.pdf') %}
+                            <a class="tooltip-btn btn-action btn-download pdf-btn" href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" data-title="{{ file }}">
+                                ↓ {{ file[:15] }}{% if file|length > 15 %}...{% endif %}
+                            </a>
+                        
+                    {% else %}
                         <!-- The 'datatitle' attribute creates the hover tooltip -->
                         <a class="tooltip-btn btn-action btn-download" href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" data-title="{{ file }}">
                             ↓ {{ file[:15] }}{% if file|length > 15 %}...{% endif %}
                         </a>
+                        
                     {% endif %}
                 {% endfor %}
                 
@@ -73,6 +86,38 @@
         </div>
     {% endfor %}
 </div>
+<script>
+        // --- 1. SCROLL SPY LOGIC ---
+        window.addEventListener('scroll', function() {
+            const dashSection = document.getElementById('dashboard-section');
+            const navHome = document.getElementById('nav-home');
+            const navDash = document.getElementById('nav-dash');
+
+            if (dashSection) {
+                if (window.scrollY >= dashSection.offsetTop - 150) {
+                    navHome.classList.remove('active');
+                    navDash.classList.add('active');
+                } else {
+                    navDash.classList.remove('active');
+                    navHome.classList.add('active');
+                }
+            }
+        });
+
+        // --- 2. SMOOTH SCROLL TO TOP FOR HOME BUTTON ---
+        const homeBtn = document.getElementById('nav-home');
+        if (homeBtn) {
+            homeBtn.addEventListener('click', function(e) {
+                e.preventDefault(); // Stop the default jumpy anchor link behavior
+                window.scrollTo({
+                    top: 0,
+                    behavior: 'smooth' // Adds a nice smooth gliding animation
+                });
+            });
+        }
+        window.dispatchEvent(new Event('scroll'));
+        window.dispatchEvent(new Event('click'));
+    </script>
 
 </body>
 </html>

@@ -1,7 +1,8 @@
-# Ignore all Excel files
+# Ignore all input files
 *.xlsx
 *.xls
 *.csv
+*.pdf
 
 # Ignore your uploads folder (if that's where test files go)
 input_files/

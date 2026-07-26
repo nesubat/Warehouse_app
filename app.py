@@ -6,7 +6,9 @@ import shutil
 import json
 import sys
 import stat
+import pandas as pd
 from werkzeug.utils import secure_filename
+from pdf_engine import process_standard_pdf, process_split_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
 
 if getattr(sys, 'frozen', False):
@@ -255,9 +257,137 @@ def delete_project(folder_name):
             print("[DEBUG] Falling back to Method B (os.rmdir)...")
             
     return redirect(url_for('dashboard'))
-@app.route('/pdf')
-def pdf_shuffler():
-    return "<h1 style='font-family:sans-serif; text-align:center; margin-top:50px;'>PDF Shuffler Engine Coming Soon!</h1><center><a href='/'>Go Back</a></center>"
+
+@app.route('/pdf', methods=['GET', 'POST'])
+def pdf_engine():
+    os.makedirs(PROJECTS_FOLDER, exist_ok=True)
+    
+    if request.method == 'POST':
+        step = request.form.get('step')
+        
+        # STEP 1: Process Excel and Project Name
+        if step == '1':
+            excel_file = request.files.get('excel_file')
+            existing_project = request.form.get('existing_project')
+            new_project = request.form.get('new_project')
+            
+            project_name = new_project.strip() if new_project and new_project.strip() else existing_project
+            
+            if not project_name:
+                return "Please select or enter a Project Name.", 400
+            
+            temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            excel_path = None
+            
+            # Scenario A: User uploaded a new file
+            if excel_file and excel_file.filename != '':
+                filename = secure_filename(excel_file.filename)
+                excel_path = os.path.join(temp_dir, filename)
+                excel_file.save(excel_path)
+            
+            # Scenario B: User didn't upload, but selected an existing project
+            elif existing_project:
+                # FIXED: Use os.path.basename instead of secure_filename to preserve exact folder names
+                project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(existing_project))
+                if os.path.exists(project_folder):
+                    for f in os.listdir(project_folder):
+                        # FIXED: Convert to lowercase to make the search case-insensitive
+                        if f.lower().startswith("signature links") and (f.lower().endswith(".xlsx") or f.lower().endswith(".xls")):
+                            src_path = os.path.join(project_folder, f)
+                            excel_path = os.path.join(temp_dir, f) # Keep original filename in temp
+                            shutil.copy2(src_path, excel_path)
+                            break
+                            
+            # Failsafe if no file was uploaded AND no file was found
+            if not excel_path or not os.path.exists(excel_path):
+                return "No Signature links file found or uploaded. Please try again.", 400
+            
+            tabs_data = {}
+            try:
+                xls = pd.ExcelFile(excel_path)
+                for sheet in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=sheet)
+                    packs = df.columns[1:].tolist()
+                    tabs_data[sheet] = packs
+            except Exception as e:
+                return f"Error reading Excel file: {e}", 500
+                
+            return render_template('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name)
+            
+        # STEP 2: Process the PDFs and Go to Success Screen
+        elif step == '2':
+            excel_path = request.form.get('excel_path')
+            project_name = request.form.get('project_name') 
+            temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
+            
+            try:
+                xls = pd.ExcelFile(excel_path)
+            except Exception as e:
+                return f"Could not load Excel file for mapping: {e}", 500
+
+            generated_files = []
+
+            for key, file in request.files.items():
+                if file and file.filename != '':
+                    parts = key.split('_', 2)
+                    if len(parts) == 3:
+                        tab_name = parts[1]
+                        pack_name = parts[2]
+                        
+                        split_key = f"split_{tab_name}_{pack_name}"
+                        is_split = request.form.get(split_key) == 'yes'
+                        
+                        df = pd.read_excel(xls, sheet_name=tab_name)
+                        store_mapping = {}
+                        
+                        for index, row in df.iterrows():
+                            store_cell = str(row.iloc[0]).strip()
+                            code_cell = str(row[pack_name]).strip()
+                            if store_cell != 'nan' and code_cell != 'nan':
+                                store_mapping[store_cell] = code_cell
+
+                        temp_pdf_path = os.path.join(temp_dir, secure_filename(file.filename))
+                        file.save(temp_pdf_path)
+                        
+                        # FIXED: Use os.path.basename here as well to ensure files save in the exact existing folder
+                        project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
+                        os.makedirs(project_folder, exist_ok=True)
+                        
+                        final_filename = f"{tab_name}_{pack_name}_Shuffled.pdf"
+                        output_pdf_path = os.path.join(project_folder, final_filename)
+                        
+                        if is_split:
+                            process_split_pdf(temp_pdf_path, store_mapping, output_pdf_path)
+                        else:
+                            process_standard_pdf(temp_pdf_path, store_mapping, output_pdf_path)
+                            
+                        generated_files.append(final_filename)
+
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+
+            return render_template('pdf.html', step=3, project_name=project_name, generated_files=generated_files)
+
+    # GET REQUEST: Fetch existing projects AND look for their Signature links files
+    projects_info = {}
+    if os.path.exists(PROJECTS_FOLDER):
+        for folder_name in os.listdir(PROJECTS_FOLDER):
+            folder_path = os.path.join(PROJECTS_FOLDER, folder_name)
+            if os.path.isdir(folder_path):
+                sig_file = None
+                for f in os.listdir(folder_path):
+                    # FIXED: Case-insensitive check for the GET request as well
+                    if f.lower().startswith("signature links") and (f.lower().endswith(".xlsx") or f.lower().endswith(".xls")):
+                        sig_file = f
+                        break
+                projects_info[folder_name] = sig_file
+                
+    projects_json = json.dumps(projects_info)
+    return render_template('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -7,11 +7,16 @@
 </head>
 <body>
 
-<!-- Sticky Header Navigation -->
-<nav class="sticky-nav">
-    <a href="/">🏠 Home</a>
-    <a href="/#dashboard-section">📊 Dashboard</a>
-</nav>
+<!-- Consistent Top Navigation Bar -->
+    <div class="sticky-nav">
+        <a href="/#home">🏠 Home</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="/#dashboard-section">📊 Dashboard</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('matrix') }}" class="active">⚙️ Matrix Engine</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+    </div>
 
 <div class="container">
     <h1>📦 Packing Sheet Engine</h1>
