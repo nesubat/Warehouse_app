@@ -96,10 +96,11 @@ def process_split_pdf(input_pdf_path, store_mapping, output_pdf_path):
     
     page_width = first_page.rect.width
     page_height = first_page.rect.height
+    half_height = page_height / 2
     
     # Define the digital "Crop Boxes" (Top Half and Bottom Half)
-    top_rect = fitz.Rect(0, 0, page_width, page_height / 2)
-    bottom_rect = fitz.Rect(0, page_height / 2, page_width, page_height)
+    top_rect = fitz.Rect(0, 0, page_width, half_height)
+    bottom_rect = fitz.Rect(0, half_height, page_width, page_height)
     
     # We will store every valid half-page as a dictionary inside this array
     all_extracted_halves = []
@@ -107,12 +108,19 @@ def process_split_pdf(input_pdf_path, store_mapping, output_pdf_path):
     # 2. SCAN AND SLICE EVERY PAGE
     for page_num in range(len(doc)):
         page = doc[page_num]
+
+        # 2. Define the exact bottom-left targeted areas (Bounding Boxes)
+        # We target the left 50% of the page, and the bottom ~60 pixels of each half
+        top_store_rect = fitz.Rect(0, half_height - 60, page_width / 2, half_height)
+        bottom_store_rect = fitz.Rect(0, page_height - 60, page_width / 2, page_height)
         
         # Read the text strictly within the top half
-        top_text = page.get_text("text", clip=top_rect).lower()
+        top_text = page.get_text("text", clip=top_store_rect).lower()
+        print(f"\n[DEBUG] Standard Page {page_num + 1} Extracted Text:\n{top_text}\n")
         # Read the text strictly within the bottom half
-        bottom_text = page.get_text("text", clip=bottom_rect).lower()
-        
+        bottom_text = page.get_text("text", clip=bottom_store_rect).lower()
+        print(f"\n[DEBUG] Standard Page {page_num + 1} Extracted Text:\n{bottom_text}\n")
+
         # Check Top Half
         for store_name in store_mapping.keys():
             if store_name.lower() in top_text:

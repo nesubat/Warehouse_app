@@ -265,7 +265,7 @@ def pdf_engine():
     if request.method == 'POST':
         step = request.form.get('step')
         
-        # STEP 1: Process Excel and Project Name
+       # STEP 1: Process Excel and Project Name
         if step == '1':
             excel_file = request.files.get('excel_file')
             existing_project = request.form.get('existing_project')
@@ -276,28 +276,24 @@ def pdf_engine():
             if not project_name:
                 return "Please select or enter a Project Name.", 400
             
-            temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
-            os.makedirs(temp_dir, exist_ok=True)
+            # --- THE FIX: Point directly to the final Project Folder ---
+            project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
+            os.makedirs(project_folder, exist_ok=True)
             
             excel_path = None
             
-            # Scenario A: User uploaded a new file
+            # Scenario A: User uploaded a new file (Save it directly to the project folder)
             if excel_file and excel_file.filename != '':
                 filename = secure_filename(excel_file.filename)
-                excel_path = os.path.join(temp_dir, filename)
+                excel_path = os.path.join(project_folder, filename)
                 excel_file.save(excel_path)
             
-            # Scenario B: User didn't upload, but selected an existing project
+            # Scenario B: Existing project selected (Just point to the file already in the folder!)
             elif existing_project:
-                # FIXED: Use os.path.basename instead of secure_filename to preserve exact folder names
-                project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(existing_project))
                 if os.path.exists(project_folder):
                     for f in os.listdir(project_folder):
-                        # FIXED: Convert to lowercase to make the search case-insensitive
                         if f.lower().startswith("signature links") and (f.lower().endswith(".xlsx") or f.lower().endswith(".xls")):
-                            src_path = os.path.join(project_folder, f)
-                            excel_path = os.path.join(temp_dir, f) # Keep original filename in temp
-                            shutil.copy2(src_path, excel_path)
+                            excel_path = os.path.join(project_folder, f)
                             break
                             
             # Failsafe if no file was uploaded AND no file was found
@@ -321,6 +317,7 @@ def pdf_engine():
             excel_path = request.form.get('excel_path')
             project_name = request.form.get('project_name') 
             temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
+            os.makedirs(temp_dir, exist_ok=True)
             
             try:
                 xls = pd.ExcelFile(excel_path)
@@ -354,8 +351,11 @@ def pdf_engine():
                         # FIXED: Use os.path.basename here as well to ensure files save in the exact existing folder
                         project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
                         os.makedirs(project_folder, exist_ok=True)
+                        safe_orig = secure_filename(file.filename)
+                        name_part, ext_part = os.path.splitext(safe_orig) #extracting the name and extension
                         
-                        final_filename = f"{tab_name}_{pack_name}_Shuffled.pdf"
+                        # e.g., p1.pdf -> p1_Shuffled.pdf
+                        final_filename = f"{name_part}_Shuffled{ext_part}"
                         output_pdf_path = os.path.join(project_folder, final_filename)
                         
                         if is_split:
