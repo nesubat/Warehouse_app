@@ -245,8 +245,12 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 if any_packs_selected and is_pack_selected:
                     col_letter = get_column_letter(p_start)
                     sheet1_xw.range(f"{col_letter}:{col_letter}").insert('right')
-                    sheet1_xw.range(f"{col_letter}:{col_letter}").color = None 
-                    sheet1_xw.range(f"{col_letter}:{col_letter}").api.EntireColumn.AutoFit()
+                    sheet1_xw.range(f"{col_letter}:{col_letter}").color = None
+                    code_column =  sheet1_xw.range(f"{col_letter}:{col_letter}").api.EntireColumn.AutoFit()
+                    code_column.AutoFit()
+                    code_column.font.color = (0, 0, 0)
+                    code_column.api.HorizontalAlignment = -4108
+                    
                     
                     sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").value = f"Code for {p_name}"
                     pack_group_row = tab_info["pack_group_row"]

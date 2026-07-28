@@ -8,7 +8,7 @@ import sys
 import stat
 import pandas as pd
 from werkzeug.utils import secure_filename
-from pdf_engine import process_standard_pdf, process_split_pdf
+from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
 
 if getattr(sys, 'frozen', False):
@@ -18,6 +18,8 @@ else:
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
+temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
+os.makedirs(temp_dir, exist_ok=True)
 
 # --- 7-DAY AUTO CLEANUP function---
 def clean_old_projects():
@@ -45,7 +47,9 @@ app = Flask(__name__,
             template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
 app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
+app.config['TEMP_FOLDER'] = temp_dir
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 
 # --- PART 1: MATRIX ENGINE ---
 @app.route('/matrix', methods=['GET', 'POST'])
@@ -302,11 +306,11 @@ def pdf_engine():
             
             tabs_data = {}
             try:
-                xls = pd.ExcelFile(excel_path)
-                for sheet in xls.sheet_names:
-                    df = pd.read_excel(xls, sheet_name=sheet)
-                    packs = df.columns[1:].tolist()
-                    tabs_data[sheet] = packs
+                with pd.ExcelFile(excel_path) as xls:
+                    for sheet in xls.sheet_names:
+                        df = pd.read_excel(xls, sheet_name=sheet)
+                        packs = df.columns[1:].tolist()
+                        tabs_data[sheet] = packs
             except Exception as e:
                 return f"Error reading Excel file: {e}", 500
                 
@@ -318,9 +322,13 @@ def pdf_engine():
             project_name = request.form.get('project_name') 
             temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
             os.makedirs(temp_dir, exist_ok=True)
+
+            all_sheets_data = {}
             
             try:
-                xls = pd.ExcelFile(excel_path)
+                with pd.ExcelFile(excel_path) as xls:
+                    for sheet in xls.sheet_names:
+                        all_sheets_data[sheet] = pd.read_excel(xls, sheet_name=sheet)
             except Exception as e:
                 return f"Could not load Excel file for mapping: {e}", 500
 
@@ -333,10 +341,10 @@ def pdf_engine():
                         tab_name = parts[1]
                         pack_name = parts[2]
                         
-                        split_key = f"split_{tab_name}_{pack_name}"
-                        is_split = request.form.get(split_key) == 'yes'
-                        
-                        df = pd.read_excel(xls, sheet_name=tab_name)
+                        try:
+                            df = all_sheets_data.get(tab_name)
+                        except Exception as e:
+                            return f"Error reading Excel file for sheet {tab_name}: {e}", 500
                         store_mapping = {}
                         
                         for index, row in df.iterrows():
@@ -353,15 +361,16 @@ def pdf_engine():
                         os.makedirs(project_folder, exist_ok=True)
                         safe_orig = secure_filename(file.filename)
                         name_part, ext_part = os.path.splitext(safe_orig) #extracting the name and extension
-                        
                         # e.g., p1.pdf -> p1_Shuffled.pdf
                         final_filename = f"{name_part}_Shuffled{ext_part}"
                         output_pdf_path = os.path.join(project_folder, final_filename)
                         
-                        if is_split:
-                            process_split_pdf(temp_pdf_path, store_mapping, output_pdf_path)
-                        else:
-                            process_standard_pdf(temp_pdf_path, store_mapping, output_pdf_path)
+                        process_and_shuffle_pdf(
+                            input_pdf_path=temp_pdf_path, 
+                            store_mapping=store_mapping, 
+                            output_pdf_path=output_pdf_path, 
+                            signature_header=pack_name 
+                            )
                             
                         generated_files.append(final_filename)
 
