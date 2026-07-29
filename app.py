@@ -274,8 +274,12 @@ def pdf_engine():
             excel_file = request.files.get('excel_file')
             existing_project = request.form.get('existing_project')
             new_project = request.form.get('new_project')
+            time_stamp = datetime.now().strftime("%y%m%d_%H%M")
+            safe_project_name = clean_file_name(new_project)
+            final_folder_name = f"{safe_project_name}_{time_stamp}"
+
             
-            project_name = new_project.strip() if new_project and new_project.strip() else existing_project
+            project_name = final_folder_name.strip() if new_project and new_project.strip() else existing_project
             
             if not project_name:
                 return "Please select or enter a Project Name.", 400

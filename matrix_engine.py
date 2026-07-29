@@ -283,7 +283,23 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     target_col.color = (255, 255, 255)
                     target_col.font.color = (0, 0, 0)
                     target_col.api.EntireColumn.HorizontalAlignment = -4108
-                    
+                    # 1. Define where the data starts and ends
+                    start_row = tab_info["pack_group_row"] + 1
+                    end_row = tab_info["last_row"]
+
+                    # 2. Grab just the data cells in your newly inserted column
+                    data_block = sheet1_xw.range(f"{col_letter}{start_row}:{col_letter}{end_row}")
+
+                    # 3. Apply standard 'All Borders'
+                    data_block.api.Borders.LineStyle = 1  # 1 = xlContinuous (Solid Line)
+                    data_block.api.Borders.Weight = 2     # 2 = xlThin (Standard Thickness)
+
+                    # (Optional) If you also want to make sure the text is centered and black:
+                    data_block.font.color = (0, 0, 0)
+                    data_block.font.bold 
+                    data_block.api.HorizontalAlignment = -4108
+                    data_block.api.VerticalAlignment = -4108
+                                        
                     new_pack_range = sheet1_xw.range((pack_group_row, p_start), (pack_group_row, p_end + 1))
                     
                     try:
