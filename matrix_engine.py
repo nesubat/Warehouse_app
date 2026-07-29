@@ -402,6 +402,10 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     
                     data_range.value = write_data
                     data_range.font.size = 20
+                    data_range.api.HorizontalAlignment = -4108
+                    data_range.api.VerticalAlignment = -4108
+                    data_range.font.bold = True
+                    data_range.font.color = (0, 0, 0)
                     
                     # Banded Rows
                     for r_offset in range(len(write_data)):
@@ -418,6 +422,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                             
             end_del_col_letter = get_column_letter(tab_info["last_stock_col"] + 1)
             sheet2.range(f"A:{end_del_col_letter}").api.EntireColumn.Delete()
+
+            # Preparing the stock summary for the Packaging Stocks sheet
 
         stock_sheet = wb2_xw.sheets.add(name="Packaging Stocks", after=wb2_xw.sheets[-1])
         out_col = 1

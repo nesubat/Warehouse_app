@@ -19,7 +19,7 @@
         <span class="divider" style="color: #ccc;">|</span>
         <a href="/#dashboard-section" id="nav-dash">📊 Dashboard</a>
         <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('matrix') }}">⚙️ Matrix Engine</a>
+        <a href="{{ url_for('matrix') }}">⚙️ Distribution Mapper</a>
         <span class="divider" style="color: #ccc;">|</span>
         <a href="{{ url_for('pdf_engine') }}" class="active">🏷️ Label Shuffler</a>
     </div>
@@ -103,18 +103,37 @@
                     
                     <div class="input-field" style="margin-top: 15px;">
                         <label class="project-name-label">Attach PDF Label File (Leave blank to skip)</label>
-                        <input type="file" name="pdf_{{ tab }}_{{ pack }}" accept=".pdf" class="project-name-input">
+                        
+                        <!-- THE FIX: Use '---' as the separator to prevent underscore conflicts -->
+                        <input type="file" name="pdf---{{ tab }}---{{ pack }}" accept=".pdf" class="project-name-input pdf-file-input" data-pack="{{ tab }}---{{ pack }}">
+                        
+                        <div id="divider-container-{{ tab }}---{{ pack }}" style="display: none; margin-top: 8px; margin-left: 20px;">
+                            <label style="display: flex; align-items: center; gap: 8px; color: #34495e; font-size: 14px; cursor: pointer;">
+                                <input type="checkbox" name="divider---{{ tab }}---{{ pack }}" class="pack-divider-checkbox" value="true" style="width: 16px; height: 16px; accent-color: #f1c40f;">
+                                Add yellow divider sheets to this pack
+                            </label>
+                        </div>
                     </div>
                 </div>
                 {% endfor %}
             </div>
             {% endfor %}
             
+            <!-- MASTER CHECKBOX -->
+            <div style="margin-bottom: 20px; padding: 15px; background: #fffde7; border: 1px solid #f1c40f; border-radius: 6px; display: inline-block;">
+                <label style="display: flex; align-items: center; gap: 8px; color: #2c3e50; font-weight: bold; cursor: pointer; margin: 0;">
+                    <input type="checkbox" id="master-divider-checkbox" style="width: 18px; height: 18px; accent-color: #f1c40f;">
+                    Insert Divider Sheets for ALL attached PDFs
+                </label>
+            </div>
+
+            
             <button type="submit" class="btn-generate">Shuffle & Stitch Labels</button>
         </form>
         {% endif %}
         <!-- STEP 3: Success & Download Links -->
         {% if step == 3 %}
+        
         <div class="success-box">
             <h2 class="success-title">🎉 Labels Shuffled Successfully!</h2>
             <p>Your PDFs have been processed and saved to project: <strong style="color: #2c3e50;">{{ project_name }}</strong></p>
@@ -232,6 +251,41 @@
             
             validateForm();
         });
+        
+    document.addEventListener("DOMContentLoaded", function() {
+        const fileInputs = document.querySelectorAll(".pdf-file-input");
+        const masterCheckbox = document.getElementById("master-divider-checkbox");
+        const packCheckboxes = document.querySelectorAll(".pack-divider-checkbox");
+
+        // 1. Listen for File Uploads to Show/Hide individual checkboxes
+        fileInputs.forEach(input => {
+            input.addEventListener("change", function() {
+                const packName = this.getAttribute("data-pack");
+                const container = document.getElementById("divider-container-" + packName);
+                const checkbox = container.querySelector(".pack-divider-checkbox");
+                
+                if (this.files && this.files.length > 0) {
+                    container.style.display = "block"; // Reveal it
+                } else {
+                    container.style.display = "none";  // Hide it
+                    checkbox.checked = false;          // Uncheck it if hidden
+                }
+            });
+        });
+
+        // 2. Master Checkbox Logic (Only affects VISIBLE checkboxes)
+        masterCheckbox.addEventListener("change", function() {
+            const isChecked = this.checked;
+            packCheckboxes.forEach(checkbox => {
+                // Only tick it if the container is currently visible (meaning a file is attached)
+                const container = checkbox.closest("div");
+                if (container.style.display === "block") {
+                    checkbox.checked = isChecked;
+                }
+            });
+        });
+    });
+
     </script>
 </body>
 </html>

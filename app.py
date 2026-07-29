@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, send_file
+from flask import Flask, render_template, request, redirect, session, url_for, send_file
 import os
 import shutil
 import json
@@ -322,6 +322,9 @@ def pdf_engine():
             project_name = request.form.get('project_name') 
             temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
             os.makedirs(temp_dir, exist_ok=True)
+            # ---> THE FIX: Define project_folder HERE, before any loops!
+            project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
+            os.makedirs(project_folder, exist_ok=True)
 
             all_sheets_data = {}
             
@@ -334,44 +337,64 @@ def pdf_engine():
 
             generated_files = []
 
+            
+                # Loop through ONLY the files that were actually uploaded
             for key, file in request.files.items():
-                if file and file.filename != '':
-                    parts = key.split('_', 2)
+                
+                # THE FIX: Look for the '---' separator
+                if key.startswith('pdf---') and file and file.filename != '':
+                    parts = key.split('---')
+                    
                     if len(parts) == 3:
                         tab_name = parts[1]
                         pack_name = parts[2]
                         
-                        try:
-                            df = all_sheets_data.get(tab_name)
-                        except Exception as e:
-                            return f"Error reading Excel file for sheet {tab_name}: {e}", 500
+                        df = all_sheets_data.get(tab_name)
+                        
+                        # Failsafe: Prevent crashes if the tab name is completely invalid
+                        if df is None:
+                            print(f"[ERROR] Could not find sheet '{tab_name}' in Excel data.")
+                            continue 
+                        
+                        # 1. Build the mapping for THIS specific tab and pack
                         store_mapping = {}
                         
+                        # Failsafe: Prevent KeyErrors if the pack name isn't found
+                        if pack_name not in df.columns:
+                            print(f"[ERROR] Pack '{pack_name}' not found in Tab '{tab_name}'.")
+                            continue
+                            
                         for index, row in df.iterrows():
                             store_cell = str(row.iloc[0]).strip()
                             code_cell = str(row[pack_name]).strip()
+                            
                             if store_cell != 'nan' and code_cell != 'nan':
                                 store_mapping[store_cell] = code_cell
 
+                        # 2. Check the divider flag from the form
+                        checkbox_key = f"divider---{tab_name}---{pack_name}"
+                        add_dividers_flag = request.form.get(checkbox_key) == "true"
+                        
+                        # 3. Generate the clean "_Shuffled" filename
+                        safe_orig = secure_filename(file.filename)
+                        name_part, ext_part = os.path.splitext(safe_orig) 
+                        final_filename = f"{name_part}_Shuffled{ext_part}"
+                        
+                        # 4. Define Paths & Save temp file
                         temp_pdf_path = os.path.join(temp_dir, secure_filename(file.filename))
+                        output_pdf_path = os.path.join(project_folder, final_filename)
                         file.save(temp_pdf_path)
                         
-                        # FIXED: Use os.path.basename here as well to ensure files save in the exact existing folder
-                        project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
-                        os.makedirs(project_folder, exist_ok=True)
-                        safe_orig = secure_filename(file.filename)
-                        name_part, ext_part = os.path.splitext(safe_orig) #extracting the name and extension
-                        # e.g., p1.pdf -> p1_Shuffled.pdf
-                        final_filename = f"{name_part}_Shuffled{ext_part}"
-                        output_pdf_path = os.path.join(project_folder, final_filename)
-                        
+                        # 5. Run the Engine!
                         process_and_shuffle_pdf(
-                            input_pdf_path=temp_pdf_path, 
-                            store_mapping=store_mapping, 
-                            output_pdf_path=output_pdf_path, 
-                            signature_header=pack_name 
-                            )
-                            
+                            input_pdf_path=temp_pdf_path,
+                            store_mapping=store_mapping,
+                            output_pdf_path=output_pdf_path,
+                            signature_header=pack_name,
+                            add_dividers=add_dividers_flag
+                        )
+                        
+                        # Log it for the download screen
                         generated_files.append(final_filename)
 
             try:

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Warehouse Matrix Engine</title>
+    <title>Warehouse Distribution Mapper</title>
     <!-- Link to external CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
@@ -13,13 +13,13 @@
         <span class="divider" style="color: #ccc;">|</span>
         <a href="/#dashboard-section">📊 Dashboard</a>
         <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('matrix') }}" class="active">⚙️ Matrix Engine</a>
+        <a href="{{ url_for('matrix') }}" class="active">⚙️ Distribution Mapper</a>
         <span class="divider" style="color: #ccc;">|</span>
         <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
     </div>
 
 <div class="container">
-    <h1>📦 Packing Sheet Engine</h1>
+    <h1>📦 Distribution Mapper</h1>
     <div style="margin-bottom: 20px; display: flex; gap: 15px;">
         <a href="/" class="nav-link">← Home</a>
         {% if tabs or previews %}
@@ -29,6 +29,15 @@
     </div>
 
     {% if not tabs and not generation_complete %}
+    <div class="instructions-box">
+            <h4 class="instructions-title">⚠️ Required Spreadsheet Formatting</h4>
+            <ul class="instructions-list">
+                <li><strong>Store Names:</strong> Must be in a single, continuous column. A blank cell tells the engine the store list has ended.</li>
+                <li><strong>Pack Headers:</strong> The row directly above your data must contain your pack names. The system uses merged cells to determine how many columns a pack spans.</li>
+                <li><strong>Data Entry:</strong> Use numbers for quantities. Dashes (-) and periods (.) are safely ignored as zero. Words (e.g., "J468791-01 or Banners") will generate unique signature codes.</li>
+                <li><strong>File Type:</strong> Only standard <strong>.xlsx</strong> or <strong>.xls</strong> files are supported.</li>
+            </ul>
+        </div>
     <div class="upload-box">
         <p>Upload a Distribution file to begin.</p>
         <form method="POST" enctype="multipart/form-data">
