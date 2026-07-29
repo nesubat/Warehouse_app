@@ -139,7 +139,7 @@ def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, sign
                     audit_page = audit_doc.new_page(width=page_width, height=half_height)
                     y_pos = 30
         
-        audit_page.insert_text((30, y_pos), f"BLANK HALVES: {len(blank_halves)}", fontsize=14, fontname=font_style)
+                audit_page.insert_text((30, y_pos), f"BLANK HALVES: {len(blank_halves)}", fontsize=14, fontname=font_style)
 
         
         # Register all generated audit pages into our master stacking system

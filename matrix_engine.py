@@ -20,6 +20,31 @@ def clean_file_name(raw_string):
     # 2. Strip invalid Windows filename characters
     cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', string_val)
     return cleaned.strip()
+def sanitize_cell(val):
+    """Cleans messy Excel data into strict numbers, text, or zero."""
+    if val is None: return 0
+    if isinstance(val, (int, float)): return val
+    
+    val_str = str(val).strip()
+    if val_str in ("", "-", ".", "0", "0.0"): return 0
+    
+    try:
+        num = float(val_str)
+        return int(num) if num.is_integer() else num
+    except ValueError:
+        return val_str
+
+def sort_key(sig):
+    """Assigns a 3-part identity to prevent crashes: (Priority, Number, Text)"""
+    keys = []
+    for val in sig:
+        if val == 0:
+            keys.append((3, 0, ""))                 
+        elif isinstance(val, (int, float)):
+            keys.append((1, val, ""))               
+        else:
+            keys.append((2, 0, str(val).lower()))   
+    return tuple(keys)
 
 def scan_excel_tabs(file_path):
     excel_file = pd.ExcelFile(file_path)
@@ -179,6 +204,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     
     tab_summaries = {}
     app = xw.App(visible=False)
+    app.display_alerts = False
     
     try:
         # =====================================================
@@ -212,14 +238,14 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 store_rows = range(tab_info["pack_group_row"] + 1, tab_info["last_row"] + 1)
                 
                 for r in store_rows:
-                    sig = tuple(raw_values[r-1][c-1] or 0 for c in range(p_start, p_end + 1))
+                    sig = tuple(sanitize_cell(raw_values[r-1][c-1]) for c in range(p_start, p_end + 1))
                     if all(v == 0 for v in sig):
                         row_signatures.append((r, None))
                     else:
                         row_signatures.append((r, sig))
                     
                 unique_sigs = list(set(sig for r, sig in row_signatures if sig is not None))
-                unique_sigs.sort(key=lambda sig: tuple(float('inf') if val == 0 else val for val in sig))
+                unique_sigs.sort(key=sort_key)
                 
                 sig_to_letter = {}
                 summary_counts = {sig: 0 for sig in unique_sigs}
@@ -245,17 +271,18 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 if any_packs_selected and is_pack_selected:
                     col_letter = get_column_letter(p_start)
                     sheet1_xw.range(f"{col_letter}:{col_letter}").insert('right')
-                    sheet1_xw.range(f"{col_letter}:{col_letter}").color = None
-                    code_column =  sheet1_xw.range(f"{col_letter}:{col_letter}").api.EntireColumn.AutoFit()
-                    code_column.AutoFit()
-                    code_column.font.color = (0, 0, 0)
-                    code_column.api.HorizontalAlignment = -4108
-                    
+                    target_col =sheet1_xw.range(f"{col_letter}:{col_letter}")
                     
                     sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").value = f"Code for {p_name}"
+                    sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").color = (0, 0, 0)
+                    sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").autofit()
                     pack_group_row = tab_info["pack_group_row"]
                     pack_name_cell = sheet1_xw.range((pack_group_row, p_start+1))
                     original_color = pack_name_cell.color
+                    target_col.api.FormatConditions.Delete()
+                    target_col.color = (255, 255, 255)
+                    target_col.font.color = (0, 0, 0)
+                    target_col.api.EntireColumn.HorizontalAlignment = -4108
                     
                     new_pack_range = sheet1_xw.range((pack_group_row, p_start), (pack_group_row, p_end + 1))
                     
@@ -285,8 +312,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     if batch_data:
                         start_r = row_signatures[0][0] # Grab the very first row number
                         sheet1_xw.range(f"{col_letter}{start_r}").value = batch_data
-                        # setting the column size to auto-fit after the batch write
-                    sheet1_xw.range(f"{col_letter}:{col_letter}").api.EntireColumn.AutoFit()
+                        
                             
                 tab_summaries[tab_name].append({
                     "name": p_name,

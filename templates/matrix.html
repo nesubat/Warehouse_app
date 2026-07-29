@@ -103,9 +103,13 @@
                 <p class="blueprint-text"><strong>Stocks:</strong> {{ bp.stocks_map }}</p>
                 <p class="blueprint-subtext"><strong>Packages:</strong> <span class="blueprint-warning">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
                 <ul class="pack-list">
+                    <div style="margin-bottom: 10px; font-weight: bold;">
+                        <input type="checkbox" id="selectAllPacks" onclick="toggleAllPacks(this)">
+                        <label for="selectAllPacks">Select All Packs</label>
+                    </div>
                     {% for pack in bp.packages_map %}
                         <li>
-                            <input type="checkbox" 
+                            <input type="checkbox" class="pack-checkbox"
                                 name="packs_{{ bp.sheet_name }}" 
                                 value="{{ pack.name }}" 
                                 id="pack_{{ bp.sheet_name }}_{{ pack.name }}">
@@ -210,6 +214,15 @@
                 textElement.innerText = texts[currentIndex];
                 currentIndex = (currentIndex + 1) % texts.length;
             }, 2500);
+        });
+    }
+    function toggleAllPacks(masterCheckbox) {
+        // 1. Find all checkboxes that have the 'pack-checkbox' class
+        const packCheckboxes = document.querySelectorAll('.pack-checkbox');
+        
+        // 2. Loop through them and set their checked status to match the master checkbox
+        packCheckboxes.forEach(function(checkbox) {
+            checkbox.checked = masterCheckbox.checked;
         });
     }
 </script>
