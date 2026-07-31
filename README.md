@@ -56,7 +56,7 @@ venv\Scripts\activate
 ```
 ### 3. Install dependencies
 ```bash
-pip install flask pandas openpyxl xlwings werkzeug xlsxwriter 
+pip install flask pandas openpyxl xlwings werkzeug xlsxwriter fitz pyinstaller 
 ```
 ### 4.Run application
 ```bash
