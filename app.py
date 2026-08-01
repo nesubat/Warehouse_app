@@ -6,6 +6,7 @@ import shutil
 import json
 import sys
 import stat
+import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
@@ -212,6 +213,12 @@ def dashboard():
                     except Exception:
                         pass
                     continue # Always skip showing empty folders in the UI
+
+                # --- FILTER AND GROUP FILES ---
+                display_files = [f for f in files if not f.endswith('.json')]
+                
+                excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
+                pdf_files = [f for f in display_files if f.lower().endswith('.pdf')]
                 
                 # Get human-readable date
                 timestamp = os.path.getctime(folder_path)
@@ -219,22 +226,21 @@ def dashboard():
 
                 # Extract the Job ID dynamically from File 2's name
                 job_id = "N/A"
-                for f in files:
+                for f in display_files:
                     if f.startswith("Packing Sheet_"):
                         job_id = f.replace("Packing Sheet_", "").rsplit(".", 1)[0]
                         break
                         
-                # --- CLEAN DISPLAY NAME ---
-                # Chops off "_Job-" and the timestamp for the UI header
                 display_name = folder_name.split('_Job-')[0] if '_Job-' in folder_name else folder_name
                 
                 projects.append({
-                    "name": folder_name,          # Keep full name for backend links
-                    "display_name": display_name, # Send clean name for the frontend
+                    "name": folder_name,          
+                    "display_name": display_name, 
                     "date": date_str,
                     "timestamp": timestamp,
                     "job_id": job_id,
-                    "files": files
+                    "excel_files": excel_files,  # Pass the grouped Excel files
+                    "pdf_files": pdf_files       # Pass the grouped PDFs
                 })
                 
     # Sort projects newest to oldest
@@ -265,6 +271,94 @@ def delete_project(folder_name):
             print("[DEBUG] Falling back to Method B (os.rmdir)...")
             
     return redirect(url_for('dashboard'))
+@app.route('/delete_file/<folder_name>/<filename>', methods=['POST'])
+def delete_single_file(folder_name, filename):
+    """Deletes a specific file inside a project."""
+    safe_folder = os.path.basename(folder_name)
+    safe_filename = os.path.basename(filename)
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_folder, safe_filename)
+    
+    if os.path.exists(file_path):
+        try:
+            os.chmod(file_path, stat.S_IWRITE)
+            os.remove(file_path)
+        except Exception as e:
+            print(f"[DEBUG] Could not delete file: {e}")
+            
+    return redirect(url_for('dashboard'))
+
+@app.route('/open_local/<folder_name>/<filename>')
+def open_local_file(folder_name, filename):
+    """Commands Windows to open the file directly using its default application."""
+    safe_folder = os.path.basename(folder_name)
+    safe_filename = os.path.basename(filename)
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_folder, safe_filename)
+    
+    if os.path.exists(file_path):
+        try:
+            # os.startfile is a built-in Windows command that opens a file natively
+            os.startfile(file_path)
+        except Exception as e:
+            print(f"[DEBUG] Could not open file locally: {e}")
+            
+    return '', 204  # Prevents the browser from reloading the page
+
+@app.route('/subgroup/<project_name>', methods=['GET', 'POST'])
+def setup_subgroup(project_name):
+    safe_project = os.path.basename(project_name)
+    project_dir = os.path.join(app.config['UPLOAD_FOLDER'], safe_project)
+    metadata_path = os.path.join(project_dir, "project_metadata.json")
+    
+    if not os.path.exists(metadata_path):
+        return "Metadata not found for this project. Cannot create sub-groups.", 404
+        
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+        
+    if request.method == 'POST':
+        # 1. Grab the list of selected tabs
+        selected_tabs = request.form.getlist('selected_tabs[]')
+        
+        # 2. Build a clean dictionary of instructions for the engine
+        subgroup_instructions = {}
+        
+        for tab in selected_tabs:
+            item_row = int(request.form.get(f'item_row_{tab}'))
+            selected_packs = request.form.getlist(f'target_pack_{tab}[]')
+            
+            tab_instructions = {
+                "item_row": item_row,
+                "packs": {}
+            }
+            
+            for pack in selected_packs:
+                # Grab the paired arrays of start and end numbers
+                starts = request.form.getlist(f'start_item_{tab}_{pack}[]')
+                ends = request.form.getlist(f'end_item_{tab}_{pack}[]')
+                
+                # Zip them together into neat pairs (e.g., [[1, 5], [6, 10]])
+                ranges = [[int(s), int(e)] for s, e in zip(starts, ends) if s and e]
+                
+                if ranges:
+                    tab_instructions["packs"][pack] = ranges
+                    
+            if tab_instructions["packs"]:
+                subgroup_instructions[tab] = tab_instructions
+                
+        # --- DEBUG PRINT ---
+        print("\n--- SUBGROUP INSTRUCTIONS ---")
+        pprint.pprint(subgroup_instructions)
+        print("-----------------------------\n")
+
+        # 3. Trigger the Engine (We will build this function next!)
+        # success = execute_subgroups(project_dir, metadata, subgroup_instructions)
+        
+        # 4. Redirect back to dashboard upon completion
+        return redirect(url_for('dashboard'))
+        
+    return render_template('subgroup.html', project_name=project_name, metadata=metadata, metadata_json=json.dumps(metadata))
 
 @app.route('/pdf', methods=['GET', 'POST'])
 def pdf_engine():

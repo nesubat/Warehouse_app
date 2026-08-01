@@ -119,8 +119,9 @@
                 <p class="blueprint-subtext"><strong>Packages:</strong> <span class="blueprint-warning">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
                 <ul class="pack-list">
                     <div style="margin-bottom: 10px; font-weight: bold;">
-                        <input type="checkbox" id="selectAllPacks" onclick="toggleAllPacks(this)">
-                        <label for="selectAllPacks">Select All Packs</label>
+                        <!-- NEW: Added loop.index to make the ID unique for each tab -->
+                        <input type="checkbox" id="selectAllPacks_{{ loop.index }}" onclick="toggleAllPacks(this)">
+                        <label for="selectAllPacks_{{ loop.index }}">Select All Packs</label>
                     </div>
                     {% for pack in bp.packages_map %}
                         <li>
@@ -206,79 +207,8 @@
     <div id="loading-text">Reading Matrix Data...</div>
 </div>
 
-<!-- Scripts for Overlay and Scrolling -->
-<script>
-    // 1. AUTO-SCROLL TO PREVIEW
-    document.addEventListener("DOMContentLoaded", function() {
-        const previewSection = document.getElementById('preview-section');
-        
-        if (previewSection) {
-            setTimeout(() => {
-                previewSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }, 100);
-        }
-    });
-
-    // 2. LOADING OVERLAY & TEXT CYCLER
-    const generateForm = document.getElementById('generate-form');
-    
-    if (generateForm) {
-        generateForm.addEventListener('submit', function() {
-            const btn = document.getElementById('generate-btn');
-            if (btn) btn.disabled = true;
-
-            document.getElementById('loading-overlay').style.display = 'flex';
-
-            const texts = [
-                "Mapping Signature Codes...",
-                "Formatting Excel Workbooks...",
-                "Finalizing Outputs...",
-                "Almost there..."
-            ];
-            
-            let currentIndex = 0;
-            const textElement = document.getElementById('loading-text');
-            
-            setInterval(() => {
-                textElement.innerText = texts[currentIndex];
-                currentIndex = (currentIndex + 1) % texts.length;
-            }, 2500);
-        });
-    }
-    function toggleAllPacks(masterCheckbox) {
-        // 1. Find all checkboxes that have the 'pack-checkbox' class
-        const packCheckboxes = document.querySelectorAll('.pack-checkbox');
-        
-        // 2. Loop through them and set their checked status to match the master checkbox
-        packCheckboxes.forEach(function(checkbox) {
-            checkbox.checked = masterCheckbox.checked;
-        });
-    }
-    // 3. ANCHOR POINT MEMORY (LocalStorage)
-    document.addEventListener("DOMContentLoaded", function() {
-        const previewForm = document.querySelector('form[action="/preview"]');
-        
-        if (previewForm) {
-            const textInputs = previewForm.querySelectorAll('input[type="text"]');
-            
-            // A. Load saved anchors when the page loads
-            textInputs.forEach(input => {
-                const savedVal = localStorage.getItem(`anchor_${input.name}`);
-                // Only override if the field is currently at the default fallback (B8, E1, A)
-                if (savedVal && (input.value === 'B8' || input.value === 'E1' || input.value === 'A')) {
-                    input.value = savedVal;
-                }
-            });
-
-            // B. Save anchors to memory when the user clicks Map Blueprints
-            previewForm.addEventListener('submit', function() {
-                textInputs.forEach(input => {
-                    localStorage.setItem(`anchor_${input.name}`, input.value);
-                });
-            });
-        }
-    });
-</script>
+<<!-- Master External Script -->
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 
 </body>
 </html>

@@ -7,7 +7,7 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup
 
 
 def scan_excel_tabs(file_path):
@@ -176,6 +176,13 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     file1_path = os.path.join(project_dir, file1_name) if any_packs_selected else None
     file2_path = os.path.join(project_dir, file2_name)
     file3_path = os.path.join(project_dir, file3_name) if any_packs_selected else None
+
+    # --- NEW: INITIALIZE METADATA TRACKER ---
+    project_metadata = {
+        "job_id": cleaned_job_id,
+        "file1_name": file1_name, 
+        "tabs": {}
+    }
     
     if any_packs_selected:
         shutil.copy(file_path, file1_path)
@@ -203,6 +210,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             tab_summaries[tab_name] = []
             inputs = user_inputs.get(tab_name, {"selected_packs": []})
             selected_list = [p.strip() for p in inputs.get("selected_packs", [])]
+
+            # --- NEW: BUILD METADATA USING DECOUPLED ENGINE ---
+            project_metadata["tabs"][tab_name] = build_initial_metadata(tab_info, inputs, selected_list, any_packs_selected)
             
             if any_packs_selected:
                 sheet1_xw = wb1_xw.sheets[tab_name]
@@ -435,5 +445,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 worksheet.set_column(0, len(df_dict) - 1, 25, format16) 
                 
         wb_raw.close()
+    # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
+    metadata_path = os.path.join(project_dir, "project_metadata.json")
+    with open(metadata_path, 'w') as f:
+        json.dump(project_metadata, f, indent=4)
     
     return file1_name, file2_name, file3_name

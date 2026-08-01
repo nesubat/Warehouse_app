@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create Sub-Group</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="sticky-nav">
+        <a href="/">🏠 Home</a>
+        <span class="divider">|</span>
+        <a href="/#dashboard-section" class="active">📊 Dashboard</a>
+    </div>
+
+    <div class="container">
+        <h1>✂️ Create Sub-Group</h1>
+        <p class="subtitle">Target project: <strong>{{ project_name }}</strong></p>
+        
+        <div style="margin-bottom: 20px;">
+            <a href="/" class="nav-link">← Back to Dashboard</a>
+        </div>
+
+        <form action="/subgroup/{{ project_name }}" method="POST">
+            
+            <!-- MASTER TAB SELECTION -->
+            <div class="tab-card">
+                <h3 class="tab-title">1. Select Target Tabs</h3>
+                <p style="font-size: 14px; color: #7f8c8d;">Check the box for every tab you want to process. A dedicated setup block will appear for each.</p>
+                
+                <div class="tab-checkbox-grid">
+                    {% for tab in metadata.tabs.keys() %}
+                        <label class="tab-checkbox-label">
+                            <input type="checkbox" value="{{ tab }}" onchange="toggleTabBlock(this)"> 
+                            {{ tab }}
+                        </label>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- DYNAMIC TAB BLOCKS GO HERE -->
+            <div id="tab-blocks-container"></div>
+
+            <button type="submit" class="btn-generate" id="submit-btn" style="display: none; margin-top: 20px;">Generate Sub-Groups</button>
+        </form>
+    </div>
+
+    <!-- Inject Metadata for JS -->
+    <script id="meta-data" type="application/json">{{ metadata_json | safe }}</script>
+
+    <!-- Master External Script -->
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

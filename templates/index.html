@@ -43,77 +43,86 @@
 
     <!-- THE LOOP MUST START HERE -->
     {% for project in projects %}
-        <div class="project-card">
+        <div class="project-card" style="padding: 0;">
             
-            <!-- Top Section: Info & Meta -->
-            <div class="project-header">
-                <h3 class="project-title">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span></h3>
-                <div class="project-meta">
-                    <span>Created: {{ project.date }}</span>
-                    <span>•</span>
-                    <span>Files: {{ project.files | length }}</span>
+            <!-- Top Section: Clickable Header -->
+            <div class="project-header accordion-header" onclick="toggleProject('{{ project.name }}')">
+                <div>
+                    <h3 class="project-title" style="margin: 0;">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span></h3>
+                    <div class="project-meta" style="margin-top: 5px;">
+                        <span>Created: {{ project.date }}</span>
+                    </div>
                 </div>
+                <!-- Removed the text, just keeping the icon -->
+                <div class="accordion-icon" id="icon-{{ project.name }}">▼</div>
             </div>
             
-            <!-- Bottom Section: Responsive Grid for Buttons -->
-            <div class="actions-grid">
-                {% for file in project.files %}
-                    {% if file.lower().endswith('.pdf') %}
-                            <a class="tooltip-btn btn-action btn-download pdf-btn" href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" data-title="{{ file }}">
-                                ↓ {{ file[:15] }}{% if file|length > 15 %}...{% endif %}
-                            </a>
-                        
-                    {% else %}
-                        <!-- The 'datatitle' attribute creates the hover tooltip -->
-                        <a class="tooltip-btn btn-action btn-download" href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" data-title="{{ file }}">
-                            ↓ {{ file[:15] }}{% if file|length > 15 %}...{% endif %}
-                        </a>
-                        
-                    {% endif %}
-                {% endfor %}
+            <!-- Bottom Section: Hidden File Lists -->
+            <div class="accordion-content" id="content-{{ project.name }}" style="display: none;">
                 
-                <form action="/delete/{{ project.name }}" method="POST" class="delete-form" style="display: flex; height: 100%;">
-                    <button type="submit" class="tooltip-btn btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this project?');" title="Delete Project" data-title="Delete Project">
-                        🗑️ Delete
+                <!-- PDF LABELS GROUP -->
+                {% if project.pdf_files %}
+                <h4 class="file-group-title">🏷️ Labels</h4>
+                <div class="file-list">
+                    {% for file in project.pdf_files %}
+                    <div class="file-row">
+                        <span class="file-name">{{ file }}</span>
+                        <div class="file-actions">
+                            <a href="{{ url_for('open_local_file', folder_name=project.name, filename=file) }}" class="btn-file open" onclick="fetch(this.href); return false;">📂 Open</a>
+                            <a href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" class="btn-file download">⬇️ Download</a>
+                            <form action="{{ url_for('delete_single_file', folder_name=project.name, filename=file) }}" method="POST" style="margin: 0;">
+                                <button type="submit" class="btn-file delete" onclick="return confirm('Delete this file permanently?');">🗑️ Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <!-- EXCEL FILES GROUP -->
+                {% if project.excel_files %}
+                <h4 class="file-group-title first-group">📊 Excel Files</h4>
+                <div class="file-list">
+                    {% for file in project.excel_files %}
+                    <div class="file-row">
+                        <span class="file-name">{{ file }}</span>
+                        <div class="file-actions">
+                            <!-- Open Locally -->
+                            <a href="{{ url_for('open_local_file', folder_name=project.name, filename=file) }}" class="btn-file open" onclick="fetch(this.href); return false;">📂 Open</a>
+                            <!-- Download Copy -->
+                            <a href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" class="btn-file download">⬇️ Download</a>
+                            <!-- Delete -->
+                            <form action="{{ url_for('delete_single_file', folder_name=project.name, filename=file) }}" method="POST" style="margin: 0;">
+                                <button type="submit" class="btn-file delete" onclick="return confirm('Delete this file permanently?');">🗑️ Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+                
+                <!-- Action Bar: Sub-Group & Delete -->
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <a href="/subgroup/{{ project.name }}" class="btn-action" style="background-color: #f39c12; color: white; text-decoration: none; padding: 10px 15px; border-radius: 5px; font-weight: bold;">
+                        ✂️ Create Sub-Group
+                    </a>
+                
+                <!-- Master Project Delete -->
+                <form action="/delete/{{ project.name }}" method="POST" style="text-align: right;">
+                    <button type="submit" class="btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this ENTIRE project?');">
+                        ⚠️ Delete Entire Project
                     </button>
                 </form>
             </div>
+        </div>
 
         </div>
     {% endfor %}
 </div>
-<script>
-        // --- 1. SCROLL SPY LOGIC ---
-        window.addEventListener('scroll', function() {
-            const dashSection = document.getElementById('dashboard-section');
-            const navHome = document.getElementById('nav-home');
-            const navDash = document.getElementById('nav-dash');
-
-            if (dashSection) {
-                if (window.scrollY >= dashSection.offsetTop - 150) {
-                    navHome.classList.remove('active');
-                    navDash.classList.add('active');
-                } else {
-                    navDash.classList.remove('active');
-                    navHome.classList.add('active');
-                }
-            }
-        });
-
-        // --- 2. SMOOTH SCROLL TO TOP FOR HOME BUTTON ---
-        const homeBtn = document.getElementById('nav-home');
-        if (homeBtn) {
-            homeBtn.addEventListener('click', function(e) {
-                e.preventDefault(); // Stop the default jumpy anchor link behavior
-                window.scrollTo({
-                    top: 0,
-                    behavior: 'smooth' // Adds a nice smooth gliding animation
-                });
-            });
-        }
-        window.dispatchEvent(new Event('scroll'));
-        window.dispatchEvent(new Event('click'));
-    </script>
-
+<!-- Master External Script -->
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

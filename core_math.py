@@ -141,3 +141,78 @@ def format_file2(sheet, pack_group_row, p_start, p_end, write_data):
     for border_id in [7, 8, 9, 10, 11, 12]:
         data_range.api.Borders(border_id).LineStyle = 1 
         data_range.api.Borders(border_id).Weight = 2
+
+def build_initial_metadata(tab_info, inputs, selected_list, any_packs_selected):
+    """Builds the foundational JSON map tracking exact Excel column coordinates."""
+    tab_meta = {
+        "user_inputs": inputs,
+        "store_col_idx": tab_info["store_col_idx"],
+        "pack_group_row": tab_info["pack_group_row"],
+        "job_id_row": tab_info["job_id_row"],
+        "last_row": tab_info["last_row"],
+        "packs": {}
+    }
+    
+    current_shift = 0
+    # Read left-to-right to track the cascading column shifts
+    for pack in tab_info["pack_ranges"]:
+        p_name = pack["name"]
+        is_selected = p_name.strip() in selected_list
+        
+        if any_packs_selected and is_selected:
+            final_start = pack["start"] + current_shift + 1
+            final_end = pack["end"] + current_shift + 1
+            code_col = pack["start"] + current_shift 
+            current_shift += 1
+        else:
+            final_start = pack["start"] + current_shift
+            final_end = pack["end"] + current_shift
+            code_col = None
+            
+        tab_meta["packs"][p_name] = {
+            "original_start": pack["start"],
+            "original_end": pack["end"],
+            "current_start": final_start,  # We use 'current' so we can update it later
+            "current_end": final_end,
+            "code_col": code_col,
+            "is_selected": is_selected,
+            "sub_groups": {} # An empty dictionary ready for infinite sub-grouping!
+        }
+        
+    return tab_meta
+
+def update_metadata_for_subgroup(metadata, tab_name, parent_pack_name, sub_group_name, insert_col_idx, sub_start, sub_end):
+    """
+    (For Stage 4) Shifts all columns in the metadata to the right by 1 to make room 
+    for a newly inserted sub-group column.
+    """
+    tab_meta = metadata["tabs"][tab_name]
+    
+    # 1. Shift all existing packs to the right of the insertion
+    for p_name, p_data in tab_meta["packs"].items():
+        if p_data["current_start"] >= insert_col_idx:
+            p_data["current_start"] += 1
+            p_data["current_end"] += 1
+            if p_data["code_col"] and p_data["code_col"] >= insert_col_idx:
+                p_data["code_col"] += 1
+        elif p_data["current_start"] < insert_col_idx <= p_data["current_end"]:
+            # The insertion happened INSIDE this pack's boundaries
+            p_data["current_end"] += 1
+            
+        # 2. Shift any previously created sub-groups
+        for sg_name, sg_data in p_data.get("sub_groups", {}).items():
+            if sg_data["current_start"] >= insert_col_idx:
+                sg_data["current_start"] += 1
+                sg_data["current_end"] += 1
+                if sg_data["code_col"] and sg_data["code_col"] >= insert_col_idx:
+                    sg_data["code_col"] += 1
+            elif sg_data["current_start"] < insert_col_idx <= sg_data["current_end"]:
+                sg_data["current_end"] += 1
+
+    # 3. Register the brand new subgroup under its parent
+    tab_meta["packs"][parent_pack_name]["sub_groups"][sub_group_name] = {
+        "current_start": sub_start + 1, # +1 because it's shifted by its own code column
+        "current_end": sub_end + 1,
+        "code_col": insert_col_idx
+    }
+    return metadata
