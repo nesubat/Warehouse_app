@@ -3,6 +3,8 @@
 *.xls
 *.csv
 *.pdf
+*.spec
+
 
 # Ignore your uploads folder (if that's where test files go)
 input_files/
@@ -10,6 +12,7 @@ uploads/
 venv/
 temp_pdf_files/
 projects/
+build/
 
 
 # Ignore Python background files

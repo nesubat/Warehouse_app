@@ -61,9 +61,12 @@ def build_audit_report(pdf_filename, page_width, report_height, missing_stores, 
         
         for store in missing_stores:
             y_pos = check_page_break(y_pos, 18)
-            # Draw a sleek circular bullet point
+            # Unpack the tuple we sent from the engines
+            store_name, sig_code = store
+            display_text = f"{store_name}   (Code: {sig_code})"
+
             audit_page.draw_circle(fitz.Point(36, y_pos - 4), 2, color=text_dark, fill=text_dark)
-            audit_page.insert_text((48, y_pos), store, fontname="helv", fontsize=11, color=text_dark)
+            audit_page.insert_text((48, y_pos), display_text, fontname="helv", fontsize=11, color=text_dark)
             y_pos += 18
             
         y_pos += 15 
@@ -105,7 +108,7 @@ def build_divider_sheet(page_width, page_height, signature_code, count):
     center_y = page_height / 2
     text_rect = fitz.Rect(40, center_y - 100, page_width - 40, center_y + 100)
     
-    text = f"PACK {signature_code}\n\nMatched Labels: {count}"
+    text = f"CODE {signature_code}\n\nMatched Labels: {count}"
     page.insert_textbox(text_rect, text, fontname="hebo", fontsize=40, align=fitz.TEXT_ALIGN_CENTER, color=(0, 0, 0))
     
     return doc
@@ -153,7 +156,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             print(f"[DEBUG] Unmatched Bottom Label on Page {page_num + 1}")
 
     # Generate Universal Audit Report
-    missing_stores = [store for store in sorted_stores if store not in found_stores]
+    missing_stores = [(store, store_mapping[store]) for store in sorted_stores if store not in found_stores]
     audit_doc = build_audit_report(pdf_filename, page_width, half_height, missing_stores, len(unmatched_halves), len(blank_halves), "HALVES")
     
     audit_halves = [{'doc_type': 'audit', 'page_num': i, 'half': 'full'} for i in range(len(audit_doc))]
@@ -275,7 +278,7 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
             code_buckets[sig_code].append(page_num)
 
     # Generate Universal Audit Report
-    missing_stores = [store for store in sorted_stores if store not in found_stores]
+    missing_stores = [(store, store_mapping[store]) for store in sorted_stores if store not in found_stores]
     audit_doc = build_audit_report(pdf_filename, page_width, page_height, missing_stores, len(unmatched_pages), len(blank_pages), "PAGES")
 
     # Stitching
