@@ -13,7 +13,7 @@ venv/
 temp_pdf_files/
 projects/
 build/
-
+dist/
 
 # Ignore Python background files
 __pycache__/
