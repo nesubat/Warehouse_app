@@ -4,47 +4,11 @@ import re
 import openpyxl
 import xlwings as xw
 import pandas as pd
+import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2
 
-
-# =====================================================================
-# UTILITY FUNCTIONS
-# =====================================================================
-
-def clean_file_name(raw_string):
-    if not raw_string:
-        return "UNKNOWN_JOB"
-    # 1. Regex \s+ targets ALL weird whitespace (tabs, newlines, non-breaking spaces) and crushes them
-    string_val = re.sub(r'\s+', ' ', str(raw_string)).strip()
-    # 2. Strip invalid Windows filename characters
-    cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', string_val)
-    return cleaned.strip()
-def sanitize_cell(val):
-    """Cleans messy Excel data into strict numbers, text, or zero."""
-    if val is None: return 0
-    if isinstance(val, (int, float)): return val
-    
-    val_str = str(val).strip()
-    if val_str in ("", "-", ".", "0", "0.0"): return 0
-    
-    try:
-        num = float(val_str)
-        return int(num) if num.is_integer() else num
-    except ValueError:
-        return val_str
-
-def sort_key(sig):
-    """Assigns a 3-part identity to prevent crashes: (Priority, Number, Text)"""
-    keys = []
-    for val in sig:
-        if val == 0:
-            keys.append((3, 0, ""))                 
-        elif isinstance(val, (int, float)):
-            keys.append((1, val, ""))               
-        else:
-            keys.append((2, 0, str(val).lower()))   
-    return tuple(keys)
 
 def scan_excel_tabs(file_path):
     excel_file = pd.ExcelFile(file_path)
@@ -84,6 +48,20 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
             last_row -= 1
             
         total_stores = last_row - max(pack_group_row, job_id_row)
+
+        # --- DUPLICATE STORE SCANNER ---
+        store_names = []
+        start_store_row = max(pack_group_row, job_id_row) + 1
+        
+        for r in range(start_store_row, last_row + 1):
+            val = sheet.cell(row=r, column=store_col_idx).value
+            if val is not None and str(val).strip() != "":
+                store_names.append(str(val).strip())
+        
+        duplicate_warning = None
+        if len(store_names) != len(set(store_names)):
+            dupes = [item for item, count in collections.Counter(store_names).items() if count > 1]
+            duplicate_warning = f"⚠️ Duplicate Store Names Detected: {', '.join(dupes[:3])}{'...' if len(dupes)>3 else ''}. This will cause grouping collisions while shuffling the labels!"
         
         last_stock_col = stock_start_col
         while sheet.cell(row=pack_group_row, column=last_stock_col + 1).value is not None:
@@ -166,6 +144,7 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         "last_col": last_col_letter,
         "last_row": last_row,
         "total_stores": total_stores,
+        "duplicate_warning": duplicate_warning,
         "backend_data": backend_data
     }
 
@@ -233,88 +212,31 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 p_name = pack["name"]
                 p_start = pack["start"]
                 p_end = pack["end"]
-                
-                row_signatures = []
+
                 store_rows = range(tab_info["pack_group_row"] + 1, tab_info["last_row"] + 1)
                 
-                for r in store_rows:
-                    sig = tuple(sanitize_cell(raw_values[r-1][c-1]) for c in range(p_start, p_end + 1))
-                    if all(v == 0 for v in sig):
-                        row_signatures.append((r, None))
-                    else:
-                        row_signatures.append((r, sig))
-                    
-                unique_sigs = list(set(sig for r, sig in row_signatures if sig is not None))
-                unique_sigs.sort(key=sort_key)
-                
-                sig_to_letter = {}
-                summary_counts = {sig: 0 for sig in unique_sigs}
-                
-                for r, sig in row_signatures:
-                    if sig is not None:
-                        summary_counts[sig] += 1
-                
-                for index, sig in enumerate(unique_sigs):
-                    letter = chr(65 + index) if index < 26 else chr(65 + (index // 26) - 1) + chr(65 + (index % 26))
-                    sig_to_letter[sig] = letter
-                    
-                # Save ordered codes for Phase 3 (Pandas)
-                ordered_codes = []
-                for r, sig in row_signatures:
-                    if sig is not None:
-                        ordered_codes.append(sig_to_letter[sig])
-                    else:
-                        ordered_codes.append("")
+               # CALL THE NEW DECOUPLED ENGINE
+                row_signatures, unique_sigs, sig_to_letter, summary_counts, ordered_codes = generate_pack_signatures(raw_values, store_rows, p_start, p_end)
+                print(f"Processed pack '{p_name}' in tab '{tab_name}': {len(unique_sigs)} unique signatures found.")
                     
                 is_pack_selected = p_name.strip() in selected_list
                 
                 if any_packs_selected and is_pack_selected:
                     col_letter = get_column_letter(p_start)
                     sheet1_xw.range(f"{col_letter}:{col_letter}").insert('right')
-                    target_col =sheet1_xw.range(f"{col_letter}:{col_letter}")
                     
-                    sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").value = f"Code for {p_name}"
-                    sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").color = (0, 0, 0)
-                    sheet1_xw.range(f"{col_letter}{tab_info['job_id_row']}").autofit()
                     pack_group_row = tab_info["pack_group_row"]
                     pack_name_cell = sheet1_xw.range((pack_group_row, p_start+1))
                     original_color = pack_name_cell.color
-                    target_col.api.FormatConditions.Delete()
-                    target_col.color = (255, 255, 255)
-                    target_col.font.color = (0, 0, 0)
-                    target_col.api.EntireColumn.HorizontalAlignment = -4108
-                    # 1. Define where the data starts and ends
-                    start_row = tab_info["pack_group_row"] + 1
-                    end_row = tab_info["last_row"]
-
-                    # 2. Grab just the data cells in your newly inserted column
-                    data_block = sheet1_xw.range(f"{col_letter}{start_row}:{col_letter}{end_row}")
-
-                    # 3. Apply standard 'All Borders'
-                    data_block.api.Borders.LineStyle = 1  # 1 = xlContinuous (Solid Line)
-                    data_block.api.Borders.Weight = 2     # 2 = xlThin (Standard Thickness)
-
-                    # (Optional) If you also want to make sure the text is centered and black:
-                    data_block.font.color = (0, 0, 0)
-                    data_block.font.bold 
-                    data_block.api.HorizontalAlignment = -4108
-                    data_block.api.VerticalAlignment = -4108
-                                        
-                    new_pack_range = sheet1_xw.range((pack_group_row, p_start), (pack_group_row, p_end + 1))
                     
-                    try:
-                        new_pack_range.unmerge()
-                    except Exception:
-                        pass
-                        
-                    new_pack_range.merge()
-                    
-                    if original_color:
-                        new_pack_range.color = original_color
-                        
-                    new_pack_range.api.HorizontalAlignment = -4108
-                    new_pack_range.api.VerticalAlignment = -4108
-                    
+                    # --- CALL DECOUPLED FORMATTING FOR FILE 1 ---
+                    format_file1(
+                        sheet1_xw, col_letter, p_start, p_end, 
+                        pack_group_row, tab_info['job_id_row'], tab_info['last_row'], 
+                        p_name, original_color
+                    )
+                    print(f"Inserted and formatted signature column for pack '{p_name}' in tab '{tab_name}'.")
+
                     # --- THE BATCH WRITE FIX ---
                     # Bundle all the letters into a 2D array (a vertical column list)
                     batch_data = []
@@ -328,6 +250,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     if batch_data:
                         start_r = row_signatures[0][0] # Grab the very first row number
                         sheet1_xw.range(f"{col_letter}{start_r}").value = batch_data
+                        print(f"Batch wrote {len(batch_data)} signature codes for pack '{p_name}' in tab '{tab_name}'.")
+                
                         
                             
                 tab_summaries[tab_name].append({
@@ -410,31 +334,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 total_row.append("Total")
                 write_data.append(total_row)
                     
-                if write_data:
-                    data_range = sheet2.range(
-                        (pack_group_row + 1, p_start), 
-                        (pack_group_row + len(write_data), p_end + 2)
-                    )
-                    
-                    data_range.value = write_data
-                    data_range.font.size = 20
-                    data_range.api.HorizontalAlignment = -4108
-                    data_range.api.VerticalAlignment = -4108
-                    data_range.font.bold = True
-                    data_range.font.color = (0, 0, 0)
-                    
-                    # Banded Rows
-                    for r_offset in range(len(write_data)):
-                        if r_offset % 2 == 1 and r_offset != len(write_data) - 1:
-                            sheet2.range(
-                                (pack_group_row + 1 + r_offset, p_start), 
-                                (pack_group_row + 1 + r_offset, p_end + 2)
-                            ).color = (220, 230, 241)
-                    
-                    # Apply User Verified Borders!
-                    for border_id in [7, 8, 9, 10, 11, 12]:
-                        data_range.api.Borders(border_id).LineStyle = 1 
-                        data_range.api.Borders(border_id).Weight = 2    
+                # --- CALL DECOUPLED FORMATTING FOR FILE 2 ---
+                format_file2(sheet2, pack_group_row, p_start, p_end, write_data) 
                             
             end_del_col_letter = get_column_letter(tab_info["last_stock_col"] + 1)
             sheet2.range(f"A:{end_del_col_letter}").api.EntireColumn.Delete()

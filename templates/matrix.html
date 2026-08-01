@@ -32,7 +32,7 @@
     <div class="instructions-box">
             <h4 class="instructions-title">⚠️ Required Spreadsheet Formatting</h4>
             <ul class="instructions-list">
-                <li><strong>Store Names:</strong> Must be in a single, continuous column. A blank cell tells the engine the store list has ended.</li>
+                <li><strong>Store Names:</strong> Must be in a single, continuous column. A blank cell tells the engine the store list has ended. Duplicate store names will cause grouping collisions in the Label Shuffler!</li>
                 <li><strong>Pack Headers:</strong> The row directly above your data must contain your pack names. The system uses merged cells to determine how many columns a pack spans.</li>
                 <li><strong>Data Entry:</strong> Use numbers for quantities. Dashes (-) and periods (.) are safely ignored as zero. Words (e.g., "J468791-01 or Banners") will generate unique signature codes.</li>
                 <li><strong>File Type:</strong> Only standard <strong>.xlsx</strong> or <strong>.xls</strong> files are supported.</li>
@@ -108,6 +108,12 @@
                     <span class="metric-badge">Last Row: {{ bp.last_row }}</span>
                     <span class="metric-badge">Total Stores: {{ bp.total_stores }}</span>
                 </div>
+                <!-- NEW: DUPLICATE WARNING DISPLAY -->
+                {% if bp.duplicate_warning %}
+                <div class="warning-box">
+                    {{ bp.duplicate_warning }}
+                </div>
+                {% endif %}
 
                 <p class="blueprint-text"><strong>Stocks:</strong> {{ bp.stocks_map }}</p>
                 <p class="blueprint-subtext"><strong>Packages:</strong> <span class="blueprint-warning">Check the boxes below to generate and inject signatures for the selected packages.</span></p>
@@ -149,9 +155,23 @@
             <label class="project-name-label">Name this Project / Job:</label>
             <input type="text" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" required>
         </div>
-        
-        <!-- Added ID to Generate Button -->
-        <button type="submit" class="btn-generate" id="generate-btn">Generate Packing Sheet</button>
+
+        <!-- NEW: Hard Block Logic -->
+        {% set lock = namespace(has_dupes=false) %}
+        {% for bp in previews %}
+            {% if bp.duplicate_warning %}
+                {% set lock.has_dupes = true %}
+            {% endif %}
+        {% endfor %}
+
+        {% if lock.has_dupes %}
+            <div class="warning-box warning-box-center">
+                ❌ Generation is locked. Please fix the duplicate store names in your Excel file and upload it again.
+            </div>
+            <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
+        {% else %}
+            <button type="submit" class="btn-generate" id="generate-btn">Generate Packing Sheet</button>
+        {% endif %}
     </form> 
     {% endif %}
 
@@ -234,6 +254,30 @@
             checkbox.checked = masterCheckbox.checked;
         });
     }
+    // 3. ANCHOR POINT MEMORY (LocalStorage)
+    document.addEventListener("DOMContentLoaded", function() {
+        const previewForm = document.querySelector('form[action="/preview"]');
+        
+        if (previewForm) {
+            const textInputs = previewForm.querySelectorAll('input[type="text"]');
+            
+            // A. Load saved anchors when the page loads
+            textInputs.forEach(input => {
+                const savedVal = localStorage.getItem(`anchor_${input.name}`);
+                // Only override if the field is currently at the default fallback (B8, E1, A)
+                if (savedVal && (input.value === 'B8' || input.value === 'E1' || input.value === 'A')) {
+                    input.value = savedVal;
+                }
+            });
+
+            // B. Save anchors to memory when the user clicks Map Blueprints
+            previewForm.addEventListener('submit', function() {
+                textInputs.forEach(input => {
+                    localStorage.setItem(`anchor_${input.name}`, input.value);
+                });
+            });
+        }
+    });
 </script>
 
 </body>

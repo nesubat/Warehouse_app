@@ -10,6 +10,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
+from core_math import clean_file_name
 
 
 if getattr(sys, 'frozen', False):
