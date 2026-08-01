@@ -11,10 +11,13 @@ from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
 
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+        
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
@@ -426,4 +429,9 @@ def pdf_engine():
     return render_template('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    if getattr(sys, 'frozen', False):
+        app.run(debug=False, port=5000)
+    else:
+        app.run(debug=True, port=5000)
+
+    
