@@ -120,7 +120,7 @@
                 <ul class="pack-list">
                     <div style="margin-bottom: 10px; font-weight: bold;">
                         <!-- NEW: Added loop.index to make the ID unique for each tab -->
-                        <input type="checkbox" id="selectAllPacks_{{ loop.index }}" onclick="toggleAllPacks(this)">
+                        <input type="checkbox" id="selectAllPacks_{{ loop.index }}">
                         <label for="selectAllPacks_{{ loop.index }}">Select All Packs</label>
                     </div>
                     {% for pack in bp.packages_map %}
@@ -207,7 +207,7 @@
     <div id="loading-text">Reading Matrix Data...</div>
 </div>
 
-<<!-- Master External Script -->
+<!-- Master External Script -->
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 
 </body>

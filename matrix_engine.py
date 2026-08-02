@@ -222,6 +222,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 p_name = pack["name"]
                 p_start = pack["start"]
                 p_end = pack["end"]
+                job_id_row = tab_info["job_id_row"]
 
                 store_rows = range(tab_info["pack_group_row"] + 1, tab_info["last_row"] + 1)
                 
@@ -232,18 +233,23 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 is_pack_selected = p_name.strip() in selected_list
                 
                 if any_packs_selected and is_pack_selected:
-                    col_letter = get_column_letter(p_start)
-                    sheet1_xw.range(f"{col_letter}:{col_letter}").insert('right')
+                    col_letter_start = get_column_letter(p_start)
+                    col_letter_end = get_column_letter(p_end)
+                    # unmerging the pack group row before inserting the new column to avoid merge conflicts
+                    sheet1_xw.range(f"{col_letter_start}{tab_info['pack_group_row']}:{col_letter_end}{tab_info['pack_group_row']}").unmerge()
+                    sheet1_xw.range(f"{col_letter_start}:{col_letter_start}").insert('right')
                     
                     pack_group_row = tab_info["pack_group_row"]
                     pack_name_cell = sheet1_xw.range((pack_group_row, p_start+1))
                     original_color = pack_name_cell.color
+                    sheet1_xw.range(f"{col_letter_start}{job_id_row}").value = f"Code for Pack {p_name}"
+                    
+
                     
                     # --- CALL DECOUPLED FORMATTING FOR FILE 1 ---
                     format_file1(
-                        sheet1_xw, col_letter, p_start, p_end, 
-                        pack_group_row, tab_info['job_id_row'], tab_info['last_row'], 
-                        p_name, original_color
+                        sheet1_xw, col_letter_start, p_start, p_end, 
+                        pack_group_row, tab_info['job_id_row'], tab_info['last_row']
                     )
                     print(f"Inserted and formatted signature column for pack '{p_name}' in tab '{tab_name}'.")
 
@@ -259,8 +265,19 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     # Paste the entire column into Excel in exactly ONE command!
                     if batch_data:
                         start_r = row_signatures[0][0] # Grab the very first row number
-                        sheet1_xw.range(f"{col_letter}{start_r}").value = batch_data
+                        sheet1_xw.range(f"{col_letter_start}{start_r}").value = batch_data
                         print(f"Batch wrote {len(batch_data)} signature codes for pack '{p_name}' in tab '{tab_name}'.")
+                    # =========================================================
+                    # NEW: RE-MERGE MAIN PACK HEADER AFTER BATCH WRITE
+                    # =========================================================
+                    col_letter_new_end = get_column_letter(p_end + 1)
+                    new_pack_range = sheet1_xw.range(f"{col_letter_start}{pack_group_row}:{col_letter_new_end}{pack_group_row}")
+                    
+                    new_pack_range.merge()
+                    if original_color:
+                        new_pack_range.color = original_color
+                    new_pack_range.api.HorizontalAlignment = -4108
+                    new_pack_range.api.VerticalAlignment = -4108
                 
                         
                             
@@ -446,7 +463,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
-    metadata_path = os.path.join(project_dir, "project_metadata.json")
+    
+    base_file1_name = os.path.splitext(file1_name)[0]
+    metadata_path = os.path.join(project_dir, f"{base_file1_name}.json")
     with open(metadata_path, 'w') as f:
         json.dump(project_metadata, f, indent=4)
     

@@ -20,7 +20,7 @@
         </div>
 
         <form action="/subgroup/{{ project_name }}" method="POST">
-            
+            <input type="hidden" name="target_json" value="{{ target_json }}">
             <!-- MASTER TAB SELECTION -->
             <div class="tab-card">
                 <h3 class="tab-title">1. Select Target Tabs</h3>
@@ -29,7 +29,7 @@
                 <div class="tab-checkbox-grid">
                     {% for tab in metadata.tabs.keys() %}
                         <label class="tab-checkbox-label">
-                            <input type="checkbox" value="{{ tab }}" onchange="toggleTabBlock(this)"> 
+                            <input type="checkbox" value="{{ tab }}"> 
                             {{ tab }}
                         </label>
                     {% endfor %}

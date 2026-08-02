@@ -11,7 +11,9 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
-from core_math import clean_file_name
+from core_math import clean_file_name, get_available_project_files
+from subgroup_engine import execute_subgroups
+
 
 
 if getattr(sys, 'frozen', False):
@@ -216,6 +218,9 @@ def dashboard():
 
                 # --- FILTER AND GROUP FILES ---
                 display_files = [f for f in files if not f.endswith('.json')]
+                # Sort JSON files by creation time (newest first)
+                json_files = sorted([f for f in files if f.endswith('.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
+
                 
                 excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
                 pdf_files = [f for f in display_files if f.lower().endswith('.pdf')]
@@ -240,7 +245,8 @@ def dashboard():
                     "timestamp": timestamp,
                     "job_id": job_id,
                     "excel_files": excel_files,  # Pass the grouped Excel files
-                    "pdf_files": pdf_files       # Pass the grouped PDFs
+                    "pdf_files": pdf_files,       # Pass the grouped PDFs
+                    "json_files": json_files     # Pass the grouped JSON files
                 })
                 
     # Sort projects newest to oldest
@@ -309,7 +315,18 @@ def open_local_file(folder_name, filename):
 def setup_subgroup(project_name):
     safe_project = os.path.basename(project_name)
     project_dir = os.path.join(app.config['UPLOAD_FOLDER'], safe_project)
-    metadata_path = os.path.join(project_dir, "project_metadata.json")
+
+    # ADD THIS: Get the specific JSON file chosen by the user (defaults to project_metadata.json)
+    target_json = request.values.get('target_json')
+    # 2. Dynamic Fallback: If target_json is missing, grab the first available .json file in the project folder
+    if not target_json or target_json == 'default':
+        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json')]
+        target_json = json_files[0] if json_files else f"{safe_project}.json"
+        print(f"[DEBUG] No target_json specified. Defaulting to: {target_json}")
+    metadata_path = os.path.join(project_dir, target_json)
+    
+    
+
     
     if not os.path.exists(metadata_path):
         return "Metadata not found for this project. Cannot create sub-groups.", 404
@@ -353,12 +370,12 @@ def setup_subgroup(project_name):
         print("-----------------------------\n")
 
         # 3. Trigger the Engine (We will build this function next!)
-        # success = execute_subgroups(project_dir, metadata, subgroup_instructions)
+        success = execute_subgroups(project_dir, metadata, subgroup_instructions)
         
         # 4. Redirect back to dashboard upon completion
         return redirect(url_for('dashboard'))
         
-    return render_template('subgroup.html', project_name=project_name, metadata=metadata, metadata_json=json.dumps(metadata))
+    return render_template('sub-group.html', project_name=project_name, metadata=metadata, metadata_json=json.dumps(metadata), target_json=target_json)
 
 @app.route('/pdf', methods=['GET', 'POST'])
 def pdf_engine():

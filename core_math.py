@@ -1,3 +1,4 @@
+import os
 import re
 
 def clean_file_name(raw_string):
@@ -71,12 +72,11 @@ def generate_pack_signatures(raw_values, store_rows, p_start, p_end):
             
     return row_signatures, unique_sigs, sig_to_letter, summary_counts, ordered_codes
 # Formatting Functions for Excel Sheets
-def format_file1(sheet, col_letter, p_start, p_end, pack_group_row, job_id_row, last_row, p_name, original_color):
+def format_file1(sheet, col_letter, p_start, p_end, pack_group_row, job_id_row, last_row):
     """Applies standardized formatting for the newly inserted signature column in File 1."""
     target_col = sheet.range(f"{col_letter}:{col_letter}")
     
     # 1. Header Styling
-    sheet.range(f"{col_letter}{job_id_row}").value = f"Code for {p_name}"
     sheet.range(f"{col_letter}{job_id_row}").color = (0, 0, 0)
     sheet.range(f"{col_letter}{job_id_row}").autofit()
     
@@ -95,20 +95,6 @@ def format_file1(sheet, col_letter, p_start, p_end, pack_group_row, job_id_row, 
     data_block.font.bold = True  # FIXED: Added '= True' 
     data_block.api.HorizontalAlignment = -4108
     data_block.api.VerticalAlignment = -4108
-    
-    # 4. Handle Merged Pack Header
-    new_pack_range = sheet.range((pack_group_row, p_start), (pack_group_row, p_end + 1))
-    try:
-        new_pack_range.unmerge()
-    except Exception:
-        pass
-        
-    new_pack_range.merge()
-    if original_color:
-        new_pack_range.color = original_color
-        
-    new_pack_range.api.HorizontalAlignment = -4108
-    new_pack_range.api.VerticalAlignment = -4108
 
 
 def format_file2(sheet, pack_group_row, p_start, p_end, write_data):
@@ -216,3 +202,42 @@ def update_metadata_for_subgroup(metadata, tab_name, parent_pack_name, sub_group
         "code_col": insert_col_idx
     }
     return metadata
+# function to generate the next stage filenames based on the current filename
+def get_next_stage_filenames(current_filename):
+    """
+    Parses the current filename and increments the Stage number.
+    Returns the new Excel filename and the matching JSON filename.
+    """
+    match = re.match(r"Stage - (\d+) - (.+)", current_filename)
+    
+    if match:
+        current_stage = int(match.group(1))
+        next_stage = current_stage + 1
+        base_name = match.group(2)
+        new_excel_name = f"Stage - {next_stage} - {base_name}"
+    else:
+        new_excel_name = f"Stage - 1 - {current_filename}"
+        
+    base_no_ext, _ = os.path.splitext(new_excel_name)
+    new_json_name = f"{base_no_ext}.json"
+    
+    return new_excel_name, new_json_name
+
+def get_available_project_files(project_dir):
+    """
+    Scans the project directory for JSON files.
+    Filters out any system files if necessary.
+    """
+    if not os.path.exists(project_dir):
+        return []
+        
+    valid_files = []
+    for file in os.listdir(project_dir):
+        if file.endswith(".json"):
+            # Optional: Skip system JSONs if you have them (like user_settings.json)
+            if file not in ["user_settings.json", "app_config.json"]:
+                valid_files.append(file)
+                
+    # Sort them so "Stage - 1", "Stage - 2", etc., appear in order
+    valid_files.sort()
+    return valid_files
