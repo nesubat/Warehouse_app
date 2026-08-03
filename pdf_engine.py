@@ -144,6 +144,9 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
         elif not top_text.strip():
             blank_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top'})
             print(f"[DEBUG] BLANK Top Half detected on Page {page_num + 1}")
+        else:
+            unmatched_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top'})
+            print(f"[DEBUG] Unmatched Top Half on Page {page_num + 1}")
 
         if bottom_match:
             found_stores.add(bottom_match)
@@ -153,7 +156,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             print(f"[DEBUG] BLANK Bottom Half detected on Page {page_num + 1}")
         else:
             unmatched_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom'})
-            print(f"[DEBUG] Unmatched Bottom Label on Page {page_num + 1}")
+            print(f"[DEBUG] Unmatched Bottom Half on Page {page_num + 1}")
 
     # Generate Universal Audit Report
     missing_stores = [(store, store_mapping[store]) for store in sorted_stores if store not in found_stores]

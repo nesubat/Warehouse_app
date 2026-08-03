@@ -4,6 +4,9 @@
 *.csv
 *.pdf
 *.spec
+*.docx
+*.exe
+
 
 
 # Ignore your uploads folder (if that's where test files go)

@@ -292,6 +292,7 @@ def delete_single_file(folder_name, filename):
         except Exception as e:
             print(f"[DEBUG] Could not delete file: {e}")
             
+            
     return redirect(url_for('dashboard'))
 
 @app.route('/open_local/<folder_name>/<filename>')
