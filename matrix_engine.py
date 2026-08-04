@@ -200,6 +200,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             wb1_xw = app.books.open(file1_path)
             
         wb2_xw = app.books.open(file2_path)
+        for sheet in list(wb2_xw.sheets):
+            if sheet.name not in selected_tabs:
+                sheet.delete()
         master_stock_data = []
         
         for tab_name in selected_tabs:
@@ -370,29 +373,38 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             # Preparing the stock summary for the Packaging Stocks sheet
 
         stock_sheet = wb2_xw.sheets.add(name="Packaging Stocks", after=wb2_xw.sheets[-1])
-        out_col = 1
-        
+        out_row = 1
+
         for stock_info in master_stock_data:
-            col_letter_1 = get_column_letter(out_col)
-            col_letter_2 = get_column_letter(out_col + 1)
-            
-            stock_sheet.range(f"{col_letter_1}1:{col_letter_2}1").merge()
-            stock_sheet.range(f"{col_letter_1}1").value = stock_info["header"]
-            stock_sheet.range(f"{col_letter_1}1").color = (217, 234, 211) 
-            
-            row_idx = 2
+            header_row = out_row
+            stock_sheet.range(f"A{header_row}:B{header_row}").merge()
+            stock_sheet.range(f"A{header_row}").value = stock_info["header"]
+            stock_sheet.range(f"A{header_row}").color = (217, 234, 211)
+
+            row_idx = header_row + 1
             for stock_name, count in stock_info["counts"].items():
-                stock_sheet.range((row_idx, out_col)).value = stock_name
-                stock_sheet.range((row_idx, out_col + 1)).value = count
+                stock_sheet.range((row_idx, 1)).value = stock_name
+                stock_sheet.range((row_idx, 2)).value = count
                 row_idx += 1
+
+            wall_row = row_idx
+            stock_sheet.range(f"{wall_row}:{wall_row}").color = (0, 0, 0)
+            stock_sheet.range(f"{wall_row}:{wall_row}").row_height = 6
+
+            out_row = wall_row + 1
+
+        
+
+        # Uniform font size + full grid borders across everything just written
+        last_used_row = out_row - 2  # step back past the final trailing divider row
+        if last_used_row >= 1:
+            used_range = stock_sheet.range((1, 1), (last_used_row, 2))
+            used_range.font.size = 20
+            for border_id in [7, 8, 9, 10, 11, 12]:
+                used_range.api.Borders(border_id).LineStyle = 1
+                used_range.api.Borders(border_id).Weight = 2
                 
-            stock_sheet.range(f"{col_letter_1}:{col_letter_2}").api.EntireColumn.AutoFit()
-            
-            wall_col = get_column_letter(out_col + 2)
-            stock_sheet.range(f"{wall_col}:{wall_col}").color = (0, 0, 0)
-            stock_sheet.range(f"{wall_col}:{wall_col}").column_width = 2
-            
-            out_col += 3
+        stock_sheet.range("A:B").api.EntireColumn.AutoFit()
                     
         if any_packs_selected:
             wb1_xw.save()

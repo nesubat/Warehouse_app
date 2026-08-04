@@ -32,7 +32,8 @@ There is no database. Everything the app "remembers" is stored as **actual files
 
 ```mermaid
 flowchart LR
-    Browser["🖥️ Your Browser"] <-->|"HTTP (clicks, uploads, downloads)"| Flask["app.py\n(Flask routes)"]
+    Browser["🖥️ Your Browser"] -->|"HTTP (clicks, uploads, downloads)"| Flask["app.py\n(Flask routes)"]
+    Flask --> Browser
     Flask --> Matrix["matrix_engine.py"]
     Flask --> Sub["subgroup_engine.py"]
     Flask --> PDF["pdf_engine.py"]
@@ -40,8 +41,8 @@ flowchart LR
     Sub --> Core
     Matrix -.controls.-> Excel[("Microsoft Excel\n(via xlwings)")]
     Sub -.controls.-> Excel
-    PDF -.reads/writes.-> Fitz[("PDF files\n(via PyMuPDF/fitz)")]
-    Flask <--> FS[("projects/ folder\non your hard drive")]
+    PDF -.processes.-> Fitz[("PDF files\n(via PyMuPDF/fitz)")]
+    Flask --> FS[("projects/ folder\non your hard drive")]
     Flask -->|renders| Templates["templates/*.html"]
     Templates --> JS["static/script.js"]
     Templates --> CSS["static/styles.css"]
@@ -519,7 +520,7 @@ flowchart TD
     F --> G{"Start/end item # not found?"}
     G -- yes --> Z
     G -- no --> H["STAGE 2 — insert new column(s) into File1,\nRIGHT-TO-LEFT by pack, batch-write the letter codes,\nre-merge + color the pack header"]
-    H --> I["STAGE 3 — re-map the item row (columns shifted after Stage 2's inserts),\nbuild a side-by-side matrix in a new/existing '<Tab> - SG' tab of File2"]
+    H --> I["STAGE 3 — re-map the item row (columns shifted after Stage 2's inserts),\nbuild a side-by-side matrix in that tab's own SG companion tab of File2"]
     I --> J{"Shifted columns not found?"}
     J -- yes --> Z
     J -- no --> K["Save File1 as the NEW Stage - N file\nSave File2 in place\nWrite the new Stage - N .json metadata"]
@@ -557,7 +558,7 @@ The whole engine branches on one measurement: is the PDF page **portrait** (tall
 
 ```mermaid
 flowchart TD
-    A[Open the PDF, measure page 1] --> B{width < height?}
+    A[Open the PDF, measure page 1] --> B{"page is taller than wide?"}
     B -- yes --> C["process_split_layout()\ntreat page as TOP half + BOTTOM half"]
     B -- no --> D["process_standard_layout()\ntreat page as ONE label, possibly spanning multiple pages"]
     C --> E[build_audit_report]
@@ -815,10 +816,10 @@ sequenceDiagram
     participant XL as Excel (via xlwings)
     participant FS as projects/ folder
 
-    U->>App: GET /subgroup/<project> (from dashboard modal)
+    U->>App: GET /subgroup/PROJECT_NAME (from dashboard modal)
     App->>FS: read chosen metadata .json
     App-->>U: sub-group.html (JS builds form from metadata)
-    U->>App: POST /subgroup/<project> (item ranges)
+    U->>App: POST /subgroup/PROJECT_NAME (item ranges)
     App->>Sub: execute_subgroups()
     Sub->>Sub: Stage 1: map item row → columns (validate!)
     alt validation fails
