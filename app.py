@@ -12,7 +12,7 @@ from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
 from core_math import clean_file_name, get_available_project_files
-from subgroup_engine import execute_subgroups
+from subgroup_engine import execute_subgroups, SubgroupValidationError
 
 
 
@@ -371,8 +371,13 @@ def setup_subgroup(project_name):
         print("-----------------------------\n")
 
         # 3. Trigger the Engine (We will build this function next!)
-        success = execute_subgroups(project_dir, metadata, subgroup_instructions)
-        
+        try:
+            execute_subgroups(project_dir, metadata, subgroup_instructions)
+        except SubgroupValidationError as e:
+            return render_template('sub-group.html', project_name=project_name, metadata=metadata,
+                                   metadata_json=json.dumps(metadata), target_json=target_json,
+                                   error=str(e))
+
         # 4. Redirect back to dashboard upon completion
         return redirect(url_for('dashboard'))
         
@@ -425,14 +430,55 @@ def pdf_engine():
                 return "No Signature links file found or uploaded. Please try again.", 400
             
             tabs_data = {}
+            duplicate_errors = []
             try:
                 with pd.ExcelFile(excel_path) as xls:
                     for sheet in xls.sheet_names:
                         df = pd.read_excel(xls, sheet_name=sheet)
                         packs = df.columns[1:].tolist()
                         tabs_data[sheet] = packs
+                        # --- CHECK FOR DUPLICATE STORE NAMES (COLUMN 0) ---
+                        if not df.empty:
+                            # Store names live in column 0
+                            store_col = df.iloc[:, 0].dropna().astype(str).str.strip()
+                            store_col = store_col[store_col.str.lower() != 'nan']  # Remove string 'nan'
+                            
+                            # Identify duplicates
+                            dupes = store_col[store_col.duplicated()].unique().tolist()
+                            if dupes:
+                                duplicate_errors.append(f"Tab '{sheet}': {', '.join(dupes)}")
             except Exception as e:
                 return f"Error reading Excel file: {e}", 500
+            # --- HALT PROCESS IF DUPLICATES EXIST ---
+            if duplicate_errors:
+                # Delete the newly created folder if a new upload was made
+                if excel_file and os.path.exists(project_folder):
+                    try:
+                        shutil.rmtree(project_folder, ignore_errors=True)
+                        print(f"[DEBUG] Purged project folder due to duplicate store errors: {project_folder}")
+                    except Exception as e:
+                        print(f"[DEBUG] Cleanup failed: {e}")
+                # Reload project list to safely render Step 1 again
+                projects_info = {}
+                if os.path.exists(PROJECTS_FOLDER):
+                    for folder_name in os.listdir(PROJECTS_FOLDER):
+                        folder_path = os.path.join(PROJECTS_FOLDER, folder_name)
+                        if os.path.isdir(folder_path):
+                            sig_file = None
+                            for f in os.listdir(folder_path):
+                                if f.lower().startswith("signature links") and (f.lower().endswith(".xlsx") or f.lower().endswith(".xls")):
+                                    sig_file = f
+                                    break
+                            projects_info[folder_name] = sig_file
+                
+                projects_json = json.dumps(projects_info)
+                
+                # Re-render Step 1 with duplicate errors
+                return render_template('pdf.html', 
+                                       step=1, 
+                                       existing_projects=list(projects_info.keys()), 
+                                       projects_json=projects_json, 
+                                       duplicate_errors=duplicate_errors)
                 
             return render_template('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name)
             

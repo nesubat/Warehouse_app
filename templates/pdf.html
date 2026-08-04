@@ -37,6 +37,34 @@
             </div>
             {% endif %}
         </div>
+        {% if step == 1 and duplicate_errors %}
+        <dialog id="duplicate-modal" class="modal-duplicate">
+            <h3 class="modal-duplicate-title">
+                ⚠️ Duplicate Store Names Found
+            </h3>
+            <p class="modal-duplicate-desc">
+                Cannot proceed with processing. The uploaded file contains duplicate store names in Column A. Each store name must be unique for proper allocation.:
+            </p>
+            
+            <div class="modal-duplicate-box">
+                <ul class="modal-duplicate-list">
+                    {% for err in duplicate_errors %}
+                        <li><strong>{{ err }}</strong></li>
+                    {% endfor %}
+                </ul>
+            </div>
+            
+            <p class="modal-duplicate-note">
+                Please clean your Excel sheet so each store name is unique, then re-upload.
+            </p>
+            
+            <div class="modal-actions-end">
+                <button type="button" class="btn btn-secondary" onclick="document.getElementById('duplicate-modal').close()">
+                    Close & Fix File
+                </button>
+            </div>
+        </dialog>
+        {% endif %}
 
         <!-- STEP 1: Upload Excel & Select Project -->
         {% if step == 1 %}
@@ -69,8 +97,14 @@
                     <p style="font-size: 15px; color: #7f8c8d; margin-top: 2px;" id="file-helper-text">
                         Required if creating a new project. If using an existing project, you can upload a fresh Excel file or skip if already present.
                     </p>
-                    <div class="upload-box">
-                        <input type="file" name="excel_file" id="excel_file_input" accept=".xlsx, .xls">
+                    <div class="dropzone">
+                        <div class="dropzone-content">
+                            <div class="dropzone-icon">📁</div>
+                            <p class="dropzone-text">Drag &amp; drop your Signature Links file here</p>
+                            <p class="dropzone-subtext">or click to browse — .xlsx, .xls</p>
+                            <p class="dropzone-filename"></p>
+                        </div>
+                        <input type="file" name="excel_file" id="excel_file_input" class="dropzone-input" accept=".xlsx, .xls">
                     </div>
                 </div>
                 
@@ -94,28 +128,38 @@
             {% for tab, packs in tabs_data.items() %}
             <div class="tab-card">
                 <h3 class="tab-title">Excel Tab: {{ tab }}</h3>
-                
-                {% for pack in packs %}
-                <div class="project-name-group">
-                    <div class="project-header">
-                        <h2 class="project-title">{{ pack }}</h2>
-                    </div>
-                    
-                    <div class="input-field" style="margin-top: 15px;">
-                        <label class="project-name-label">Attach PDF Label File (Leave blank to skip)</label>
-                        
-                        <!-- THE FIX: Use '---' as the separator to prevent underscore conflicts -->
-                        <input type="file" name="pdf---{{ tab }}---{{ pack }}" accept=".pdf" class="project-name-input pdf-file-input" data-pack="{{ tab }}---{{ pack }}">
-                        
-                        <div id="divider-container-{{ tab }}---{{ pack }}" style="display: none; margin-top: 8px; margin-left: 20px;">
-                            <label style="display: flex; align-items: center; gap: 8px; color: #34495e; font-size: 14px; cursor: pointer;">
-                                <input type="checkbox" name="divider---{{ tab }}---{{ pack }}" class="pack-divider-checkbox" value="true" style="width: 16px; height: 16px; accent-color: #f1c40f;">
-                                Add yellow divider sheets to this pack
-                            </label>
+
+                <div class="pack-grid">
+                    {% for pack in packs %}
+                    <div class="project-name-group">
+                        <div class="project-header">
+                            <h2 class="project-title">{{ pack }}</h2>
+                        </div>
+
+                        <div class="input-field" style="margin-top: 15px;">
+                            <label class="project-name-label">Attach PDF Label File (Leave blank to skip)</label>
+
+                            <div class="dropzone dropzone-compact">
+                                <div class="dropzone-content">
+                                    <div class="dropzone-icon">📄</div>
+                                    <p class="dropzone-text">Drag &amp; drop PDF here</p>
+                                    <p class="dropzone-subtext">or click to browse</p>
+                                    <p class="dropzone-filename"></p>
+                                </div>
+                                <!-- THE FIX: Use '---' as the separator to prevent underscore conflicts -->
+                                <input type="file" name="pdf---{{ tab }}---{{ pack }}" accept=".pdf" class="pdf-file-input dropzone-input" data-pack="{{ tab }}---{{ pack }}">
+                            </div>
+
+                            <div id="divider-container-{{ tab }}---{{ pack }}" style="display: none; margin-top: 8px; margin-left: 20px;">
+                                <label style="display: flex; align-items: center; gap: 8px; color: #34495e; font-size: 14px; cursor: pointer;">
+                                    <input type="checkbox" name="divider---{{ tab }}---{{ pack }}" class="pack-divider-checkbox" value="true" style="width: 16px; height: 16px; accent-color: #f1c40f;">
+                                    Add yellow divider sheets to this pack
+                                </label>
+                            </div>
                         </div>
                     </div>
+                    {% endfor %}
                 </div>
-                {% endfor %}
             </div>
             {% endfor %}
             

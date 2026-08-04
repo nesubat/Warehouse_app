@@ -38,11 +38,19 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 
 ## 🚀 Workflow Overview
 
-1.  **Start a Job:** Navigate to the Home page and select **Create Packing Sheets**.
-2.  **Upload & Map:** Upload your raw distribution Excel file, select the tabs to process, and define the starting coordinates.
-3.  **Generate:** The Matrix Engine creates your baseline `Project Folder`, Master Packing Sheet, and JSON metadata file.
-4.  **Iterate (Optional):** From the Dashboard, click **Create Sub-Group** on your project. Select your baseline metadata (e.g., Original or Stage 1) and define your item ranges to generate the next Stage.
-5.  **Shuffle Labels:** Navigate to the **Labels Shuffler**, point it to your project's Excel data, upload the raw PDF labels, and download the perfectly sorted batches.
+```mermaid
+flowchart TD
+    A[📊 Create Packing Sheets] --> B[Upload Distribution Excel<br/>drag & drop or browse]
+    B --> C[Map Coordinates<br/>Start Cell · Job ID · Store Col]
+    C --> D[Matrix Engine<br/>Master Packing Sheet + Metadata]
+    D --> E{Need a finer<br/>breakdown?}
+    E -- Yes --> F[✂️ Create Sub-Group<br/>pick baseline Stage + item ranges]
+    F -- invalid item # / typo --> F2[❌ Aborts with error shown on screen]
+    F -- valid --> D
+    E -- No --> G[🖨️ Label Shuffler<br/>upload raw PDF labels]
+    G --> H[Auto-sorted by Signature Code<br/>+ optional dividers]
+    H --> I[📥 Download from Dashboard]
+```
 
 ---
 

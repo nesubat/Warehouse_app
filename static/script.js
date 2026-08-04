@@ -409,6 +409,30 @@ document.addEventListener("DOMContentLoaded", function() {
     }
 
     // =========================================
+    // 8b. DRAG & DROP FILE INPUTS (Global)
+    // =========================================
+    // The file input itself covers the whole dropzone (transparent), so the
+    // browser's native drag/drop-onto-input behavior already works. This just
+    // adds the hover highlight and the "selected file" label underneath.
+    document.querySelectorAll('.dropzone').forEach(function(zone) {
+        const input = zone.querySelector('.dropzone-input');
+        const filenameEl = zone.querySelector('.dropzone-filename');
+        if (!input) return;
+
+        function showFilename() {
+            if (filenameEl) {
+                filenameEl.textContent = input.files.length ? `✓ ${input.files[0].name}` : '';
+            }
+        }
+
+        input.addEventListener('change', showFilename);
+        input.addEventListener('dragenter', () => zone.classList.add('dropzone-active'));
+        input.addEventListener('dragleave', () => zone.classList.remove('dropzone-active'));
+        input.addEventListener('drop', () => zone.classList.remove('dropzone-active'));
+        showFilename();
+    });
+
+    // =========================================
     // 8. LOADING OVERLAYS (Global)
     // =========================================
     document.body.addEventListener('submit', function(e) {
@@ -424,3 +448,13 @@ document.addEventListener("DOMContentLoaded", function() {
     });
 
 }); 
+// =========================================
+// 9. DUPLICATE STORE NAME ALERT (Step 1)
+// =========================================    
+document.addEventListener('DOMContentLoaded', function() {
+    // Auto-open the Duplicate Store modal if it exists on page render
+    const dupeModal = document.getElementById('duplicate-modal');
+    if (dupeModal) {
+        dupeModal.showModal();
+    }
+});

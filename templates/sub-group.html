@@ -25,6 +25,13 @@
             <a href="/" class="nav-link">← Back to Dashboard</a>
         </div>
 
+        {% if error %}
+        <div class="blueprint-card blueprint-error">
+            <h4>❌ Could Not Create Sub-Groups</h4>
+            <p style="color: #e74c3c;">{{ error }}</p>
+        </div>
+        {% endif %}
+
         <form action="/subgroup/{{ project_name }}" method="POST">
             <input type="hidden" name="target_json" value="{{ target_json }}">
             <!-- MASTER TAB SELECTION -->

@@ -38,14 +38,18 @@
                 <li><strong>File Type:</strong> Only standard <strong>.xlsx</strong> or <strong>.xls</strong> files are supported.</li>
             </ul>
         </div>
-    <div class="upload-box">
-        <p>Upload a Distribution file to begin.</p>
-        <form method="POST" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".xlsx, .xls" required>
-            <br><br>
-            <button type="submit">Scan File</button>
-        </form>
-    </div>
+    <form method="POST" enctype="multipart/form-data">
+        <div class="dropzone">
+            <div class="dropzone-content">
+                <div class="dropzone-icon">📁</div>
+                <p class="dropzone-text">Drag &amp; drop your Distribution file here</p>
+                <p class="dropzone-subtext">or click to browse — .xlsx, .xls</p>
+                <p class="dropzone-filename"></p>
+            </div>
+            <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls" required>
+        </div>
+        <button type="submit">Scan File</button>
+    </form>
     {% endif %}
 
     {% if tabs %}

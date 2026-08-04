@@ -5,6 +5,55 @@ import xlwings as xw
 from openpyxl.utils import get_column_letter
 from core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, get_next_stage_filenames
 
+
+class SubgroupValidationError(Exception):
+    """Raised when the user-provided item row/numbers can't be safely resolved against the sheet."""
+    pass
+
+
+def _map_item_columns(row_data, tab_name, item_row):
+    """Maps item numbers in a row to their column index.
+
+    Aborts loudly (instead of silently overwriting/skipping) when the row has
+    no item numbers at all, or when the same item number appears in more than
+    one column (a typo, since item numbers must be unique per cell).
+    """
+    col_map = {}
+    duplicates = {}
+
+    for c_idx, val in enumerate(row_data):
+        if val is None:
+            continue
+        try:
+            item_num = int(float(val))
+        except (ValueError, TypeError):
+            continue
+
+        col = c_idx + 1
+        if item_num in col_map:
+            duplicates.setdefault(item_num, [col_map[item_num]]).append(col)
+        else:
+            col_map[item_num] = col
+
+    if not col_map:
+        raise SubgroupValidationError(
+            f"Tab '{tab_name}': no item numbers were found in row {item_row}. "
+            f"Double-check that this is the correct Item Number Row."
+        )
+
+    if duplicates:
+        details = "; ".join(
+            f"item {num} appears in columns {', '.join(get_column_letter(c) for c in cols)}"
+            for num, cols in duplicates.items()
+        )
+        raise SubgroupValidationError(
+            f"Tab '{tab_name}': duplicate item numbers found in row {item_row} ({details}). "
+            f"Item numbers must be unique per column — check for typos in the sheet and try again."
+        )
+
+    return col_map
+
+
 def execute_subgroups(project_dir, metadata, subgroup_instructions):
     print("\n[DEBUG] =========================================")
     print("[DEBUG] STARTING SUB-GROUP ENGINE (XLWINGS)")
@@ -81,16 +130,16 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             # =========================================================
             print("[DEBUG] [STAGE 1] Extracting 2D Array and mapping item numbers...")
             raw_values = ws1.used_range.value
-            item_col_map = {}
-            item_row_data = raw_values[item_row - 1] 
-            
-            for c_idx, val in enumerate(item_row_data):
-                if val is not None:
-                    try:
-                        item_col_map[int(float(val))] = c_idx + 1 
-                    except ValueError:
-                        pass 
-            
+
+            if item_row - 1 >= len(raw_values):
+                raise SubgroupValidationError(
+                    f"Tab '{tab_name}': row {item_row} is out of range — this sheet only has "
+                    f"{len(raw_values)} rows. Check the Item Number Row value."
+                )
+
+            item_row_data = raw_values[item_row - 1]
+            item_col_map = _map_item_columns(item_row_data, tab_name, item_row)
+
             compiled_data = {}
             
             for pack_name, ranges in tab_data["packs"].items():
@@ -103,9 +152,13 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     end_col_letter = get_column_letter(end_col) if end_col else "N/A"   
                     
                     if not start_col or not end_col:
-                        print(f"[WARNING] Could not find columns for items {start_num}-{end_num}. Skipping.")
-                        continue
-                        
+                        missing = [str(n) for n, c in ((start_num, start_col), (end_num, end_col)) if not c]
+                        raise SubgroupValidationError(
+                            f"Tab '{tab_name}', Pack '{pack_name}': item number(s) {', '.join(missing)} "
+                            f"not found in row {item_row}. Check for typos in the Start/End Item # "
+                            f"fields or the Item Number Row."
+                        )
+
                     print(f"[DEBUG]   -> Sub-group {start_num}-{end_num} mapped to Columns {start_col_letter} through {end_col_letter}")
                     store_rows = range(pack_group_row + 1, last_row + 1)
                     
@@ -219,16 +272,9 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
 
                 # --- ADD THIS: Re-map item columns after Stage 2 insertions ---
                 print("[DEBUG] Re-mapping item columns in File 1 after insertions...")
-                updated_item_col_map = {}
                 # Pull the freshly updated item row from File 1
                 updated_item_row_data = ws1.range(f"{item_row}:{item_row}").value
-                
-                for c_idx, val in enumerate(updated_item_row_data):
-                    if val is not None:
-                        try:
-                            updated_item_col_map[int(float(val))] = c_idx + 1 
-                        except ValueError:
-                            pass
+                updated_item_col_map = _map_item_columns(updated_item_row_data, tab_name, item_row)
                 # --------------------------------------------------------------
 
                 for p_name, sg_mat in file2_matrices:
@@ -237,9 +283,12 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     e_col = updated_item_col_map.get(int(sg_mat['end_num']))
                     
                     if not s_col or not e_col:
-                        print(f"[WARNING] Could not find shifted columns for {sg_mat['header_str']}. Skipping.")
-                        continue
-                        
+                        raise SubgroupValidationError(
+                            f"Tab '{tab_name}': could not find shifted columns for sub-group "
+                            f"'{sg_mat['header_str']}' after inserting columns. This points to an "
+                            f"internal mapping error — please report this."
+                        )
+
                     col_span = e_col - s_col
                     print(f"[DEBUG] Building Matrix for {p_name} ({sg_mat['header_str']}) at offset column {offset_col}")
 
