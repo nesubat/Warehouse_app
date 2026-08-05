@@ -114,6 +114,8 @@ def format_file2(sheet, pack_group_row, p_start, p_end, write_data):
     data_range.api.VerticalAlignment = -4108
     data_range.font.bold = True
     data_range.font.color = (0, 0, 0)
+    data_range.rows.autofit()
+    
     
     # 2. Banded Rows
     for r_offset in range(len(write_data)):
@@ -126,7 +128,7 @@ def format_file2(sheet, pack_group_row, p_start, p_end, write_data):
     # 3. Apply Borders
     for border_id in [7, 8, 9, 10, 11, 12]:
         data_range.api.Borders(border_id).LineStyle = 1 
-        data_range.api.Borders(border_id).Weight = 2
+        data_range.api.Borders(border_id).Weight = 4
 
 def build_initial_metadata(tab_info, inputs, selected_list, any_packs_selected):
     """Builds the foundational JSON map tracking exact Excel column coordinates."""
