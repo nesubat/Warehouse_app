@@ -476,10 +476,10 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
-    
-    base_file1_name = os.path.splitext(file1_name)[0]
-    metadata_path = os.path.join(project_dir, f"{base_file1_name}.json")
-    with open(metadata_path, 'w') as f:
-        json.dump(project_metadata, f, indent=4)
+    if file1_name: 
+        base_metadata_name = os.path.splitext(file1_name)[0]
+        metadata_path = os.path.join(project_dir, f"{base_metadata_name}.json")
+        with open(metadata_path, 'w') as f:
+            json.dump(project_metadata, f, indent=4)
     
     return file1_name, file2_name, file3_name
