@@ -8,6 +8,13 @@ def clean_file_name(raw_string):
     string_val = re.sub(r'\s+', ' ', str(raw_string)).strip()
     cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', string_val)
     return cleaned.strip()
+def clean_store_name(value):
+    if value is None or str(value).strip().lower() == 'nan':
+        return ""
+    # Strip periods and other unwanted characters, keeping only alphanumeric and spaces
+    cleaned = re.sub(r'[.]', '', str(value))
+    # Collapse multiple internal spaces into a single space
+    return re.sub(r'\s+', ' ', cleaned).strip()
 
 def sanitize_cell(val):
     """Cleans messy Excel data into strict numbers, text, or zero."""

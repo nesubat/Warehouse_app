@@ -7,7 +7,8 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name
+
 
 
 def scan_excel_tabs(file_path):
@@ -44,7 +45,7 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         last_row = sheet.max_row
         while last_row > 0 and sheet.cell(row=last_row, column=store_col_idx).value is None:
             last_row -= 1
-        if "total" or "grand total" in str(sheet.cell(row=last_row, column=store_col_idx).value).strip().lower():
+        if "total" in str(sheet.cell(row=last_row, column=store_col_idx).value).strip().lower():
             last_row -= 1
             
         total_stores = last_row - max(pack_group_row, job_id_row)
@@ -443,7 +444,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 store_names = []
                 for r in range(start_r, end_r + 1):
                     val = sheet_raw.cell(row=r, column=store_col_idx).value
-                    store_names.append(str(val) if val is not None else "")
+                    store_names.append(clean_store_name(val))
                 
                 df_dict = {"Store Name": store_names}
                 
@@ -475,10 +476,10 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
-    
-    base_file1_name = os.path.splitext(file1_name)[0]
-    metadata_path = os.path.join(project_dir, f"{base_file1_name}.json")
-    with open(metadata_path, 'w') as f:
-        json.dump(project_metadata, f, indent=4)
+    if file1_name: 
+        base_metadata_name = os.path.splitext(file1_name)[0]
+        metadata_path = os.path.join(project_dir, f"{base_metadata_name}.json")
+        with open(metadata_path, 'w') as f:
+            json.dump(project_metadata, f, indent=4)
     
     return file1_name, file2_name, file3_name
