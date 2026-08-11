@@ -44,7 +44,7 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         last_row = sheet.max_row
         while last_row > 0 and sheet.cell(row=last_row, column=store_col_idx).value is None:
             last_row -= 1
-        if "total" or "grand total" in str(sheet.cell(row=last_row, column=store_col_idx).value).strip().lower():
+        if "total" in str(sheet.cell(row=last_row, column=store_col_idx).value).strip().lower():
             last_row -= 1
             
         total_stores = last_row - max(pack_group_row, job_id_row)
