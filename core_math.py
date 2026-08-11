@@ -128,7 +128,7 @@ def format_file2(sheet, pack_group_row, p_start, p_end, write_data):
     # 3. Apply Borders
     for border_id in [7, 8, 9, 10, 11, 12]:
         data_range.api.Borders(border_id).LineStyle = 1 
-        data_range.api.Borders(border_id).Weight = 4
+        data_range.api.Borders(border_id).Weight = 3
 
 def build_initial_metadata(tab_info, inputs, selected_list, any_packs_selected):
     """Builds the foundational JSON map tracking exact Excel column coordinates."""
