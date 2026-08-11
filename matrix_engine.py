@@ -7,7 +7,8 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name
+
 
 
 def scan_excel_tabs(file_path):
@@ -443,7 +444,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 store_names = []
                 for r in range(start_r, end_r + 1):
                     val = sheet_raw.cell(row=r, column=store_col_idx).value
-                    store_names.append(str(val) if val is not None else "")
+                    store_names.append(clean_store_name(val))
                 
                 df_dict = {"Store Name": store_names}
                 
