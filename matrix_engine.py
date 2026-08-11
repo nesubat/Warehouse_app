@@ -471,9 +471,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 workbook = writer.book
                 format16 = workbook.add_format({'font_size': 16, 'align': 'center'})
                 
-                # Set Autofit Width to 25 and force Font Size 16
-                worksheet.set_column(0, len(df_dict) - 1, 25, format16) 
-                
+                # Set Font Size 16
+                worksheet.set_column(0, len(df_dict) - 1, None, format16) 
+                worksheet.autofit()
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
     if file1_name: 
