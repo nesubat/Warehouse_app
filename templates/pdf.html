@@ -59,28 +59,31 @@
                 Nothing has been deleted. Open the file below, fix the duplicate store names, save it, then click "Recheck File" — no need to re-upload.
             </p>
 
-            <div class="modal-actions-end" style="gap: 10px;">
+            <div class="modal-actions-end">
+                <button type="button" class="btn-file ghost" onclick="document.getElementById('duplicate-modal').close()">
+                    Close
+                </button>
                 <a href="{{ url_for('open_local_file', folder_name=duplicate_project_name, filename=duplicate_excel_filename) }}" class="btn-file open">
                     📂 Open Excel File
                 </a>
-                <form method="POST" style="display: inline;">
+                <form method="POST" style="display: contents;">
                     <input type="hidden" name="step" value="1">
                     <input type="hidden" name="existing_project" value="{{ duplicate_project_name }}">
                     <input type="hidden" name="resume_filename" value="{{ duplicate_excel_filename }}">
-                    <button type="submit" class="btn-generate" style="margin-top: 0;">🔄 Recheck File</button>
+                    <button type="submit" class="btn-file primary">🔄 Recheck File</button>
                 </form>
             </div>
             {% else %}
             <p class="modal-duplicate-note">
                 Please clean your Excel sheet so each store name is unique, then re-upload.
             </p>
-            {% endif %}
 
             <div class="modal-actions-end">
-                <button type="button" class="btn btn-secondary" onclick="document.getElementById('duplicate-modal').close()">
+                <button type="button" class="btn-file ghost" onclick="document.getElementById('duplicate-modal').close()">
                     Close
                 </button>
             </div>
+            {% endif %}
         </dialog>
         {% endif %}
 

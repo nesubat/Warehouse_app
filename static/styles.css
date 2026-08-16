@@ -543,6 +543,20 @@ button:hover { background-color: #2980b9; }
 }
 .btn-file.delete:hover { background-color: #fadbd8; }
 
+.btn-file.primary {
+    background-color: #2ecc71;
+    color: white;
+    border: 1px solid #27ae60;
+}
+.btn-file.primary:hover { background-color: #27ae60; }
+
+.btn-file.ghost {
+    background-color: white;
+    color: #566573;
+    border: 1px solid #d5dbdb;
+}
+.btn-file.ghost:hover { background-color: #f4f6f7; }
+
 /* --- SUBGROUP TAB SELECTION --- */
 .tab-checkbox-grid {
     display: grid;
@@ -625,4 +639,7 @@ button:hover { background-color: #2980b9; }
 .modal-actions-end {
     display: flex;
     justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
 }
