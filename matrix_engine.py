@@ -220,7 +220,22 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             
             if any_packs_selected:
                 sheet1_xw = wb1_xw.sheets[tab_name]
-            
+
+                # --- CLEAN STORE NAMES IN FILE 1 ---
+                # File 3 (Signature Links) already rebuilds its "Store Name" column through
+                # clean_store_name() below. File 1 (the Final file the label PDFs get matched
+                # against) previously kept the raw, uncleaned text in that same column, so the
+                # same store could read differently between the two outputs. Clean it here too,
+                # over the identical row range/column used for File 3, so both stay consistent.
+                store_col_letter = get_column_letter(tab_info["store_col_idx"])
+                store_start_r = tab_info["pack_group_row"] + 1
+                store_end_r = tab_info["last_row"]
+                store_range = sheet1_xw.range(f"{store_col_letter}{store_start_r}:{store_col_letter}{store_end_r}")
+                raw_store_values = store_range.value
+                if not isinstance(raw_store_values, list):
+                    raw_store_values = [raw_store_values]
+                store_range.value = [[clean_store_name(v)] for v in raw_store_values]
+
             # --- CALCULATE SIGNATURES & INJECT INTO FILE 1 (If Selected) ---
             for pack in reversed(tab_info["pack_ranges"]):
                 p_name = pack["name"]
@@ -446,7 +461,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     val = sheet_raw.cell(row=r, column=store_col_idx).value
                     store_names.append(clean_store_name(val))
                 
-                df_dict = {"Store Name": store_names}
+                df_dict = {""
+                " Name": store_names}
                 
                 # Extract Ordered Codes
                 for p_sum in reversed(tab_summaries.get(tab_name, [])):
