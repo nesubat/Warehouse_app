@@ -19,6 +19,8 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 ### 3. 🖨️ PDF Label Shuffler
 *   **Signature Matching:** Upload raw PDF store labels and automatically sort them to perfectly match the Excel Signature Code groups.
 *   **Divider Injection:** Optional toggle to insert visual divider pages between different packing groups to assist floor workers.
+*   **Safe Duplicate Handling:** If the Signature Links file has duplicate store names, nothing is deleted — open the file, fix it, and click "Recheck File" to continue instantly, without re-uploading.
+*   **Audit Report:** Every shuffled PDF starts with a report page listing any missing/unmatched stores (grouped by code, auto-laid-out into columns) and flagging any code group where a store name repeated unexpectedly, so a mis-sorted batch is never silently trusted.
 
 ### 4. 🗂️ Project Dashboard & File Management
 *   **Persistent Sessions:** Jobs are organized into dedicated, timestamped project folders (e.g., `ProjectName_Job-123_260803_1430`).
@@ -60,6 +62,7 @@ flowchart TD
 * **Microsoft Excel:** Local installation of Microsoft Excel is strictly required because `xlwings` uses Excel's native engine to render complex grid modifications.
 * **Local Directory:** Run this application strictly from a local directory (e.g., `C:\Warehouse_app`). **Do not run inside cloud-synced folders** (OneDrive, SharePoint, Dropbox), as cloud engines lock newly created Excel files and crash cleanup routines.
 * **Data Hygiene:** The application is built to automatically detect true sheet boundaries. However, keeping input files trimmed of unused rows/columns is recommended for maximum processing speed.
+* **Save before generating:** If you used an "Open Excel File" link to inspect or fix a spreadsheet and left it open, the app will automatically force-close that copy (discarding any unsaved changes in it) the moment it needs to take over that file — so make sure you've saved before clicking Generate/Recheck.
 
 ---
 
@@ -81,8 +84,9 @@ venv\Scripts\activate
 ```
 ### 3. Install dependencies
 ```bash
-pip install flask pandas openpyxl xlwings werkzeug xlsxwriter fitz pyinstaller 
+pip install flask pandas openpyxl xlwings werkzeug xlsxwriter pymupdf pyinstaller 
 ```
+> Note: install `pymupdf`, not `fitz` — `fitz` on PyPI is an unrelated placeholder package. `pdf_engine.py` imports it as `import pymupdf as fitz` (`fitz` is just PyMuPDF's legacy import alias), so the code still reads `fitz.` everywhere even though the installed package is `pymupdf`.
 ### 4.Run application
 ```bash
 python app.py 

@@ -196,7 +196,7 @@ job_id = clean_file_name(blueprints[first_tab].get("raw_job_id", "UNKNOWN"))
 time_stamp = datetime.now().strftime("%y%m%d_%H%M")
 final_folder_name = f"{safe_project_name}_Job-{job_id}_{time_stamp}"
 ```
-So a folder like `SummerCampaign_Job-12345_260804_1430` is born. The originally-uploaded file is then `shutil.move()`d from the loose `projects/` folder into this new sub-folder, and `generate_all_outputs()` (the real engine, [Section 6.3](#63-generate_all_outputs--the-core-generator)) is called to build File 1/2/3. The three resulting filenames are filtered to drop any that are `None` (File 1 and File 3 are only created if at least one pack was selected for signature-code generation — see the `any_packs_selected` logic below) and shown to the user as download buttons.
+So a folder like `SummerCampaign_Job-12345_260804_1430` is born. Right before the originally-uploaded file is `shutil.move()`d from the loose `projects/` folder into this new sub-folder, `close_if_open_elsewhere(filepath)` ([Section 5](#5-core_mathpy--shared-math--formatting)) is called — if the user opened that exact file via the "Open Excel File" button in `matrix.html` to check it (or fix a duplicate store name) and never closed it, Excel's file lock would otherwise make `shutil.move()` crash with a `PermissionError`. This force-closes that copy first (discarding any unsaved edits in it — by this point the user has already saved what they meant to keep). Then `generate_all_outputs()` (the real engine, [Section 6.3](#63-generate_all_outputs--the-core-generator)) is called to build File 1/2/3. The three resulting filenames are filtered to drop any that are `None` (File 1 and File 3 are only created if at least one pack was selected for signature-code generation — see the `any_packs_selected` logic below) and shown to the user as download buttons.
 
 **`/download/<folder_name>/<filename>` (lines 184–195).** A very small, security-conscious route: `os.path.basename()` is applied to both URL parts so a mischievous URL like `/download/../../secrets/file.txt` can't escape the `projects/` folder. If the file exists, `send_file(..., as_attachment=True)` streams it to the browser as a download.
 
@@ -219,11 +219,12 @@ The "Zombie Sweeper" comment refers to folders that are empty because Windows/On
 
 `json_files` are **sorted newest-first by creation time** (`os.path.getctime`) — this feeds the "Create Sub-Group" popup dropdown in `index.html`, so the most recent Stage is offered first as the baseline.
 
-### 4.4 Project & File Management: `/delete`, `/delete_file`, `/open_local`
+### 4.4 Project & File Management: `/delete`, `/delete_file`, `/open_local`, `/open_upload`
 
 - **`/delete/<folder_name>`** — deletes an entire project. Before calling `shutil.rmtree`, it manually walks every file with `os.walk` and calls `os.chmod(file_path, stat.S_IWRITE)` to strip any read-only flag first. This matters because files that were just closed by Excel/xlwings can briefly retain a read-only attribute that would otherwise make `rmtree` fail.
 - **`/delete_file/<folder_name>/<filename>`** — same idea, but for a single file (used by the little 🗑️ Delete button next to each file row in the dashboard).
 - **`/open_local/<folder_name>/<filename>`** — calls Windows' own `os.startfile(file_path)`, which is the exact same as double-clicking the file in File Explorer — it opens in whatever program Windows has associated with that extension (Excel, Adobe Reader, etc.). Returns an empty `204 No Content` response so the browser's JavaScript `fetch()` call (see [Section 10.2.D](#10-staticscriptjs--the-frontend-brain)) doesn't navigate away from the dashboard.
+- **`/open_upload/<filename>`** — the exact same `os.startfile()` trick, but for a file that's still sitting loose in the `projects/` root rather than inside a project sub-folder yet. This exists because `matrix.html` lets the user open the raw distribution file (to inspect it, or fix a duplicate store name) at a point in the wizard — right after upload, before "Generate" — when no project folder has been created yet, so `/open_local`'s `folder_name` segment doesn't apply. Once "Generate" actually runs, the file moves into its project folder and `/open_local` takes over for anything after that point.
 
 ### 4.5 The Sub-Group route: `/subgroup/<project_name>` (lines 315–384)
 
@@ -276,7 +277,8 @@ flowchart TD
     D --> E[Create/locate the project folder]
     E --> F[Read every tab of the Signature Links Excel with pandas]
     F --> G{Duplicate store names\nin column A of any tab?}
-    G -- yes --> H["🗑️ Delete the just-created folder (if new)\nRe-render Step 1 with an error modal"]
+    G -- yes --> H["Nothing is deleted.\nRe-render Step 1 with the error modal:\nOpen Excel File / Recheck File / Close"]
+    H -.->|"user fixes + saves,\nclicks Recheck File"| D
     G -- no --> I[Render Step 2: one dropzone per Tab × Pack]
 
     I --> J["POST step=2"]
@@ -288,9 +290,13 @@ flowchart TD
 
 **Step 1 (lines 394–483).** Two ways to pick a project: the `existing_project` dropdown, or typing a `new_project` name (a timestamp gets appended to new names to keep them unique). Whichever Excel file is in play — either freshly uploaded, or an existing `"Signature Links..."` file already sitting in that project's folder (found by `.startswith("signature links")`, case-insensitive) — gets opened with `pd.ExcelFile`. For **every sheet**, `df.columns[1:]` (everything except the first column, which holds store names) becomes the list of "Packs" shown in Step 2.
 
-The duplicate-store check here matters a lot for the PDF engine: `process_and_shuffle_pdf` matches a label to a store purely by **searching for the store's name inside the label's text** — if two stores in the same tab share a name, the shuffler can't reliably tell them apart, so this route refuses to continue and shows exactly which tab/names collided (`⚠️ Duplicate Store Names Found` dialog — see [Section 9.3](#93-pdfhtml)).
+The duplicate-store check here matters a lot for the PDF engine: `process_and_shuffle_pdf` matches a label to a store purely by **searching for the store's name inside the label's text** — if two stores in the same tab share a name, the shuffler can't reliably tell them apart, so this route refuses to continue.
 
-This only catches *exact* duplicate names, though. Two *different but similar* names (e.g. `"Northlands"` and `"Northlands NZ"`) pass this check fine, but can still confuse the substring matcher at PDF-processing time — see the collision detection described in [Section 8.4](#84-build_audit_report-and-build_divider_sheet).
+**Nothing gets deleted on a duplicate.** Earlier versions of this route `shutil.rmtree`'d the project folder the moment a duplicate was found — which, for an *existing* project, meant a bad re-upload could wipe out everything already generated for that job. Now the folder and the uploaded Excel are left exactly where they are, and the duplicate modal (`⚠️ Duplicate Store Names Found` — see [Section 9.3](#93-pdfhtml)) gives the user two extra buttons instead of just a dead end:
+- **"Open Excel File"** — an `<a>` styled with `class="btn-file open"` pointing at `/open_local/<project>/<filename>`, intercepted by the same generic fetch-based opener described in [Section 10.2.D](#10-staticscriptjs--the-frontend-brain) — no page navigation, the file just pops open in Excel.
+- **"Recheck File"** — a tiny second `<form>` inside the modal that resubmits `step=1` with the *same* `existing_project` and a `resume_filename` hidden field carrying the exact filename that was flagged. On the server side, Scenario B of Step 1 checks `resume_filename` first (an exact match against a file already in that project folder) before falling back to its usual `"signature links"`-prefix search — so recheck works even for a brand-new project whose file was never named that way. If the duplicates are gone, Step 1 falls straight through to Step 2 with zero extra clicks; if not, the same modal reappears.
+
+This only catches *exact* duplicate names, though. Two *different but similar* names (e.g. `"Northlands"` and `"Northlands NZ"`) pass this check fine, but can still confuse the substring matcher at PDF-processing time — see the collision detection described in [Section 8.4](#84-build_audit_report-and-build_divider_sheet), and the separate same-store-matched-twice detection in [Section 8.2](#82-process_standard_layout).
 
 **Step 2 (lines 486–571).** The form field names carry structured information inside their *name attribute itself*, using `---` as a separator (chosen specifically because pack/tab names might contain underscores):
 ```html
@@ -392,6 +398,17 @@ The same shifting idea, but triggered by the *Sub-Group Engine* inserting a colu
 ### `get_next_stage_filenames(...)` / `get_available_project_files(...)`
 Small filesystem helpers. The first parses a filename like `"Stage - 2 - Final Book1.xlsx"` with a regex to produce `"Stage - 3 - Final Book1.xlsx"` — note that `subgroup_engine.py` actually contains its own (near-identical) inline version of this numbering logic and doesn't end up calling this particular function; it's kept here as a small reusable utility. The second just lists `.json` files in a project folder, sorted alphabetically (which conveniently also sorts them "Stage 1, Stage 2, Stage 3..." since that's how the filenames are constructed).
 
+### `close_if_open_elsewhere(file_path)`
+Shared by both `matrix_engine.py`'s `/generate` (via `app.py`) and `subgroup_engine.py` — anywhere the app is about to grab exclusive `xlwings` control of a file, or move/rename it, that could collide with the user having the exact same file open for a look (e.g. via one of the "Open Excel File" buttons added to `matrix.html`/`pdf.html`).
+```python
+target = os.path.normcase(os.path.normpath(file_path))
+for running_app in list(xw.apps):
+    for book in list(running_app.books):
+        if os.path.normcase(os.path.normpath(book.fullname)) == target:
+            book.api.Close(SaveChanges=False)
+```
+It loops through every **currently running** Excel application instance (`xw.apps` — there can be more than one if the user has separate Excel windows open) and every workbook open in each one, comparing normalized full paths. If it finds the exact file already open somewhere, it force-closes *that specific copy* — discarding any unsaved edits in it — before the app's own automation proceeds. This is deliberately blunt: by the point this runs, the user has either already saved what they meant to keep, or is about to have the app write fresh content over the same file anyway, so a silently-discarded stray edit is a smaller risk than the alternative (Excel's file lock making the whole operation crash with a `PermissionError`, or silently handing the app a stale read-only view). If no Excel instance has the file open at all, the loops simply find nothing and the function is a no-op.
+
 ---
 
 ## 6. `matrix_engine.py` — The Matrix Engine
@@ -455,6 +472,13 @@ flowchart TD
 ```
 
 **Why right-to-left?** (`for pack in reversed(tab_info["pack_ranges"])`) Inserting a new column shifts every column *after* it one position to the right. If you inserted left-to-right, every subsequent pack's remembered column numbers would instantly go stale. Processing packs from the rightmost one backward means each insertion only ever affects columns you've *already finished with* — nothing still-to-be-processed ever moves.
+
+**File 1's store names get cleaned too, not just File 3's.** Right after `sheet1_xw` is opened for a tab (before any pack-column insertions happen), the store-name column is read as a batch, run through `clean_store_name()` (`core_math.py` — strips a trailing period, collapses double-spaces), and written straight back:
+```python
+raw_store_values = store_range.value
+store_range.value = [[clean_store_name(v)] for v in raw_store_values]
+```
+Historically only Phase 3 (File 3) applied this cleaning, since it rebuilds its "Store Name" column from scratch anyway — File 1 just carried over whatever raw text was in the original spreadsheet untouched. That meant the same store could read differently between the two output files (e.g. a trailing "." surviving in File 1 but not File 3). Cleaning happens over the identical row range/column File 3 later uses, so both stay in sync. This write happens safely *before* any pack columns are inserted for that tab, since insertions only ever happen to columns at-or-right-of a pack's start — never left of the store column — so `store_col_idx` is still valid at this point.
 
 **Why `any_packs_selected` matters so much:** if the user didn't check *any* pack checkboxes in the preview screen, there's nothing to calculate signatures for — File 1 (the working copy with new signature columns) and File 3 (the signature lookup table) become pointless, so both are skipped (`file1_name = None`, `file3_path = None`). Only File 2, the plain Packing Sheet, still gets produced in that case — that's a legitimate use case (someone who just wants a cleaned-up copy of their distribution list).
 
@@ -562,7 +586,7 @@ The whole engine branches on one measurement: is the PDF page **portrait** (tall
 flowchart TD
     A[Open the PDF, measure page 1] --> B{"page is taller than wide?"}
     B -- yes --> C["process_split_layout()\ntreat page as TOP half + BOTTOM half"]
-    B -- no --> D["process_standard_layout()\ntreat page as ONE label, possibly spanning multiple pages"]
+    B -- no --> D["process_standard_layout()\ntreat page as ONE label, possibly spanning multiple pages\n+ detect same-store-matched-twice"]
     C --> E[build_audit_report]
     D --> E
     E --> F{add_dividers?}
@@ -585,9 +609,31 @@ elif expected_extra_pages > 0 and current_store:
 ```
 When a matched page also contains text like `"Page 1/3"`, the code knows 2 more pages are coming that *won't* have the store name printed on them again, but should still count as belonging to that same store — so it keeps assigning the current store to pages until that countdown reaches zero.
 
-Pages are then bucketed by their signature code (`code_buckets[sig_code].append(page_num)`), sorted `by (length of code, code)` — this ordering, `sorted(code_buckets.keys(), key=lambda x: (len(x), x))`, is what makes single letters come before double letters (`A, B, ... Z, AA, AB...`) instead of plain alphabetical sort putting `AA` before `B`. Finally everything is stitched together in this fixed order: **audit report → matched pages (grouped by code, dividers optional) → unmatched pages (with their own divider, if enabled) → blank pages.**
+**Same store matched twice = a real problem, and this is where it's caught.** Every store should have exactly one label instance. A store's label can legitimately span several physical pages (the "Page 1/3, 2/3, 3/3" case above), and its header may even repeat on each of those pages — that's still *one* instance. But a match on the same store **outside** that continuation window is a second, separate instance, and a sign something's wrong (a genuine duplicate print, or a label that actually belongs to a similarly-named store getting mis-attributed):
+```python
+is_continuation = (match == current_store and expected_extra_pages > 0)
+...
+if not is_continuation:
+    store_instance_count[match] += 1
+```
+Pages aren't committed to a code bucket as they're read — they're staged first into `store_pages[store]`, and only sorted into `code_buckets` (kept) vs. `unmatched_pages` (discarded) in a second pass, once the full instance count for every store is known:
+```python
+for store, page_nums in store_pages.items():
+    if store_instance_count[store] > 1:
+        for p_num in page_nums:
+            unmatched_pages.append(doc[p_num])   # ALL of that store's pages, not just the extras
+    else:
+        confirmed_stores.add(store)
+        code_buckets.setdefault(store_mapping[store], []).extend(page_nums)
+        code_final_store_counts[store_mapping[store]] += 1
+```
+If a store shows up as 2+ separate instances, **every** page ever attributed to it is pulled into the normal `unmatched_pages` pile — the exact same pile (and divider) used for pages that never matched anything at all, deliberately, so there's no separate "needs review" concept to learn. Since none of that store's pages can be trusted to be the single "true" copy, `confirmed_stores` (not the raw `found_stores` set) is what feeds the missing-stores list and the collision check below — so a duplicated-and-removed store correctly shows up as missing too, exactly as if it had never been found at all, instead of quietly still counting as "matched" while all its actual pages sit in Unmatched.
 
-Note that `code_buckets` still holds raw **page numbers**, not stores — a store's multi-page label contributes several entries to the same bucket. The divider sheet's "how many stores actually matched here" figure ([Section 8.4](#84-build_audit_report-and-build_divider_sheet)) is computed separately, from `found_stores` (a *set* of store names), specifically so one store's multiple pages don't get miscounted as multiple stores.
+Pages are bucketed by their signature code, sorted `by (length of code, code)` — this ordering, `sorted(code_buckets.keys(), key=lambda x: (len(x), x))`, is what makes single letters come before double letters (`A, B, ... Z, AA, AB...`) instead of plain alphabetical sort putting `AA` before `B`. Finally everything is stitched together in this fixed order: **audit report → matched pages (grouped by code, dividers optional) → unmatched pages (with their own divider, if enabled) → blank pages.**
+
+`code_buckets` still holds raw **page numbers**, not stores — a store's legitimate multi-page label contributes several entries to the same bucket. `code_final_store_counts` (a separate `Counter`, built alongside `code_buckets` in the loop above) is the accurate "how many *distinct*, non-duplicated stores actually matched here" figure fed to `build_divider_sheet` — deliberately **not** `analyze_matches`'s own `matched_count`, which is blind to the duplicate-removal step and would still count a since-removed store as matched.
+
+**This entire same-store-twice check is deliberately standard-layout-only.** `process_split_layout` does *not* have any of this logic — a repeat match there is left completely alone, matched normally, same as before this feature existed.
 
 ### 8.3 `process_split_layout(...)`
 Same idea, but every physical page is treated as **two independent halves** (top/bottom), each matched against store names independently, since two different stores' labels might be stacked on one printed sheet. The stitching step at the end is the more complex part: it builds a `master_stack` of "halves" (some real, some from the audit report, some blank divider pages) and then re-pairs them two-at-a-time into brand new output pages:
@@ -599,17 +645,21 @@ bottom_stack = master_stack[halfway_point:]
 i.e. the first half of the master list becomes everyone's *top* half, the second half of the list becomes everyone's *bottom* half — so pairing `top_stack[i]` with `bottom_stack[i]` for each new page reconstitutes full sheets, but now filled with re-ordered content instead of the original random order. `new_page.show_pdf_page(top_rect, doc, ..., clip=src_clip)` is the actual "paste this rectangle of content from the source PDF onto this rectangle of the new page" operation — the workhorse of the whole rebuilding process.
 
 ### 8.4 `build_audit_report(...)` and `build_divider_sheet(...)`
-A handful of small "report generator" functions that draw brand-new PDF pages from scratch using `fitz`'s drawing primitives (`draw_rect`, `insert_text`, `insert_textbox`, `draw_line`, `draw_circle`) — no source PDF involved. `build_audit_report` is always inserted as the very first page(s) of the output, and turns red if any stores were missing/unmatched/blank *or* a name-collision warning fired (see below), or green if everything matched perfectly — a floor worker can glance at just page 1 to know if the batch is trustworthy.
+A handful of small "report generator" functions that draw brand-new PDF pages from scratch using `fitz`'s drawing primitives (`draw_rect`, `insert_text`, `insert_textbox`, `draw_line`, `draw_circle`) — no source PDF involved. `build_audit_report` is always inserted as the very first page(s) of the output, and turns red if any stores were missing/unmatched/blank, or green if everything matched perfectly — a floor worker can glance at just page 1 to know if the batch is trustworthy. Its sections, in order, are: header/metadata → Unmatched & Blank counts → **Missing Stores** (always last, described below).
+
+**`group_missing_stores_by_code(store_mapping, found_stores)`** builds the Missing Stores data: every store not in `found_stores` (or, from `process_standard_layout`, not in `confirmed_stores` — see [8.2](#82-process_standard_layout)), bucketed by signature code and ordered with the same `(len(code), code)` key used everywhere else, with stores **within** a code group kept in their original spreadsheet row order (since `store_mapping` is a plain dict and dict iteration order in Python 3.7+ is insertion order, which is the order `app.py`'s `/pdf` Step 2 built it in via `df.iterrows()`).
+
+**Missing Stores is rendered as auto-width columns, not a single vertical list.** With enough missing stores this used to spread confusingly across the "cut & stack" split-layout pagination, interleaved with unrelated divider content. Now it flows like a newspaper: each code group gets its own sub-header (`"CODE A - 19 missing"`) followed by its store names; when a column runs out of vertical room, a new column starts immediately to its right on the *same* page (only spilling to a genuinely new page once no more columns fit the page's width); each column's width is sized independently from only the text actually inside it (measured with `fitz.get_text_length`); and if a code group gets cut off mid-list by a column or page break, its header repeats at the top of the next column as `"CODE A (continued)"` so it's never ambiguous whether a name belongs to the group above or is a fresh one. A small guard (`page_top_y != 40 and ... > bottom_limit`) specifically prevents a pathological case where a page is so full already that a column would fit a header but not even one store name under it — rather than drawing an endless chain of empty "(continued)" headers, it jumps straight to a fresh page.
 
 **Catching the "two similarly-named stores collapse into one" bug.** Because matching is plain substring search, a store like `"Northlands"` can silently swallow labels that actually belong to `"Northlands NZ"` if the printed text doesn't include the distinguishing suffix — both labels get matched to `"Northlands"`, and `"Northlands NZ"` shows up as a false "missing store." Two helper functions guard against this:
 - `find_name_collisions(store_names)` — scans every pair of store names in the signature-links mapping and flags any pair where one name is fully contained inside another (case-insensitive), e.g. `"Northlands"` inside `"Northlands NZ"`.
-- `analyze_matches(store_mapping, sorted_stores, found_stores)` — for each such colliding pair, checks whether *one* was matched while the *other* was not (both-found or both-missing isn't suspicious). When that happens, it builds a plain-English warning for the audit report ("`'Northlands NZ' (Code: B) is missing, but similarly named 'Northlands' (Code: A) was matched...`") and attaches a shorter note to *both* codes' divider pages. This same function also computes, per code, how many *distinct stores* actually matched versus how many the signature links say should be there — this is what feeds `build_divider_sheet` below.
+- `analyze_matches(store_mapping, sorted_stores, found_stores)` — for each such colliding pair, checks whether *one* was matched while the *other* was not (both-found or both-missing isn't suspicious). When that happens it just marks both codes' `collision_note` flag `True` — **no store names or explanation reach the audit report at all anymore.** The reasoning: the missing store already shows up on the Missing Stores list, and any mis-attributed labels already show up in Unmatched, so a named callout would just repeat information that's already there in more detail, and risked confusing warehouse floor staff who might see the printed page (name-redundancy checking is the tool operator's job). The only visible effect of a collision now is that affected code's divider sheet flipping to a red border with a generic disclaimer. This same function also computes, per code, how many *distinct stores* actually matched versus how many the signature links say should be there.
 
-`build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, missing_for_code, collision_note)` draws the separator sheet inserted before each code group when `add_dividers=True` is checked in the UI. It no longer just counts pages — `matched_count` is the number of **distinct stores** found for that code (from `analyze_matches`), checked against `expected_count` (how many stores the signature links say belong to that code):
-- **Green border** — `matched_count == expected_count` and no collision warning touches this code. Text unchanged: `"CODE {code} / Matched Labels: {matched_count}"`.
-- **Red border** — counts don't match (shows a "Short by N store(s)" / "N extra store(s)" line and lists the actual missing store names on the page), **or** this code was flagged by `analyze_matches` as part of a name-collision pair (shows the collision note instead/in addition) — even if the count happens to check out, because the "extra" label absorbed into this bucket might be hiding behind an otherwise-correct-looking number.
+`build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, collision_note)` draws the separator sheet inserted before each code group when `add_dividers=True` is checked in the UI. `matched_count`/`expected_count` are **store** counts (for `process_standard_layout`, the accurate post-dedup `code_final_store_counts`, not `analyze_matches`'s own figure — see [8.2](#82-process_standard_layout)); `collision_note` is just a bool now, not text:
+- **Green border** — `matched_count == expected_count` and `collision_note` is falsy. One line, no fraction: `"Matched Labels: {matched_count}"`.
+- **Red border** — counts don't match (adds `"matched/expected"` to the same line, plus a "Short by N store(s)" / "N extra store(s)" disclaimer), **or** `collision_note` is `True` (generic "Possible mismatch - please verify" disclaimer, no names) — even if the count happens to check out, because the "extra" label absorbed into this bucket might be hiding behind an otherwise-correct-looking number. No missing-store names or collision reasoning are ever drawn on a divider — that detail lives only on the audit report (or, for the same-store-twice case in standard layout, isn't shown as text anywhere at all — see [8.2](#82-process_standard_layout)).
 
-A sibling function, `build_unmatched_divider_sheet(page_width, page_height, count)`, draws the same style of separator (always red) right before the unmatched-pages group, headed `"UNMATCHED PAGES / Total Pages: {count}"` — previously the unmatched pages had no divider of their own at all.
+A sibling function, `build_unmatched_divider_sheet(page_width, page_height, count)`, draws the same style of separator (always red) right before the unmatched-pages group, headed `"UNMATCHED PAGES / Total Pages: {count}"`.
 
 Since `add_dividers` pages can be as short as half a physical page (split layout) or as narrow as a small label, all of the text above is drawn through a shared `_fit_textbox()` helper that shrinks the font until it actually fits the box — PyMuPDF silently draws *nothing* if a fixed font size doesn't fit, so this is what keeps a divider page from ever rendering blank on an unusually small page size.
 
@@ -661,6 +711,8 @@ The upload dropzone (added when we made drag-and-drop work) is worth re-reading 
 ```
 The `<input>` is positioned (via CSS, see [Section 11](#11-staticstylescss--the-look--feel)) as an **invisible layer covering the entire box**. That's the whole trick — there's no custom drag-and-drop JavaScript logic needed at all, because the browser already knows how to drag-and-drop a file directly onto a file input; making that input physically as big as the box just makes the *whole box* a valid drop target. `script.js` only adds the cosmetic touches (border highlight while dragging, showing the chosen filename) — see [Section 10.2.H](#10-staticscriptjs--the-frontend-brain).
 
+**Two "Open Excel File" links, both reusing the exact same open-locally mechanism as the dashboard.** Once a file is scanned (`filename` is set), a small `<a class="btn-file open" href="{{ url_for('open_upload_file', filename=filename) }}">` sits right next to the "✅ File Detected" heading — always visible, so the user can glance at the raw spreadsheet before typing any coordinates. A second, identical link appears specifically inside the duplicate-store hard-lock warning (below), so the fix-and-recheck path doesn't require scrolling back up to the header. Both hit `/open_upload/<filename>` rather than `/open_local/<folder>/<filename>` because at this point in the wizard the file is still loose in `projects/` — no project folder exists yet (see [Section 4.4](#44-project--file-management-delete-delete_file-open_local-open_upload)). Being plain `<a class="btn-file open">` links, `script.js`'s generic fetch-interceptor (Section 10.2.D) picks them up automatically, with zero page-specific JavaScript needed.
+
 The **hard-block logic** near the bottom is worth understanding since it silently disables the biggest button on the page:
 ```jinja
 {% set lock = namespace(has_dupes=false) %}
@@ -675,8 +727,22 @@ The **hard-block logic** near the bottom is worth understanding since it silentl
 ```
 Plain Jinja variables set inside a `{% for %}` loop don't survive past the loop (a Jinja quirk, similar to variable scoping oddities in some templating languages) — `namespace()` is Jinja's workaround: it creates a small mutable object whose attributes *do* persist outside the loop, which is why `lock.has_dupes` can be read correctly afterward.
 
+The "Cannot Generate" lock is deliberately just a soft speed bump, not a dead end: the file is still sitting right there under `filename`, so the fix is "open it, fix the duplicate, save, click **Update Previews**" — that button resubmits `/preview` with the same `filename`, which re-reads the file fresh off disk (`generate_tab_map()` opens a brand-new `openpyxl.load_workbook`, no caching anywhere) and recomputes `duplicate_warning` from scratch. No dedicated "recheck" endpoint was needed here the way `/pdf` needed one — resubmitting the *existing* form already happens to do exactly the right thing.
+
 ### 9.3 `pdf.html`
 Three step blocks, gated the same way (`{% if step == 1/2/3 %}`). The `duplicate-modal` `<dialog>` in Step 1 is auto-opened without any click, purely by `script.js`'s Section 9 (`dupeModal.showModal()` fires automatically on page load if the element exists) — because the server only renders that `<dialog>` into the page at all when `duplicate_errors` is non-empty, its mere *presence* in the HTML is the signal to pop it open immediately.
+
+**The modal's footer holds three small buttons, all sharing the `.btn-file` sizing convention** (see [Section 11](#11-staticstylescss--the-look--feel)) so they read as one coherent group instead of three mismatched controls:
+```html
+<button class="btn-file ghost" onclick="...close()">Close</button>
+<a class="btn-file open" href="{{ url_for('open_local_file', ...) }}">📂 Open Excel File</a>
+<form method="POST" style="display: contents;">
+    <input type="hidden" name="existing_project" value="{{ duplicate_project_name }}">
+    <input type="hidden" name="resume_filename" value="{{ duplicate_excel_filename }}">
+    <button type="submit" class="btn-file primary">🔄 Recheck File</button>
+</form>
+```
+Ordered left-to-right from least to most important, matching the usual modal-footer convention (dismiss on the left, primary action on the far right where the eye lands last): **Close** (neutral, `.btn-file.ghost` — dismisses without doing anything), **Open Excel File** (`.btn-file.open`, the same class/route/fetch-interception as everywhere else in the app — see [Section 9.2](#92-matrixhtml)), **Recheck File** (`.btn-file.primary`, solid green — the actual call to action). The `<form style="display: contents;">` wrapper is a small CSS trick: it makes the form's own box "disappear" from the flex layout while its child `<button>` still participates directly in the parent `.modal-actions-end` flex row, so the button lines up and gets the same `gap` spacing as its siblings, as if the form tag weren't there at all. `duplicate_project_name` / `duplicate_excel_filename` (only present when the failed upload/recheck happened against a real project folder) are what let "Recheck File" resubmit Step 1 pointing at the *exact* file that was just flagged, via the `resume_filename` mechanism described in [Section 4.6](#46-the-pdf-label-shuffler-route-pdf).
 
 Step 2's per-pack layout is the "2-column grid, grouped per tab" structure:
 ```html
@@ -730,7 +796,7 @@ flowchart LR
 - **A. Scroll Spy** — toggles the `.active` class between the "Home" and "Dashboard" nav links based on scroll position, so the nav bar reflects which section you're currently looking at.
 - **B. Accordion Toggle** — the project-card expand/collapse. Reads the clicked header's very-next-sibling element (`header.nextElementSibling`) and flips its `display` between `none` and `block`, also flipping the ▼/▲ icon.
 - **C. Preserve State After Deletions** — a UX nicety: normally, deleting a file causes a full page reload, which would snap the scroll position back to the top and collapse whichever project card you had open. Just before a delete form submits, the current scroll position and the currently-open project's ID are written into `sessionStorage` (a small key-value store the browser keeps per-tab, surviving a page reload but not a tab close). On the *next* page load, this saved state is read back and the page immediately re-scrolls and re-opens that same card, and then the saved values are deleted — so the illusion is "the delete happened in place."
-- **D. "Open Locally" Fetch Requests** — clicking "📂 Open" doesn't navigate the browser at all; it fires a background `fetch()` to `/open_local/...` (which just tells *your Windows machine* to open the file) and shows an `alert()` only if that request failed.
+- **D. "Open Locally" Fetch Requests** — clicking "📂 Open" doesn't navigate the browser at all; it fires a background `fetch()` to `/open_local/...` (which just tells *your Windows machine* to open the file) and shows an `alert()` only if that request failed. The selector is `a.btn-file.open` generically (not tied to the dashboard specifically), which is exactly why the newer "Open Excel File" links added to `matrix.html` and the duplicate modal in `pdf.html` (pointing at `/open_upload/...` or `/open_local/...` respectively) get this same no-navigation behavior automatically, with no extra JavaScript written for either page.
 
 **3. Sub-Group Engine (Dynamic UI).** The most complex section — it manually builds HTML strings and injects them with `insertAdjacentHTML` in response to checkbox changes, mirroring what a template engine would normally do, but at runtime in the browser instead of on the server:
 ```mermaid
@@ -783,11 +849,13 @@ Rather than walking every single CSS rule (CSS has no "logic" to trace — it's 
 | **Loading Overlay** | The full-screen dark spinner shown during long operations; `@keyframes spin` is what makes the spinner ring actually rotate. |
 | **Tooltips** | The `.tooltip-btn::before`/`::after` pair — pure-CSS hover tooltips (a little triangle + a label bubble) with no JavaScript at all, using the `content: attr(data-title)` trick to pull the tooltip text straight from an HTML attribute. |
 | **Instructions & Info Boxes** | The blue "Required Spreadsheet Formatting" box on `matrix.html`, and the red `.warning-box` used for duplicate-store warnings. |
-| **Accordion & File List** | The dashboard's expandable project sections and the individual file rows (with their Open/Download/Delete button trio). |
+| **Accordion & File List** | The dashboard's expandable project sections and the individual file rows (with their Open/Download/Delete button trio, `.btn-file` + `.open`/`.download`/`.delete`). |
 | **Sub-group Tab Selection** | The responsive checkbox grid (`.tab-checkbox-grid`) in `sub-group.html`. |
-| **Duplicate Store Error Modal** | Styles the `<dialog>` popup shown in `pdf.html` Step 1. |
+| **Duplicate Store Error Modal** | Styles the `<dialog>` popup shown in `pdf.html` Step 1, and `matrix.html`'s hard-lock warning. `.modal-actions-end` (`display: flex; justify-content: flex-end; gap: 10px;`) is the shared footer-row layout for modal buttons. |
 
 **A pattern worth noticing:** almost every "card" component in this app (`.tab-card`, `.blueprint-card`, `.project-card`) shares the same visual recipe — white/light background, `border-radius: 6-8px`, and a thick colored **left border** (`border-left: 5px solid <color>`) used as a quick color-coded status signal (blue = neutral/info, green = success, red = error) — rather than one shared CSS class, this recipe is just repeated per-component, so if you ever want to change "the card look" everywhere, you'd currently need to update several rules instead of one.
+
+**The `.btn-file` family** is the small-button system reused across the dashboard, `matrix.html`, and `pdf.html`'s duplicate modal — one base class (`padding: 6px 12px; font-size: 13px; border-radius: 4px;`) plus a color modifier: `.open` (light blue — opening a file), `.download` (neutral gray), `.delete` (light red), `.primary` (solid green — the modal's main call-to-action, e.g. "Recheck File"), `.ghost` (white/gray outline — a modal's dismiss action, e.g. "Close"). Before `.primary`/`.ghost` existed, "Recheck File" borrowed `.btn-generate` (a *different*, much bigger full-width CTA class meant for standalone buttons like "Scan File") and "Close" had no matching class at all, so it fell back to the page's generic `button { background: #3498db; }` rule — that mismatch (an oversized green button next to a plain-blue one, on two separate stacked rows) is what made the modal look inconsistent before these two modifiers were added specifically to let every modal button share one small, consistent size and differ only by role color.
 
 ---
 
@@ -861,7 +929,9 @@ sequenceDiagram
     U->>App: POST /pdf (step=1: pick/create project + Signature Links Excel)
     App->>App: pandas reads every tab, checks for duplicate store names
     alt duplicates found
-        App-->>U: Step 1 again + duplicate-names modal (folder deleted if new)
+        App-->>U: Step 1 again + duplicate-names modal (nothing deleted)
+        U->>App: fix + save the file, click "Recheck File" (resume_filename)
+        App->>App: re-read the SAME file fresh off disk
     else clean
         App-->>U: Step 2 (one dropzone per Tab x Pack)
         U->>App: POST /pdf (step=2: attach PDFs + divider checkboxes)
@@ -886,12 +956,15 @@ sequenceDiagram
 | Change what makes File 1 / File 3 skip generation | `matrix_engine.py` → the `any_packs_selected` flag in `generate_all_outputs()` |
 | Change the sub-group item-number validation messages | `subgroup_engine.py` → `_map_item_columns()` and the two `raise SubgroupValidationError(...)` call sites |
 | Change how long until old projects auto-delete | `app.py` → `clean_old_projects()` (`seven_days_in_seconds`) |
-| Change the duplicate-store-name check for the PDF shuffler | `app.py` → `/pdf` route, Step 1 (`dupes = store_col[store_col.duplicated()]...`) |
+| Change the duplicate-store-name check for the PDF shuffler | `app.py` → `/pdf` route, Step 1 (`dupes = store_col[store_col.duplicated()]...`) — note it no longer deletes anything on a duplicate; see [Section 4.6](#46-the-pdf-label-shuffler-route-pdf) |
+| Change the "Open Excel File" / "Recheck File" duplicate-fix flow | `app.py` → `/pdf` Step 1's `resume_filename` handling, and `templates/pdf.html`'s duplicate modal footer |
 | Change how a PDF page is matched to a store (the text region it reads) | `pdf_engine.py` → the `fitz.Rect(...)` clip rectangles in `process_standard_layout` / `process_split_layout` |
 | Change whether/how divider sheets look, or the green/red match logic | `pdf_engine.py` → `build_divider_sheet()` |
 | Change the "Unmatched Pages" divider sheet | `pdf_engine.py` → `build_unmatched_divider_sheet()` |
-| Change the audit report's colors/text | `pdf_engine.py` → `build_audit_report()` |
-| Change the near-duplicate store-name collision detection | `pdf_engine.py` → `find_name_collisions()` and `analyze_matches()` |
+| Change the audit report's colors/text, or the Missing Stores column layout | `pdf_engine.py` → `build_audit_report()` and `group_missing_stores_by_code()` |
+| Change the near-duplicate store-name collision detection (only flips a divider red now, no audit-report text) | `pdf_engine.py` → `find_name_collisions()` and `analyze_matches()` |
+| Change the same-store-matched-more-than-once detection (standard layout only) | `pdf_engine.py` → `process_standard_layout()`'s `store_instance_count` / `is_continuation` logic |
+| Change when the app force-closes a file the user has open in Excel | `core_math.py` → `close_if_open_elsewhere()` (called from `app.py`'s `/generate` and `subgroup_engine.py`) |
 | Change any button/card color or spacing | `static/styles.css` (grouped by component — see [Section 11](#11-staticstylescss--the-look--feel) table) |
 | Change what happens when a form is submitted (spinner, validation) | `static/script.js` (find the relevant numbered section — see [Section 10](#10-staticscriptjs--the-frontend-brain)) |
 | Add a brand-new page/route | Add a `@app.route(...)` function in `app.py`, a matching file in `templates/`, and link to it from `templates/index.html`'s nav bar |
