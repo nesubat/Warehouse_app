@@ -1,5 +1,6 @@
 import os
 import re
+import xlwings as xw
 
 def clean_file_name(raw_string):
     """Cleans messy strings into safe file names."""
@@ -231,6 +232,29 @@ def get_next_stage_filenames(current_filename):
     new_json_name = f"{base_no_ext}.json"
     
     return new_excel_name, new_json_name
+
+def close_if_open_elsewhere(file_path):
+    """If this file is already open in another running Excel instance (e.g. the
+    user has it open to look at it), force that copy closed first so our own
+    automation gets exclusive write access. Any unsaved edits in that open
+    copy are discarded - otherwise Excel silently hands us a read-only handle
+    (or the OS refuses to move/rename the file at all) and our own edits/save
+    never reach the file the user is actually looking at.
+    """
+    target = os.path.normcase(os.path.normpath(file_path))
+    for running_app in list(xw.apps):
+        for book in list(running_app.books):
+            try:
+                book_path = os.path.normcase(os.path.normpath(book.fullname))
+            except Exception:
+                continue
+            if book_path == target:
+                print(f"[DEBUG] '{os.path.basename(file_path)}' is already open in another Excel window — closing it first.")
+                try:
+                    book.api.Close(SaveChanges=False)
+                except Exception as e:
+                    print(f"[WARNING] Could not close the already-open copy of {file_path}: {e}")
+
 
 def get_available_project_files(project_dir):
     """

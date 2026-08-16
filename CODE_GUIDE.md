@@ -76,7 +76,7 @@ These words appear everywhere in the code. If you're ever confused reading a fun
 | **Metadata (`project_metadata.json` / `Stage - N - ....json`)** | A JSON file that remembers exact column numbers for every pack/sub-group in a project, so the app can find its own past work later (e.g. when you come back to sub-group a project a second time). |
 | **Project Folder** | One folder per job, named like `CampaignName_Job-12345_260803_1430`, holding every file (Excel, PDF, JSON) generated for that job. |
 | **`xlwings`** | A Python library that remote-controls a real, invisible copy of Microsoft Excel. Used because it can insert/merge columns and preserve formatting exactly like a human using Excel would — something the faster libraries (openpyxl/pandas) can't do well. |
-| **`fitz` (PyMuPDF)** | A Python library for reading and rewriting PDF files page-by-page — used to detect text on a label, and to cut/paste/reorder pages. |
+| **`fitz` (PyMuPDF)** | A Python library for reading and rewriting PDF files page-by-page — used to detect text on a label, and to cut/paste/reorder pages. The PyPI/pip package is still called `PyMuPDF`, but the *import name* `fitz` is a deprecated legacy alias upstream; `pdf_engine.py` imports it as `import pymupdf as fitz` so the rest of the file can keep using the familiar `fitz.` prefix without triggering the deprecation warning. |
 
 ---
 
@@ -289,6 +289,8 @@ flowchart TD
 **Step 1 (lines 394–483).** Two ways to pick a project: the `existing_project` dropdown, or typing a `new_project` name (a timestamp gets appended to new names to keep them unique). Whichever Excel file is in play — either freshly uploaded, or an existing `"Signature Links..."` file already sitting in that project's folder (found by `.startswith("signature links")`, case-insensitive) — gets opened with `pd.ExcelFile`. For **every sheet**, `df.columns[1:]` (everything except the first column, which holds store names) becomes the list of "Packs" shown in Step 2.
 
 The duplicate-store check here matters a lot for the PDF engine: `process_and_shuffle_pdf` matches a label to a store purely by **searching for the store's name inside the label's text** — if two stores in the same tab share a name, the shuffler can't reliably tell them apart, so this route refuses to continue and shows exactly which tab/names collided (`⚠️ Duplicate Store Names Found` dialog — see [Section 9.3](#93-pdfhtml)).
+
+This only catches *exact* duplicate names, though. Two *different but similar* names (e.g. `"Northlands"` and `"Northlands NZ"`) pass this check fine, but can still confuse the substring matcher at PDF-processing time — see the collision detection described in [Section 8.4](#84-build_audit_report-and-build_divider_sheet).
 
 **Step 2 (lines 486–571).** The form field names carry structured information inside their *name attribute itself*, using `---` as a separator (chosen specifically because pack/tab names might contain underscores):
 ```html
@@ -564,7 +566,7 @@ flowchart TD
     C --> E[build_audit_report]
     D --> E
     E --> F{add_dividers?}
-    F -- yes --> G[Insert a divider sheet before each code group]
+    F -- yes --> G["Insert a divider sheet before each code group\n(green border if the store count checks out, red if not)\nplus one before the Unmatched Pages group"]
     F -- no --> H[Skip]
     G --> I[Save final shuffled PDF]
     H --> I
@@ -583,7 +585,9 @@ elif expected_extra_pages > 0 and current_store:
 ```
 When a matched page also contains text like `"Page 1/3"`, the code knows 2 more pages are coming that *won't* have the store name printed on them again, but should still count as belonging to that same store — so it keeps assigning the current store to pages until that countdown reaches zero.
 
-Pages are then bucketed by their signature code (`code_buckets[sig_code].append(page_num)`), sorted `by (length of code, code)` — this ordering, `sorted(code_buckets.keys(), key=lambda x: (len(x), x))`, is what makes single letters come before double letters (`A, B, ... Z, AA, AB...`) instead of plain alphabetical sort putting `AA` before `B`. Finally everything is stitched together in this fixed order: **audit report → matched pages (grouped by code, dividers optional) → unmatched pages → blank pages.**
+Pages are then bucketed by their signature code (`code_buckets[sig_code].append(page_num)`), sorted `by (length of code, code)` — this ordering, `sorted(code_buckets.keys(), key=lambda x: (len(x), x))`, is what makes single letters come before double letters (`A, B, ... Z, AA, AB...`) instead of plain alphabetical sort putting `AA` before `B`. Finally everything is stitched together in this fixed order: **audit report → matched pages (grouped by code, dividers optional) → unmatched pages (with their own divider, if enabled) → blank pages.**
+
+Note that `code_buckets` still holds raw **page numbers**, not stores — a store's multi-page label contributes several entries to the same bucket. The divider sheet's "how many stores actually matched here" figure ([Section 8.4](#84-build_audit_report-and-build_divider_sheet)) is computed separately, from `found_stores` (a *set* of store names), specifically so one store's multiple pages don't get miscounted as multiple stores.
 
 ### 8.3 `process_split_layout(...)`
 Same idea, but every physical page is treated as **two independent halves** (top/bottom), each matched against store names independently, since two different stores' labels might be stacked on one printed sheet. The stitching step at the end is the more complex part: it builds a `master_stack` of "halves" (some real, some from the audit report, some blank divider pages) and then re-pairs them two-at-a-time into brand new output pages:
@@ -595,7 +599,19 @@ bottom_stack = master_stack[halfway_point:]
 i.e. the first half of the master list becomes everyone's *top* half, the second half of the list becomes everyone's *bottom* half — so pairing `top_stack[i]` with `bottom_stack[i]` for each new page reconstitutes full sheets, but now filled with re-ordered content instead of the original random order. `new_page.show_pdf_page(top_rect, doc, ..., clip=src_clip)` is the actual "paste this rectangle of content from the source PDF onto this rectangle of the new page" operation — the workhorse of the whole rebuilding process.
 
 ### 8.4 `build_audit_report(...)` and `build_divider_sheet(...)`
-Two small "report generator" functions that draw a brand-new PDF page from scratch using `fitz`'s drawing primitives (`draw_rect`, `insert_text`, `draw_line`, `draw_circle`) — no source PDF involved. `build_audit_report` is always inserted as the very first page(s) of the output, and turns red if any stores were missing/unmatched/blank, or green if everything matched perfectly — a floor worker can glance at just page 1 to know if the batch is trustworthy. `build_divider_sheet` draws a page with a thick yellow border and the signature code in giant text, used as a physical separator sheet between code groups when `add_dividers=True` is checked in the UI.
+A handful of small "report generator" functions that draw brand-new PDF pages from scratch using `fitz`'s drawing primitives (`draw_rect`, `insert_text`, `insert_textbox`, `draw_line`, `draw_circle`) — no source PDF involved. `build_audit_report` is always inserted as the very first page(s) of the output, and turns red if any stores were missing/unmatched/blank *or* a name-collision warning fired (see below), or green if everything matched perfectly — a floor worker can glance at just page 1 to know if the batch is trustworthy.
+
+**Catching the "two similarly-named stores collapse into one" bug.** Because matching is plain substring search, a store like `"Northlands"` can silently swallow labels that actually belong to `"Northlands NZ"` if the printed text doesn't include the distinguishing suffix — both labels get matched to `"Northlands"`, and `"Northlands NZ"` shows up as a false "missing store." Two helper functions guard against this:
+- `find_name_collisions(store_names)` — scans every pair of store names in the signature-links mapping and flags any pair where one name is fully contained inside another (case-insensitive), e.g. `"Northlands"` inside `"Northlands NZ"`.
+- `analyze_matches(store_mapping, sorted_stores, found_stores)` — for each such colliding pair, checks whether *one* was matched while the *other* was not (both-found or both-missing isn't suspicious). When that happens, it builds a plain-English warning for the audit report ("`'Northlands NZ' (Code: B) is missing, but similarly named 'Northlands' (Code: A) was matched...`") and attaches a shorter note to *both* codes' divider pages. This same function also computes, per code, how many *distinct stores* actually matched versus how many the signature links say should be there — this is what feeds `build_divider_sheet` below.
+
+`build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, missing_for_code, collision_note)` draws the separator sheet inserted before each code group when `add_dividers=True` is checked in the UI. It no longer just counts pages — `matched_count` is the number of **distinct stores** found for that code (from `analyze_matches`), checked against `expected_count` (how many stores the signature links say belong to that code):
+- **Green border** — `matched_count == expected_count` and no collision warning touches this code. Text unchanged: `"CODE {code} / Matched Labels: {matched_count}"`.
+- **Red border** — counts don't match (shows a "Short by N store(s)" / "N extra store(s)" line and lists the actual missing store names on the page), **or** this code was flagged by `analyze_matches` as part of a name-collision pair (shows the collision note instead/in addition) — even if the count happens to check out, because the "extra" label absorbed into this bucket might be hiding behind an otherwise-correct-looking number.
+
+A sibling function, `build_unmatched_divider_sheet(page_width, page_height, count)`, draws the same style of separator (always red) right before the unmatched-pages group, headed `"UNMATCHED PAGES / Total Pages: {count}"` — previously the unmatched pages had no divider of their own at all.
+
+Since `add_dividers` pages can be as short as half a physical page (split layout) or as narrow as a small label, all of the text above is drawn through a shared `_fit_textbox()` helper that shrinks the font until it actually fits the box — PyMuPDF silently draws *nothing* if a fixed font size doesn't fit, so this is what keeps a divider page from ever rendering blank on an unusually small page size.
 
 ### 8.5 `process_and_shuffle_pdf(...)` — the master orchestrator
 The only function `app.py` actually calls. It measures the page, decides which of the two engines above to run, then does a final cleanup: `final_shuffled_doc.set_page_labels([])` strips any leftover page-numbering metadata from the source PDF (so the new document doesn't confusingly display the *original* file's page numbers), then saves to `output_pdf_path`.
@@ -872,8 +888,10 @@ sequenceDiagram
 | Change how long until old projects auto-delete | `app.py` → `clean_old_projects()` (`seven_days_in_seconds`) |
 | Change the duplicate-store-name check for the PDF shuffler | `app.py` → `/pdf` route, Step 1 (`dupes = store_col[store_col.duplicated()]...`) |
 | Change how a PDF page is matched to a store (the text region it reads) | `pdf_engine.py` → the `fitz.Rect(...)` clip rectangles in `process_standard_layout` / `process_split_layout` |
-| Change whether/how divider sheets look | `pdf_engine.py` → `build_divider_sheet()` |
+| Change whether/how divider sheets look, or the green/red match logic | `pdf_engine.py` → `build_divider_sheet()` |
+| Change the "Unmatched Pages" divider sheet | `pdf_engine.py` → `build_unmatched_divider_sheet()` |
 | Change the audit report's colors/text | `pdf_engine.py` → `build_audit_report()` |
+| Change the near-duplicate store-name collision detection | `pdf_engine.py` → `find_name_collisions()` and `analyze_matches()` |
 | Change any button/card color or spacing | `static/styles.css` (grouped by component — see [Section 11](#11-staticstylescss--the-look--feel) table) |
 | Change what happens when a form is submitted (spinner, validation) | `static/script.js` (find the relevant numbered section — see [Section 10](#10-staticscriptjs--the-frontend-brain)) |
 | Add a brand-new page/route | Add a `@app.route(...)` function in `app.py`, a matching file in `templates/`, and link to it from `templates/index.html`'s nav bar |

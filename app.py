@@ -11,7 +11,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs
-from core_math import clean_file_name, get_available_project_files
+from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 
 
@@ -164,6 +164,11 @@ def generate():
     # 5. MOVE THE ORIGINAL FILE INTO THE PROJECT FOLDER
     new_filepath = os.path.join(project_dir, filename)
     if os.path.exists(filepath):
+        # If the user still has this file open (e.g. via the "Open Excel File" button used to
+        # fix duplicate store names), Excel's lock would make this move crash with a
+        # PermissionError. Force-close that copy first, discarding any unsaved edits - by this
+        # point the user has already saved what they meant to keep and clicked Generate.
+        close_if_open_elsewhere(filepath)
         shutil.move(filepath, new_filepath)
     
     # 6. Pass the NEW filepath and project_dir to the engine
@@ -309,7 +314,22 @@ def open_local_file(folder_name, filename):
             os.startfile(file_path)
         except Exception as e:
             print(f"[DEBUG] Could not open file locally: {e}")
-            
+
+    return '', 204  # Prevents the browser from reloading the page
+
+@app.route('/open_upload/<filename>')
+def open_upload_file(filename):
+    """Same as /open_local, but for a freshly-uploaded file that still sits directly in the
+    uploads root (Distribution Mapper flow, before a project folder is created at /generate)."""
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
+
+    if os.path.exists(file_path):
+        try:
+            os.startfile(file_path)
+        except Exception as e:
+            print(f"[DEBUG] Could not open file locally: {e}")
+
     return '', 204  # Prevents the browser from reloading the page
 
 @app.route('/subgroup/<project_name>', methods=['GET', 'POST'])
@@ -419,7 +439,15 @@ def pdf_engine():
             
             # Scenario B: Existing project selected (Just point to the file already in the folder!)
             elif existing_project:
-                if os.path.exists(project_folder):
+                # If we got here from the duplicate modal's "Recheck File" button, it tells us
+                # the exact filename to reload instead of guessing by naming convention.
+                resume_filename = request.form.get('resume_filename')
+                if resume_filename:
+                    candidate_path = os.path.join(project_folder, secure_filename(resume_filename))
+                    if os.path.exists(candidate_path):
+                        excel_path = candidate_path
+
+                if not excel_path and os.path.exists(project_folder):
                     for f in os.listdir(project_folder):
                         if f.lower().startswith("signature links") and (f.lower().endswith(".xlsx") or f.lower().endswith(".xls")):
                             excel_path = os.path.join(project_folder, f)
@@ -451,13 +479,11 @@ def pdf_engine():
                 return f"Error reading Excel file: {e}", 500
             # --- HALT PROCESS IF DUPLICATES EXIST ---
             if duplicate_errors:
-                # Delete the newly created folder if a new upload was made
-                if excel_file and os.path.exists(project_folder):
-                    try:
-                        shutil.rmtree(project_folder, ignore_errors=True)
-                        print(f"[DEBUG] Purged project folder due to duplicate store errors: {project_folder}")
-                    except Exception as e:
-                        print(f"[DEBUG] Cleanup failed: {e}")
+                # NOTE: We deliberately do NOT delete project_folder here. Deleting it used to
+                # wipe out prior work whenever an existing project's replacement Excel still had
+                # duplicates. The folder and the uploaded file are left in place so the user can
+                # open the file, fix it, and recheck without losing anything.
+
                 # Reload project list to safely render Step 1 again
                 projects_info = {}
                 if os.path.exists(PROJECTS_FOLDER):
@@ -470,15 +496,18 @@ def pdf_engine():
                                     sig_file = f
                                     break
                             projects_info[folder_name] = sig_file
-                
+
                 projects_json = json.dumps(projects_info)
-                
-                # Re-render Step 1 with duplicate errors
-                return render_template('pdf.html', 
-                                       step=1, 
-                                       existing_projects=list(projects_info.keys()), 
-                                       projects_json=projects_json, 
-                                       duplicate_errors=duplicate_errors)
+
+                # Re-render Step 1 with duplicate errors, plus enough context for the
+                # "Open Excel File" / "Recheck File" buttons to target the exact file.
+                return render_template('pdf.html',
+                                       step=1,
+                                       existing_projects=list(projects_info.keys()),
+                                       projects_json=projects_json,
+                                       duplicate_errors=duplicate_errors,
+                                       duplicate_project_name=os.path.basename(project_folder),
+                                       duplicate_excel_filename=os.path.basename(excel_path))
                 
             return render_template('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name)
             

@@ -1,19 +1,36 @@
 import datetime
-import fitz  # PyMuPDF
+import pymupdf as fitz  # `fitz` is PyMuPDF's legacy, deprecated import name - `pymupdf` is current
 import os
 import math
 import re
 
 # ==========================================
+# UTILITY: SIZE-SAFE TEXTBOX INSERTION
+# ==========================================
+def _fit_textbox(page, rect, text, fontname, max_fontsize, align, color, min_fontsize=6):
+    """Inserts text into rect, shrinking the font until it fits. PyMuPDF draws nothing at
+    all when a textbox overflows, so on tight/short pages (e.g. split-layout half-page
+    dividers) a fixed fontsize can silently render a blank box - this guarantees something
+    legible is always shown."""
+    fontsize = max_fontsize
+    while fontsize > min_fontsize:
+        if page.insert_textbox(rect, text, fontname=fontname, fontsize=fontsize, align=align, color=color, render_mode=3) >= 0:
+            break
+        fontsize -= 1
+    page.insert_textbox(rect, text, fontname=fontname, fontsize=fontsize, align=align, color=color)
+    return fontsize
+
+# ==========================================
 # UTILITY: PROFESSIONAL AUDIT REPORT GENERATOR
 # ==========================================
-def build_audit_report(pdf_filename, page_width, report_height, missing_stores, unmatched_count, blank_count, item_name="PAGES"):
+def build_audit_report(pdf_filename, page_width, report_height, missing_stores, unmatched_count, blank_count, item_name="PAGES", collision_warnings=None):
     """Generates a highly professional, formatted warning page."""
+    collision_warnings = collision_warnings or []
     audit_doc = fitz.open()
-    audit_page = audit_doc.new_page(width=page_width, height=report_height) 
-    
+    audit_page = audit_doc.new_page(width=page_width, height=report_height)
+
     # 1. Determine Status & Colors (RGB normalized 0 to 1)
-    has_issues = bool(missing_stores or unmatched_count or blank_count)
+    has_issues = bool(missing_stores or unmatched_count or blank_count or collision_warnings)
     bg_color = (0.75, 0.22, 0.17) if has_issues else (0.18, 0.63, 0.36)  # Deep Red vs Professional Green
     text_dark = (0.2, 0.2, 0.2)
     line_color = (0.8, 0.8, 0.8)
@@ -69,7 +86,25 @@ def build_audit_report(pdf_filename, page_width, report_height, missing_stores, 
             audit_page.insert_text((48, y_pos), display_text, fontname="helv", fontsize=11, color=text_dark)
             y_pos += 18
             
-        y_pos += 15 
+        y_pos += 15
+
+    # 6b. Possible Duplicate-Name Match Warnings
+    if collision_warnings:
+        header_height = 40
+        y_pos = check_page_break(y_pos, header_height)
+        header_rect = fitz.Rect(30, y_pos - 10, page_width - 30, y_pos - 10 + header_height)
+        _fit_textbox(audit_page, header_rect, "PLEASE CHECK THOROUGHLY - POSSIBLE CODE GROUP ISSUES:", "hebo", 12, fitz.TEXT_ALIGN_LEFT, bg_color)
+        y_pos += header_height
+
+        for note in collision_warnings:
+            note_height = 40
+            y_pos = check_page_break(y_pos, note_height)
+            audit_page.draw_circle(fitz.Point(36, y_pos - 4), 2, color=bg_color, fill=bg_color)
+            note_rect = fitz.Rect(48, y_pos - 10, page_width - 30, y_pos - 10 + note_height)
+            _fit_textbox(audit_page, note_rect, note, "helv", 10, fitz.TEXT_ALIGN_LEFT, text_dark)
+            y_pos += note_height
+
+        y_pos += 15
 
     # 7. Unmatched & Blank Summaries
     if unmatched_count or blank_count:
@@ -93,24 +128,144 @@ def build_audit_report(pdf_filename, page_width, report_height, missing_stores, 
     return audit_doc
 
 # ==========================================
+# UTILITY: STORE-NAME COLLISION DETECTION
+# ==========================================
+def find_name_collisions(store_names):
+    """Finds store name pairs where one name is fully contained inside another
+    (case-insensitive), e.g. 'Northlands' vs 'Northlands NZ'. Such pairs are a risk
+    for the substring-based label matcher silently grouping both labels under one name."""
+    names = list(store_names)
+    collisions = []
+    for i, name_a in enumerate(names):
+        low_a = name_a.lower()
+        for j, name_b in enumerate(names):
+            if i == j:
+                continue
+            low_b = name_b.lower()
+            if low_a != low_b and low_a in low_b:
+                collisions.append((name_a, name_b))  # name_a is a substring of name_b
+    return collisions
+
+
+def analyze_matches(store_mapping, sorted_stores, found_stores):
+    """Cross-checks matched vs. expected stores per signature code, and flags
+    ambiguous name collisions where one of a colliding pair was matched while the
+    other was not - the signature of a label being grouped under the wrong name."""
+    expected_by_code = {}
+    for store in sorted_stores:
+        expected_by_code.setdefault(store_mapping[store], []).append(store)
+
+    code_collision_notes = {}
+    collision_warnings = []
+    for name_a, name_b in find_name_collisions(store_mapping.keys()):
+        a_found = name_a in found_stores
+        b_found = name_b in found_stores
+        if a_found == b_found:
+            continue  # both found or both missing - not the ambiguous signal we care about
+
+        found_name = name_a if a_found else name_b
+        missing_name = name_b if a_found else name_a
+        found_code = store_mapping[found_name]
+        missing_code = store_mapping[missing_name]
+
+        collision_warnings.append(
+            f"'{missing_name}' (Code: {missing_code}) is missing, but similarly named '{found_name}' "
+            f"(Code: {found_code}) was matched - pages may be grouped incorrectly, please check both code groups thoroughly."
+        )
+        code_collision_notes.setdefault(found_code, []).append(
+            f"Possible mismatch with '{missing_name}' - some labels here may actually belong to Code {missing_code}."
+        )
+        code_collision_notes.setdefault(missing_code, []).append(
+            f"Possible mismatch with '{found_name}' - check if labels were misrouted to Code {found_code}."
+        )
+
+    divider_info_by_code = {}
+    for code, stores_for_code in expected_by_code.items():
+        found_for_code = [s for s in stores_for_code if s in found_stores]
+        missing_for_code = [s for s in stores_for_code if s not in found_stores]
+        divider_info_by_code[code] = {
+            'matched_count': len(found_for_code),
+            'expected_count': len(stores_for_code),
+            'missing': missing_for_code,
+            'collision_note': " ".join(code_collision_notes.get(code, [])) or None,
+        }
+
+    return divider_info_by_code, collision_warnings
+
+
+# ==========================================
 # UTILITY: PROFESSIONAL DIVIDER SHEET
 # ==========================================
-def build_divider_sheet(page_width, page_height, signature_code, count):
-    """Generates a professional divider page with a yellow border."""
+def build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, missing_for_code=None, collision_note=None):
+    """Generates a professional divider page: green border if the number of distinct
+    stores matched into this code equals the expected count from the signature links,
+    red border otherwise (with a shortfall/excess disclaimer and the missing stores listed).
+    Layout scales down on short pages (e.g. split-layout half-page dividers) so nothing
+    overflows or gets skipped past the bottom edge."""
+    missing_for_code = missing_for_code or []
+    is_match = (matched_count == expected_count) and not collision_note
+    bottom_limit = page_height - 20
+
     doc = fitz.open()
     page = doc.new_page(width=page_width, height=page_height)
-    
-    # 1. Draw Professional Yellow/Gold Border
-    border_color = (0.95, 0.77, 0.06) 
+
+    # 1. Draw Border - Green when verified, Red when it needs attention
+    border_color = (0.18, 0.63, 0.36) if is_match else (0.75, 0.22, 0.17)
     page.draw_rect(fitz.Rect(15, 15, page_width - 15, page_height - 15), color=border_color, width=40)
-    
-    # 2. Add Centered Text Box
-    center_y = page_height / 2
-    text_rect = fitz.Rect(40, center_y - 100, page_width - 40, center_y + 100)
-    
-    text = f"CODE {signature_code}\n\nMatched Labels: {count}"
-    page.insert_textbox(text_rect, text, fontname="hebo", fontsize=40, align=fitz.TEXT_ALIGN_CENTER, color=(0, 0, 0))
-    
+
+    # 2. Header Text - shrinks to fit short/narrow pages so it never renders blank
+    header_height = min(200, page_height * 0.6)
+    header_top = max(20, page_height / 2 - header_height / 2)
+    header_bottom = min(bottom_limit, header_top + header_height)
+    header_rect = fitz.Rect(40, header_top, page_width - 40, header_bottom)
+    text = f"CODE {signature_code}\n\nMatched Labels: {matched_count}"
+    _fit_textbox(page, header_rect, text, "hebo", 40, fitz.TEXT_ALIGN_CENTER, (0, 0, 0))
+
+    # 3. Disclaimer + Missing Store List when it doesn't check out - each block only
+    # draws if there is still room left, and is clipped to the page so it never crashes.
+    if not is_match:
+        y = header_bottom + 10
+
+        diff = expected_count - matched_count
+        if diff > 0:
+            disclaimer = f"Short by {diff} store(s) (expected {expected_count})"
+        elif diff < 0:
+            disclaimer = f"{-diff} extra store(s) matched (expected {expected_count})"
+        else:
+            disclaimer = "Possible mismatch - please verify"
+
+        if y + 15 < bottom_limit:
+            disclaimer_rect = fitz.Rect(40, y, page_width - 40, min(y + 25, bottom_limit))
+            _fit_textbox(page, disclaimer_rect, disclaimer, "hebo", 14, fitz.TEXT_ALIGN_CENTER, border_color)
+            y += 30
+
+        if collision_note and y + 15 < bottom_limit:
+            note_rect = fitz.Rect(40, y, page_width - 40, min(y + 45, bottom_limit))
+            _fit_textbox(page, note_rect, collision_note, "helv", 10, fitz.TEXT_ALIGN_CENTER, border_color)
+            y += 45
+
+        if missing_for_code and y + 15 < bottom_limit:
+            list_text = "Missing Stores:\n" + "\n".join(f"- {s}" for s in missing_for_code)
+            list_rect = fitz.Rect(50, y, page_width - 50, bottom_limit)
+            _fit_textbox(page, list_rect, list_text, "helv", 10, fitz.TEXT_ALIGN_LEFT, (0.2, 0.2, 0.2))
+
+    return doc
+
+
+def build_unmatched_divider_sheet(page_width, page_height, count):
+    """Generates a divider page (red border) marking the start of the Unmatched Pages group."""
+    doc = fitz.open()
+    page = doc.new_page(width=page_width, height=page_height)
+
+    border_color = (0.75, 0.22, 0.17)  # Deep Red - unmatched pages always need attention
+    page.draw_rect(fitz.Rect(15, 15, page_width - 15, page_height - 15), color=border_color, width=40)
+
+    box_height = min(200, page_height * 0.6)
+    top = max(20, page_height / 2 - box_height / 2)
+    text_rect = fitz.Rect(40, top, page_width - 40, min(page_height - 20, top + box_height))
+    text = f"UNMATCHED PAGES\n\nTotal Pages: {count}"
+    _fit_textbox(page, text_rect, text, "hebo", 40, fitz.TEXT_ALIGN_CENTER, (0, 0, 0))
+
     return doc
 
 # ==========================================
@@ -160,8 +315,9 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
 
     # Generate Universal Audit Report
     missing_stores = [(store, store_mapping[store]) for store in sorted_stores if store not in found_stores]
-    audit_doc = build_audit_report(pdf_filename, page_width, half_height, missing_stores, len(unmatched_halves), len(blank_halves), "HALVES")
-    
+    divider_info_by_code, collision_warnings = analyze_matches(store_mapping, sorted_stores, found_stores)
+    audit_doc = build_audit_report(pdf_filename, page_width, half_height, missing_stores, len(unmatched_halves), len(blank_halves), "HALVES", collision_warnings)
+
     audit_halves = [{'doc_type': 'audit', 'page_num': i, 'half': 'full'} for i in range(len(audit_doc))]
 
     # Stitching
@@ -176,13 +332,22 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
         for item in ordered_matched:
             if item['code'] != current_code:
                 current_code = item['code']
-                count = sum(1 for x in ordered_matched if x['code'] == current_code)
-                div_doc = build_divider_sheet(page_width, half_height, current_code, count)
+                info = divider_info_by_code.get(current_code, {'matched_count': 0, 'expected_count': 0, 'missing': [], 'collision_note': None})
+                div_doc = build_divider_sheet(page_width, half_height, current_code, info['matched_count'], info['expected_count'], info['missing'], info['collision_note'])
                 divider_docs.append(div_doc)
                 grouped_halves.append({'doc_type': 'divider', 'doc_ref': div_doc, 'half': 'full'})
-                
+
             grouped_halves.append(item)
-        master_stack = audit_halves + grouped_halves + unmatched_halves + blank_halves
+
+        # NEW: Divider half marking the start of the Unmatched Pages group
+        if unmatched_halves:
+            unmatched_div_doc = build_unmatched_divider_sheet(page_width, half_height, len(unmatched_halves))
+            divider_docs.append(unmatched_div_doc)
+            unmatched_stack = [{'doc_type': 'divider', 'doc_ref': unmatched_div_doc, 'half': 'full'}] + unmatched_halves
+        else:
+            unmatched_stack = unmatched_halves
+
+        master_stack = audit_halves + grouped_halves + unmatched_stack + blank_halves
     else:
         master_stack = audit_halves + ordered_matched + unmatched_halves + blank_halves
     
@@ -282,11 +447,12 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
 
     # Generate Universal Audit Report
     missing_stores = [(store, store_mapping[store]) for store in sorted_stores if store not in found_stores]
-    audit_doc = build_audit_report(pdf_filename, page_width, page_height, missing_stores, len(unmatched_pages), len(blank_pages), "PAGES")
+    divider_info_by_code, collision_warnings = analyze_matches(store_mapping, sorted_stores, found_stores)
+    audit_doc = build_audit_report(pdf_filename, page_width, page_height, missing_stores, len(unmatched_pages), len(blank_pages), "PAGES", collision_warnings)
 
     # Stitching
     final_shuffled_doc = fitz.open()
-    
+
     if len(audit_doc) > 0:
         final_shuffled_doc.insert_pdf(audit_doc)
 
@@ -294,13 +460,18 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
     sorted_codes = sorted(code_buckets.keys(), key=lambda x: (len(x), x))  # Sort by length then alphabetically
     for code in sorted_codes:
         if add_dividers:
-            div_doc = build_divider_sheet(page_width, page_height, code, len(code_buckets[code]))
+            info = divider_info_by_code.get(code, {'matched_count': 0, 'expected_count': 0, 'missing': [], 'collision_note': None})
+            div_doc = build_divider_sheet(page_width, page_height, code, info['matched_count'], info['expected_count'], info['missing'], info['collision_note'])
             final_shuffled_doc.insert_pdf(div_doc)
             div_doc.close()
         for p_num in code_buckets[code]:
             final_shuffled_doc.insert_pdf(doc, from_page=p_num, to_page=p_num)
 
     if unmatched_pages:
+        if add_dividers:
+            unmatched_div_doc = build_unmatched_divider_sheet(page_width, page_height, len(unmatched_pages))
+            final_shuffled_doc.insert_pdf(unmatched_div_doc)
+            unmatched_div_doc.close()
         unmatched_doc = fitz.open()
         for p in unmatched_pages:
             unmatched_doc.insert_pdf(p.parent, from_page=p.number, to_page=p.number)

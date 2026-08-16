@@ -3,7 +3,7 @@ import json
 import re
 import xlwings as xw
 from openpyxl.utils import get_column_letter
-from core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, get_next_stage_filenames
+from core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, get_next_stage_filenames, close_if_open_elsewhere
 
 
 class SubgroupValidationError(Exception):
@@ -52,28 +52,6 @@ def _map_item_columns(row_data, tab_name, item_row):
         )
 
     return col_map
-
-
-def _close_if_open_elsewhere(file_path):
-    """If this file is already open in another running Excel instance (e.g. the
-    user has it open to look at it), force that copy closed first so our own
-    automation gets exclusive write access. Any unsaved edits in that open
-    copy are discarded — otherwise Excel silently hands us a read-only handle
-    and our own edits/save never reach the file the user is actually looking at.
-    """
-    target = os.path.normcase(os.path.normpath(file_path))
-    for running_app in list(xw.apps):
-        for book in list(running_app.books):
-            try:
-                book_path = os.path.normcase(os.path.normpath(book.fullname))
-            except Exception:
-                continue
-            if book_path == target:
-                print(f"[DEBUG] '{os.path.basename(file_path)}' is already open in another Excel window — closing it first.")
-                try:
-                    book.api.Close(SaveChanges=False)
-                except Exception as e:
-                    print(f"[WARNING] Could not close the already-open copy of {file_path}: {e}")
 
 
 def execute_subgroups(project_dir, metadata, subgroup_instructions):
@@ -128,8 +106,8 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
     
     try:
         print("[DEBUG] Opening Excel files in background...")
-        _close_if_open_elsewhere(file1_path)
-        _close_if_open_elsewhere(file2_path)
+        close_if_open_elsewhere(file1_path)
+        close_if_open_elsewhere(file2_path)
         wb1 = app.books.open(file1_path)
         wb2 = app.books.open(file2_path)
         print("[DEBUG] Excel files opened successfully.")
