@@ -363,9 +363,15 @@ def build_unmatched_divider_sheet(page_width, page_height, count):
 # ==========================================
 def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers):
     all_extracted_halves = []
-    found_stores = set()
     unmatched_halves = []
     blank_halves = []
+
+    # A store should only ever produce ONE matched half in split layout - unlike the
+    # standard layout there's no multi-page continuation concept here, so any store
+    # matched on more than one half is a straight duplicate. Halves are staged here
+    # first and only committed to all_extracted_halves once we know, at the end, how
+    # many halves each store actually matched.
+    store_halves = collections.defaultdict(list)
 
     half_height = page_height / 2
     top_rect = fitz.Rect(0, 0, page_width, half_height)
@@ -384,8 +390,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
         bottom_match = next((store for store in sorted_stores if store.lower() in bottom_text), None)
 
         if top_match:
-            found_stores.add(top_match)
-            all_extracted_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top', 'code': store_mapping[top_match]})
+            store_halves[top_match].append({'doc_type': 'original', 'page_num': page_num, 'half': 'top', 'code': store_mapping[top_match]})
         elif not top_text.strip():
             blank_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top'})
             print(f"[DEBUG] BLANK Top Half detected on Page {page_num + 1}")
@@ -394,8 +399,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             print(f"[DEBUG] Unmatched Top Half on Page {page_num + 1}")
 
         if bottom_match:
-            found_stores.add(bottom_match)
-            all_extracted_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom', 'code': store_mapping[bottom_match]})
+            store_halves[bottom_match].append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom', 'code': store_mapping[bottom_match]})
         elif not bottom_text.strip():
             blank_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom'})
             print(f"[DEBUG] BLANK Bottom Half detected on Page {page_num + 1}")
@@ -403,9 +407,25 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             unmatched_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom'})
             print(f"[DEBUG] Unmatched Bottom Half on Page {page_num + 1}")
 
-    # Generate Universal Audit Report
-    missing_stores_grouped = group_missing_stores_by_code(store_mapping, found_stores)
-    divider_info_by_code = analyze_matches(store_mapping, sorted_stores, found_stores)
+    # Where a store shows up on 2+ separate halves, neither can be trusted to be the
+    # single "true" copy - move all of them to Unmatched for the tool operator to sort
+    # out by hand, same treatment as a duplicated label in the standard layout.
+    confirmed_stores = set()
+    for store, halves in store_halves.items():
+        if len(halves) > 1:
+            for h in halves:
+                unmatched_halves.append(h)
+                print(f"[DEBUG] Store '{store}' matched on {len(halves)} separate halves - diverting Page {h['page_num'] + 1} ({h['half']}) to Unmatched")
+        else:
+            confirmed_stores.add(store)
+            all_extracted_halves.extend(halves)
+    unmatched_halves.sort(key=lambda h: (h['page_num'], 0 if h['half'] == 'top' else 1))  # keep original document order
+
+    # Generate Universal Audit Report. Missing-store/collision checks run against
+    # confirmed_stores (NOT the raw found_stores) so a store whose halves all got
+    # pulled into Unmatched for being a duplicate correctly shows up as missing too.
+    missing_stores_grouped = group_missing_stores_by_code(store_mapping, confirmed_stores)
+    divider_info_by_code = analyze_matches(store_mapping, sorted_stores, confirmed_stores)
     audit_doc = build_audit_report(pdf_filename, page_width, half_height, missing_stores_grouped, len(unmatched_halves), len(blank_halves), "HALVES")
 
     audit_halves = [{'doc_type': 'audit', 'page_num': i, 'half': 'full'} for i in range(len(audit_doc))]
