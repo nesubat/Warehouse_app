@@ -11,6 +11,35 @@ from core_math import clean_file_name, generate_pack_signatures, format_file1, f
 
 
 
+def convert_xlsb_to_xlsx(file_path):
+    """Converts a genuine Excel Binary Workbook (.xlsb) to .xlsx via a real Excel
+    instance (through xlwings), since that's the only way to carry over merged cells,
+    colors, and column widths that the rest of this engine depends on - openpyxl can't
+    read .xlsb at all, and pandas/pyxlsb can only round-trip raw cell values.
+
+    Returns the file path to use from here on: the new .xlsx path if a conversion
+    happened, otherwise the original path unchanged."""
+    if os.path.splitext(file_path)[1].lower() != ".xlsb":
+        return file_path
+
+    new_file_path = os.path.splitext(file_path)[0] + ".xlsx"
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    try:
+        wb = app.books.open(file_path)
+        wb.save(new_file_path)
+        wb.close()
+    finally:
+        try:
+            app.quit()
+            app.kill()
+        except:
+            pass
+
+    os.remove(file_path)
+    return new_file_path
+
+
 def scan_excel_tabs(file_path):
     excel_file = pd.ExcelFile(file_path)
     excel_file.close()

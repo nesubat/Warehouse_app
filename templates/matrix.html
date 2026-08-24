@@ -35,7 +35,7 @@
                 <li><strong>Store Names:</strong> Must be in a single, continuous column. A blank cell tells the engine the store list has ended. Duplicate store names will cause grouping collisions in the Label Shuffler!</li>
                 <li><strong>Pack Headers:</strong> The row directly above your data must contain your pack names. The system uses merged cells to determine how many columns a pack spans.</li>
                 <li><strong>Data Entry:</strong> Use numbers for quantities. Dashes (-) and periods (.) are safely ignored as zero. Words (e.g., "J468791-01 or Banners") will generate unique signature codes.</li>
-                <li><strong>File Type:</strong> Only standard <strong>.xlsx</strong> or <strong>.xls</strong> files are supported.</li>
+                <li><strong>File Type:</strong> Standard <strong>.xlsx</strong>, <strong>.xls</strong>, or <strong>.xlsb</strong> files are supported.</li>
             </ul>
         </div>
     <form method="POST" enctype="multipart/form-data">
@@ -43,10 +43,10 @@
             <div class="dropzone-content">
                 <div class="dropzone-icon">📁</div>
                 <p class="dropzone-text">Drag &amp; drop your Distribution file here</p>
-                <p class="dropzone-subtext">or click to browse — .xlsx, .xls</p>
+                <p class="dropzone-subtext">or click to browse — .xlsx, .xls, .xlsb</p>
                 <p class="dropzone-filename"></p>
             </div>
-            <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls" required>
+            <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls, .xlsb" required>
         </div>
         <button type="submit" class="btn-generate">Scan File</button>
     </form>
