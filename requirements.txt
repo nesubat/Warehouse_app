@@ -4,5 +4,3 @@ openpyxl
 xlwings
 PyMuPDF
 xlsxwriter
-pyxlsb
-xlrd
