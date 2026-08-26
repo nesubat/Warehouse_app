@@ -10,7 +10,7 @@ import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
-from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_xlsb_to_xlsx
+from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 
@@ -75,7 +75,7 @@ def matrix():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
-            filepath = convert_xlsb_to_xlsx(filepath)
+            filepath = convert_legacy_excel_to_xlsx(filepath)
             filename = os.path.basename(filepath)
 
             tabs = scan_excel_tabs(filepath)
