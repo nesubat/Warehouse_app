@@ -5,3 +5,4 @@ xlwings
 PyMuPDF
 xlsxwriter
 pyxlsb
+xlrd

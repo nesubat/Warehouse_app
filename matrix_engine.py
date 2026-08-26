@@ -11,15 +11,16 @@ from core_math import clean_file_name, generate_pack_signatures, format_file1, f
 
 
 
-def convert_xlsb_to_xlsx(file_path):
-    """Converts a genuine Excel Binary Workbook (.xlsb) to .xlsx via a real Excel
-    instance (through xlwings), since that's the only way to carry over merged cells,
-    colors, and column widths that the rest of this engine depends on - openpyxl can't
-    read .xlsb at all, and pandas/pyxlsb can only round-trip raw cell values.
+def convert_legacy_excel_to_xlsx(file_path):
+    """Converts a legacy Excel format - Binary Workbook (.xlsb) or the old (.xls) -
+    to .xlsx via a real Excel instance (through xlwings), since that's the only way
+    to carry over merged cells, colors, and column widths that the rest of this
+    engine depends on - openpyxl refuses to open either format at all, and
+    pandas/pyxlsb/xlrd can only round-trip raw cell values.
 
     Returns the file path to use from here on: the new .xlsx path if a conversion
     happened, otherwise the original path unchanged."""
-    if os.path.splitext(file_path)[1].lower() != ".xlsb":
+    if os.path.splitext(file_path)[1].lower() not in (".xlsb", ".xls"):
         return file_path
 
     new_file_path = os.path.splitext(file_path)[0] + ".xlsx"
