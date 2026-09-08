@@ -12,8 +12,8 @@ def clean_file_name(raw_string):
 def clean_store_name(value):
     if value is None or str(value).strip().lower() == 'nan':
         return ""
-    # Strip trailing period and asteriks, keeping any periods elsewhere in the name
-    cleaned = str(value).strip().rstrip('.*')
+    # Strip trailing period, hyphen and asteriks, keeping any periods elsewhere in the name
+    cleaned = str(value).strip().rstrip('.*-')
     # Collapse multiple internal spaces into a single space
     return re.sub(r'\s+', ' ', cleaned).strip()
 
