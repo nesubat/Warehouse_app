@@ -20,7 +20,7 @@ def convert_legacy_excel_to_xlsx(file_path):
 
     Returns the file path to use from here on: the new .xlsx path if a conversion
     happened, otherwise the original path unchanged."""
-    if os.path.splitext(file_path)[1].lower() not in (".xlsb", ".xls"):
+    if os.path.splitext(file_path)[1].lower() not in (".xlsb", ".xls", ".xlsm", ".xlt", ".xltm", ".xltx"):
         return file_path
 
     new_file_path = os.path.splitext(file_path)[0] + ".xlsx"
