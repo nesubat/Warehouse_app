@@ -11,7 +11,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere
+from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 
 
@@ -473,7 +473,8 @@ def pdf_engine():
                             # Store names live in column 0
                             store_col = df.iloc[:, 0].dropna().astype(str).str.strip()
                             store_col = store_col[store_col.str.lower() != 'nan']  # Remove string 'nan'
-                            
+                            store_col = store_col.apply(clean_store_name)
+
                             # Identify duplicates
                             dupes = store_col[store_col.duplicated()].unique().tolist()
                             if dupes:

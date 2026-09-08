@@ -86,8 +86,9 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         
         for r in range(start_store_row, last_row + 1):
             val = sheet.cell(row=r, column=store_col_idx).value
-            if val is not None and str(val).strip() != "":
-                store_names.append(str(val).strip())
+            cleaned_val = clean_store_name(val)
+            if cleaned_val != "":
+                store_names.append(cleaned_val)
         
         duplicate_warning = None
         if len(store_names) != len(set(store_names)):
