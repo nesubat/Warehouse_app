@@ -170,7 +170,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     print(f"[DEBUG]   -> Math complete: Found {len(unique_sigs)} unique signatures.")
                     
                     compiled_data[pack_name].append({
-                        "header_str": f"{start_num}-{end_num}",
+                        "header_str": f"pack {pack_name}: {start_num}-{end_num}",
                         "start_num": start_num,
                         "end_num": end_num,
                         "start_col": start_col,

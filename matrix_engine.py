@@ -240,7 +240,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
         for tab_name in selected_tabs:
             sheet2 = wb2_xw.sheets[tab_name]
             tab_info = tab_data_memory[tab_name]
-            raw_values = sheet2.used_range.value 
+            last_col = max(p["end"] for p in tab_info["pack_ranges"])
+            raw_values = sheet2.range((1, 1), (tab_info["last_row"], last_col)).value 
             
             tab_summaries[tab_name] = []
             inputs = user_inputs.get(tab_name, {"selected_packs": []})
