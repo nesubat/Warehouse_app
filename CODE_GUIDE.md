@@ -460,7 +460,8 @@ flowchart TD
         G -- yes --> H["Insert 1 new column in File1\n+ batch-write letter codes\n+ format_file1()"]
         G -- no --> I[Nothing written to File1]
         H & I --> J["Build the Count+Code summary block\nfor File2 (all packs, selected or not)"]
-        J --> K[Add a 'Packaging Stocks' summary tab to File2]
+        J --> JN["Add a 'Job numbers' tab to File2\n(write_job_numbers_sheet)"]
+        JN --> K[Add a 'Packaging Stocks' summary tab to File2]
         K --> L[Save + close File1 and File2]
     end
     subgraph "Phase 3 — pandas only, no Excel needed"
@@ -490,6 +491,8 @@ for r, sig in row_signatures:
 sheet1_xw.range(f"{col_letter_start}{start_r}").value = batch_data
 ```
 Writing to Excel cell-by-cell through `xlwings` is slow (each write is a round-trip to the real Excel application). Building the whole column as a Python list first, then writing it in **one** `.value = batch_data` assignment, can turn thousands of slow round-trips into a single fast one.
+
+**The "Job numbers" tab.** While each tab's `raw_values` is read (before File 2's rows/columns are touched), every pack's columns are scanned along the **Job ID row**, and the job numbers found are kept in first-seen order with repeats inside that same pack dropped. Each pack becomes one entry in `master_job_data` (`{"header": "Tab | Pack X", "jobs": [...]}`). After all tabs are done, `write_job_numbers_sheet()` writes one block per pack (bold header, then the job numbers centered underneath), with a thin black divider row between blocks, the same idea as Packaging Stocks. Inside each block, job numbers are grouped by **series**: a job number is `series-index` (e.g. `J476523-01` → series `J476523`, index `01`), split on the first `-` by `split_job_number()`. A job number with no `-` is series-only. `group_jobs_by_series()` keeps the series in the order they first appear and sorts each series' jobs by index: series-only first, then numeric indexes in number order. Each series gets a grey, italic `Series J476523` sub-heading. The full job number stays in its own cell on each row so that cell can carry a link later. It also builds `job_to_groups` (`{job_number: [every pack header it appears in]}`). Any job number that appears in **more than one** pack group, whether in the same tab or a different one, is filled light red, and column B next to it lists the other group(s): `⚠ Shared with: Other Tab | Pack 2`.
 
 **File 2's "delete rows below the data" step** (`sheet2.range(f"{start_del}:1048576").api.EntireRow.Delete()`) clears out anything left below the actual store list (old totals, stray notes) before the new Count/Code summary columns get written — otherwise leftover junk rows could visually collide with the new summary block.
 

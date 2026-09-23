@@ -180,6 +180,125 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         "backend_data": backend_data
     }
 
+def split_job_number(job):
+    """Splits a job number like "J476523-01" into its series ("J476523") and index ("01").
+    A job number with no "-" is series-only, so its index is None."""
+    series, sep, index = job.partition("-")
+    return series.strip(), (index.strip() if sep else None)
+
+
+def _index_sort_key(index):
+    """Series-only job first, then numeric indexes in number order, then any text indexes."""
+    if index is None:
+        return (0, 0, "")
+    if index.isdigit():
+        return (1, int(index), "")
+    return (2, 0, index.lower())
+
+
+def group_jobs_by_series(jobs):
+    """Returns [(series, [jobs...]), ...] with series kept in first-seen order and
+    each series' job numbers sorted by their index."""
+    series_map = {}
+    for job in jobs:
+        series, _ = split_job_number(job)
+        series_map.setdefault(series, []).append(job)
+    return [
+        (series, sorted(series_jobs, key=lambda j: _index_sort_key(split_job_number(j)[1])))
+        for series, series_jobs in series_map.items()
+    ]
+
+
+def write_job_numbers_sheet(wb, master_job_data):
+    """Adds a "Job numbers" tab to the Packing Sheet: one block per pack group
+    ("Tab | Pack X" header + its unique job numbers), separated by black divider rows.
+    Inside each block the job numbers are grouped under a "Series ..." sub-heading.
+
+    A job number that shows up in more than one pack group (in the same tab or in
+    another tab) is highlighted red, with the other group(s) it is shared with
+    written next to it so the user notices it straight away."""
+    job_sheet = wb.sheets.add(name="Job numbers", after=wb.sheets[-1])
+
+    # Map every job number to all the pack groups it appears in
+    job_to_groups = {}
+    for group in master_job_data:
+        for job in group["jobs"]:
+            job_to_groups.setdefault(job, []).append(group["header"])
+
+    shared_fill = (255, 199, 206)
+    shared_font = (156, 0, 6)
+
+    series_fill = (242, 242, 242)
+
+    out_row = 1
+    any_shared = False
+    series_rows = []
+    for group in master_job_data:
+        header_cell = job_sheet.range((out_row, 1))
+        header_cell.value = group["header"]
+        header_cell.api.HorizontalAlignment = -4131  # xlLeft
+
+        row_idx = out_row + 1
+        if not group["jobs"]:
+            job_sheet.range((row_idx, 1)).value = "No job number found"
+            job_sheet.range((row_idx, 1)).font.italic = True
+            row_idx += 1
+
+        for series, series_jobs in group_jobs_by_series(group["jobs"]):
+            series_cell = job_sheet.range((row_idx, 1))
+            series_cell.value = f"Series {series}"
+            series_cell.color = series_fill
+            series_cell.api.HorizontalAlignment = -4131  # xlLeft
+            series_rows.append(row_idx)
+            row_idx += 1
+
+            for job in series_jobs:
+                job_cell = job_sheet.range((row_idx, 1))
+                job_cell.value = job
+                job_cell.api.HorizontalAlignment = -4108
+
+                other_groups = [g for g in job_to_groups[job] if g != group["header"]]
+                if other_groups:
+                    any_shared = True
+                    note_cell = job_sheet.range((row_idx, 2))
+                    note_cell.value = f"⚠ Shared with: {', '.join(other_groups)}"
+                    shared_range = job_sheet.range((row_idx, 1), (row_idx, 2))
+                    shared_range.color = shared_fill
+                    shared_range.font.color = shared_font
+                    for border_id in [7, 8, 9, 10, 11]:
+                        shared_range.api.Borders(border_id).LineStyle = 1
+                        shared_range.api.Borders(border_id).Weight = 2
+                row_idx += 1
+
+        # Grid borders around this group's header + job numbers
+        block = job_sheet.range((out_row, 1), (row_idx - 1, 1))
+        for border_id in [7, 8, 9, 10, 12]:
+            block.api.Borders(border_id).LineStyle = 1
+            block.api.Borders(border_id).Weight = 2
+
+        wall_row = row_idx
+        job_sheet.range(f"{wall_row}:{wall_row}").color = (0, 0, 0)
+        job_sheet.range(f"{wall_row}:{wall_row}").row_height = 7.5
+
+        out_row = wall_row + 1
+
+    last_used_row = out_row - 2  # step back past the final trailing divider row
+    if last_used_row >= 1:
+        used_range = job_sheet.range((1, 1), (last_used_row, 2))
+        used_range.font.size = 16
+        used_range.font.bold = True
+        used_range.api.VerticalAlignment = -4108
+
+    # Series sub-headings sit a notch smaller and in italics so the job numbers stand out
+    for r in series_rows:
+        job_sheet.range((r, 1)).font.size = 13
+        job_sheet.range((r, 1)).font.italic = True
+
+    job_sheet.range("A:A").api.EntireColumn.AutoFit()
+    if any_shared:
+        job_sheet.range("B:B").api.EntireColumn.AutoFit()
+
+
 # =====================================================================
 # THE CORE GENERATOR ENGINE (PHASE 1, 2, and 3)
 # =====================================================================
@@ -236,13 +355,32 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             if sheet.name not in selected_tabs:
                 sheet.delete()
         master_stock_data = []
-        
+        master_job_data = []
+
         for tab_name in selected_tabs:
             sheet2 = wb2_xw.sheets[tab_name]
             tab_info = tab_data_memory[tab_name]
             last_col = max(p["end"] for p in tab_info["pack_ranges"])
-            raw_values = sheet2.range((1, 1), (tab_info["last_row"], last_col)).value 
-            
+            raw_values = sheet2.range((1, 1), (tab_info["last_row"], last_col)).value
+
+            # --- COLLECT JOB NUMBERS PER PACK (for the "Job numbers" tab) ---
+            # Each pack's columns carry their job number in the Job ID row. Keep the
+            # first-seen order and drop repeats within the same pack.
+            job_row_values = raw_values[tab_info["job_id_row"] - 1]
+            for pack in tab_info["pack_ranges"]:
+                pack_jobs = []
+                for c in range(pack["start"], pack["end"] + 1):
+                    val = job_row_values[c - 1]
+                    if val is None or str(val).strip() == "":
+                        continue
+                    job = str(val).strip()
+                    if job not in pack_jobs:
+                        pack_jobs.append(job)
+                master_job_data.append({
+                    "header": f"{tab_name} | Pack {pack['name']}",
+                    "jobs": pack_jobs
+                })
+
             tab_summaries[tab_name] = []
             inputs = user_inputs.get(tab_name, {"selected_packs": []})
             selected_list = [p.strip() for p in inputs.get("selected_packs", [])]
@@ -419,6 +557,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             sheet2.range(f"A:{end_del_col_letter}").api.EntireColumn.Delete()
 
             # Preparing the stock summary for the Packaging Stocks sheet
+
+        write_job_numbers_sheet(wb2_xw, master_job_data)
 
         stock_sheet = wb2_xw.sheets.add(name="Packaging Stocks", after=wb2_xw.sheets[-1])
         out_row = 1
