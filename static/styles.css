@@ -245,6 +245,26 @@ h2 { color: #2c3e50; }
     margin: 0;
 }
 
+/* "✕ Clear" button, added by script.js once a file is picked - sits above the invisible input */
+.dropzone-clear {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    background: #fff;
+    color: #c0392b;
+    border: 1px solid #e74c3c;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.dropzone-clear:hover { background: #ffebee; }
+
+.dropzone-clear[hidden] { display: none; }
+
 .pack-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
 @media (max-width: 700px) {
     .pack-grid { grid-template-columns: 1fr; }
@@ -445,6 +465,58 @@ button:hover { background-color: #2980b9; }
 
 .warning-box-center {
     text-align: center;
+}
+
+/* Job numbers found in more than one pack group (Distribution Mapper results page) */
+.shared-job-warning {
+    text-align: left;
+}
+
+.shared-job-warning ul {
+    margin: 8px 0 0 0;
+    padding-left: 22px;
+    font-weight: normal;
+}
+
+/* --- INSTALLER CAMPAIGN TOGGLE / BADGE --- */
+.installer-box {
+    background: #fffde7;
+    border: 1px solid #f1c40f;
+    border-radius: 6px;
+    padding: 10px 15px;
+    margin: 12px 0;
+}
+
+.installer-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: bold;
+    color: #2c3e50;
+    cursor: pointer;
+}
+
+.installer-label input {
+    width: 16px;
+    height: 16px;
+    accent-color: #f1c40f;
+}
+
+.installer-help {
+    margin: 4px 0 0 24px;
+    font-size: 13px;
+    color: #7f8c8d;
+}
+
+.installer-badge {
+    background: #fffde7;
+    border: 1px solid #f1c40f;
+    border-radius: 5px;
+    padding: 8px 12px;
+    margin: -5px 0 15px 0;
+    font-size: 14px;
+    font-weight: bold;
+    color: #2c3e50;
 }
 
 /* --- LOCKED GENERATE BUTTON --- */

@@ -139,6 +139,20 @@ document.addEventListener("DOMContentLoaded", function() {
                 });
             }
         }
+
+        // --- Matrix "Sent to an installer" (per tab) ---
+        // Ticks every pack in the tab and locks them, since every divider needs codes to carry
+        // its barcodes. The server selects all packs for installer tabs itself, so the disabled
+        // (and therefore unsubmitted) pack checkboxes don't matter.
+        if (e.target.matches('.installer-checkbox')) {
+            const card = e.target.closest('.blueprint-card');
+            if (card) {
+                card.querySelectorAll('.pack-checkbox, input[id^="selectAllPacks_"]').forEach(function(checkbox) {
+                    if (e.target.checked) checkbox.checked = true;
+                    checkbox.disabled = e.target.checked;
+                });
+            }
+        }
         // -------------------------------------------------
 
         // Tab Selector (Existing code...)
@@ -348,6 +362,8 @@ document.addEventListener("DOMContentLoaded", function() {
                     const checkbox = container.querySelector(".pack-divider-checkbox");
                     if (this.files && this.files.length > 0) {
                         container.style.display = "block";
+                        // Installer tabs: the job barcodes live on the dividers, so start with them on
+                        if (this.dataset.installer === "true" && checkbox) checkbox.checked = true;
                     } else {
                         container.style.display = "none";
                         if (checkbox) checkbox.checked = false;
@@ -368,32 +384,60 @@ document.addEventListener("DOMContentLoaded", function() {
     }// =========================================
     // 6. MATRIX ANCHOR POINTS MEMORY
     // =========================================
-    // Restores user's previous input for Start Cell, Job ID, and Store Col
+    // Remembers the Start Cell, Job ID Cell and Store Name Col typed for EACH tab and fills
+    // them back in next time: first by tab name (the same file uploaded again), then by tab
+    // position (a new campaign file from the same template, where the tab names changed),
+    // then the first tab's values. Only fields still showing the built-in defaults are
+    // filled, so values the server re-rendered after "Update Previews" are never touched.
     const previewForm = document.querySelector('form[action="/preview"]');
     if (previewForm) {
-        // A. On page load, override default values with saved memory
-        previewForm.querySelectorAll('input[name^="start_"]').forEach(el => {
-            const saved = localStorage.getItem('anchor_start');
-            if (saved && el.value === 'B8') el.value = saved;
-        });
-        previewForm.querySelectorAll('input[name^="job_"]').forEach(el => {
-            const saved = localStorage.getItem('anchor_job');
-            if (saved && el.value === 'E1') el.value = saved;
-        });
-        previewForm.querySelectorAll('input[name^="store_"]').forEach(el => {
-            const saved = localStorage.getItem('anchor_store');
-            if (saved && el.value === 'A') el.value = saved;
+        const ANCHOR_KEY = 'anchor_points_by_tab';
+        const ANCHOR_FIELDS = { start: 'B8', job: 'E1', store: 'A' };  // field -> built-in default
+        const MAX_REMEMBERED_TABS = 200;
+
+        const tabCards = Array.from(previewForm.querySelectorAll('.tab-card')).map(function(card) {
+            const tabBox = card.querySelector('input[name="selected_tabs"]');
+            return {
+                tab: tabBox ? tabBox.value : null,
+                start: card.querySelector('input[name^="start_"]'),
+                job: card.querySelector('input[name^="job_"]'),
+                store: card.querySelector('input[name^="store_"]')
+            };
+        }).filter(c => c.tab && c.start && c.job && c.store);
+
+        let memory = { byName: {}, byIndex: [] };
+        let legacy = {};
+        try {
+            const saved = JSON.parse(localStorage.getItem(ANCHOR_KEY));
+            if (saved && saved.byName && Array.isArray(saved.byIndex)) memory = saved;
+            // Older versions remembered a single set of anchors (the first tab's) under these keys
+            legacy = {
+                start: localStorage.getItem('anchor_start'),
+                job: localStorage.getItem('anchor_job'),
+                store: localStorage.getItem('anchor_store')
+            };
+        } catch (e) { /* storage blocked or corrupt - just keep the defaults */ }
+
+        // A. On page load, fill each tab from its own memory
+        tabCards.forEach(function(c, i) {
+            const remembered = memory.byName[c.tab] || memory.byIndex[i] || memory.byIndex[0] || legacy;
+            Object.keys(ANCHOR_FIELDS).forEach(function(field) {
+                if (remembered[field] && c[field].value === ANCHOR_FIELDS[field]) c[field].value = remembered[field];
+            });
         });
 
-        // B. On submit, save the current inputs to memory for next time
+        // B. On submit, save every tab's current inputs for next time
         previewForm.addEventListener('submit', function() {
-            const firstStart = previewForm.querySelector('input[name^="start_"]');
-            const firstJob = previewForm.querySelector('input[name^="job_"]');
-            const firstStore = previewForm.querySelector('input[name^="store_"]');
-            
-            if (firstStart) localStorage.setItem('anchor_start', firstStart.value);
-            if (firstJob) localStorage.setItem('anchor_job', firstJob.value);
-            if (firstStore) localStorage.setItem('anchor_store', firstStore.value);
+            memory.byIndex = tabCards.map(c => ({ start: c.start.value, job: c.job.value, store: c.store.value }));
+            tabCards.forEach(function(c, i) {
+                delete memory.byName[c.tab];  // re-insert so the most recently used tabs sit last
+                memory.byName[c.tab] = memory.byIndex[i];
+            });
+            const names = Object.keys(memory.byName);
+            names.slice(0, Math.max(0, names.length - MAX_REMEMBERED_TABS)).forEach(n => delete memory.byName[n]);
+            try {
+                localStorage.setItem(ANCHOR_KEY, JSON.stringify(memory));
+            } catch (e) { /* storage blocked - nothing to remember with */ }
         });
     }
 
@@ -413,16 +457,34 @@ document.addEventListener("DOMContentLoaded", function() {
     // =========================================
     // The file input itself covers the whole dropzone (transparent), so the
     // browser's native drag/drop-onto-input behavior already works. This just
-    // adds the hover highlight and the "selected file" label underneath.
+    // adds the hover highlight, the "selected file" label underneath, and a
+    // "Clear" button (shown once a file is picked) that empties the input.
     document.querySelectorAll('.dropzone').forEach(function(zone) {
         const input = zone.querySelector('.dropzone-input');
         const filenameEl = zone.querySelector('.dropzone-filename');
         if (!input) return;
 
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'dropzone-clear';
+        clearBtn.textContent = '✕ Clear';
+        clearBtn.title = 'Remove the selected file';
+        zone.appendChild(clearBtn);  // after the input, so it sits on top of it
+
+        clearBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            input.value = '';
+            // Fire 'change' so everything listening (filename label, divider checkbox,
+            // Step 1 submit-button validation) updates as if the user removed the file.
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
         function showFilename() {
             if (filenameEl) {
                 filenameEl.textContent = input.files.length ? `✓ ${input.files[0].name}` : '';
             }
+            clearBtn.hidden = !input.files.length;
         }
 
         input.addEventListener('change', showFilename);

@@ -1,6 +1,13 @@
 import os
 import re
 import xlwings as xw
+import pandas as pd
+
+# Extra tab in the Signature Links file (File 3) holding the job numbers behind every code of
+# every pack in an installer tab. Only written when at least one tab is marked as going to an
+# installer, and skipped by the Label Shuffler when it lists tabs/packs.
+DIVIDER_BARCODE_SHEET = "Divider Barcodes"
+DIVIDER_BARCODE_COLUMNS = ["Tab", "Pack", "Code", "Job Number", "Kind", "Qty", "Barcode"]
 
 def clean_file_name(raw_string):
     """Cleans messy strings into safe file names."""
@@ -30,6 +37,36 @@ def sanitize_cell(val):
         return int(num) if num.is_integer() else num
     except ValueError:
         return val_str
+
+def format_quantity(val):
+    """1.0 -> 1, "2.0" -> 2; anything that isn't a number is handed back as trimmed text."""
+    try:
+        num = float(val)
+    except (ValueError, TypeError):
+        return str(val).strip()
+    return int(num) if num.is_integer() else num
+
+def read_divider_barcodes(xls):
+    """Reads the Divider Barcodes tab of an open Signature Links pd.ExcelFile into
+    {(tab, "Code for <pack>"): {code: [{"job", "kind", "qty", "barcode"}, ...]}}, keyed the same
+    way the Label Shuffler names its tab/pack uploads. Returns {} when the tab isn't there
+    (i.e. no tab in this campaign is going to an installer)."""
+    if DIVIDER_BARCODE_SHEET not in xls.sheet_names:
+        return {}
+    # dtype=str + keep_default_na=False so codes like "NA" and pack names like "1" stay exactly as written
+    df = pd.read_excel(xls, sheet_name=DIVIDER_BARCODE_SHEET, dtype=str, keep_default_na=False)
+    lookup = {}
+    for _, row in df.iterrows():
+        tab, pack, code, job = (str(row[c]).strip() for c in ("Tab", "Pack", "Code", "Job Number"))
+        if not (tab and pack and code and job):
+            continue
+        lookup.setdefault((tab, f"Code for {pack}"), {}).setdefault(code, []).append({
+            "job": job,
+            "kind": format_quantity(row["Kind"]) if str(row["Kind"]).strip() else None,
+            "qty": format_quantity(row["Qty"]),
+            "barcode": str(row["Barcode"]).strip() or job,
+        })
+    return lookup
 
 def sort_key(sig):
     """Assigns a 3-part identity to prevent crashes: (Priority, Number, Text)"""

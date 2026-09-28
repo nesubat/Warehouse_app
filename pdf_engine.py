@@ -282,9 +282,186 @@ def analyze_matches(store_mapping, sorted_stores, found_stores):
 
 
 # ==========================================
+# UTILITY: CODE 128 BARCODES (installer divider sheets)
+# ==========================================
+# Bar/space widths for Code 128 symbol values 0-105 (each adds up to 11 modules), then the
+# 13-module stop pattern. Code set B covers every printable ASCII character, which is all a
+# job number like "J476699-09" ever needs.
+_CODE128_PATTERNS = [
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+    "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+    "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+    "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+    "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+    "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+    "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+    "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+    "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+    "114131", "311141", "411131", "211412", "211214", "211232",
+]
+_CODE128_STOP = "2331112"
+_CODE128_START_B = 104
+
+BARCODE_QUIET_MODULES = 10  # blank modules Code 128 needs on each side so a scanner finds the edges
+BARCODE_MIN_MODULE = 0.75   # pt (~0.26mm) - narrowest bar width that still scans reliably
+BARCODE_MAX_MODULE = 0.96   # pt (~0.34mm) - keeps barcodes compact; exactly 4 dots at 300dpi / 8 at 600dpi
+BARCODE_MIN_BAR_H = 25      # pt (~9mm)
+BARCODE_MAX_BAR_H = 55      # pt (~19mm)
+BARCODE_CAPTION_H = 18      # pt reserved under each barcode for its "J476699-09 Kind 1 x 1" caption
+BARCODE_GAP_X = 10
+BARCODE_GAP_Y = 10
+
+
+def code128_modules(text):
+    """Encodes text as a Code 128 (code set B) symbol and returns it as a string of
+    '1' (bar) and '0' (space) modules from start to stop, quiet zones not included.
+    Returns None when the text is empty or holds a character code set B can't carry."""
+    if not text or any(not (32 <= ord(ch) <= 126) for ch in text):
+        return None
+    values = [_CODE128_START_B] + [ord(ch) - 32 for ch in text]
+    checksum = (values[0] + sum(pos * v for pos, v in enumerate(values[1:], start=1))) % 103
+    modules = []
+    for widths in [_CODE128_PATTERNS[v] for v in values + [checksum]] + [_CODE128_STOP]:
+        for i, w in enumerate(widths):
+            modules.append(("1" if i % 2 == 0 else "0") * int(w))
+    return "".join(modules)
+
+
+def _draw_code128(page, x, y, module_w, bar_h, modules):
+    """Draws each run of bar modules as one filled vector rectangle, so the bars stay
+    sharp at any print resolution."""
+    shape = page.new_shape()
+    run_start = None
+    for i, m in enumerate(modules + "0"):  # trailing "0" closes a final run of bars
+        if m == "1" and run_start is None:
+            run_start = i
+        elif m == "0" and run_start is not None:
+            shape.draw_rect(fitz.Rect(x + run_start * module_w, y, x + i * module_w, y + bar_h))
+            run_start = None
+    shape.finish(color=None, fill=(0, 0, 0), width=0)
+    shape.commit()
+
+
+def barcode_caption(entry):
+    """'J476699-09 Kind 1 x 1', or just 'J476699-02 x 1' when that job number only has one kind."""
+    kind = f" Kind {entry['kind']}" if entry.get("kind") else ""
+    return f"{entry['job']}{kind} x {entry['qty']}"
+
+
+def _plan_barcode_grid(count, area_w, area_h, symbol_modules, min_caption_w):
+    """Picks how many columns to lay `count` barcodes out in, favouring the widest bars
+    (easiest to scan), then the tallest. Returns None when `count` barcodes can't all fit
+    in the area at the minimum scannable size."""
+    best = None
+    for cols in range(1, count + 1):
+        rows = math.ceil(count / cols)
+        cell_w = (area_w - (cols - 1) * BARCODE_GAP_X) / cols
+        cell_h = (area_h - (rows - 1) * BARCODE_GAP_Y) / rows
+        module_w = min(BARCODE_MAX_MODULE, cell_w / symbol_modules)
+        bar_h = min(BARCODE_MAX_BAR_H, cell_h - BARCODE_CAPTION_H)
+        if module_w < BARCODE_MIN_MODULE or bar_h < BARCODE_MIN_BAR_H or cell_w < min_caption_w:
+            continue
+        score = (round(module_w, 3), bar_h)
+        if best is None or score > best[0]:
+            best = (score, {"cols": cols, "cell_w": cell_w, "module_w": module_w, "bar_h": bar_h})
+    return best[1] if best else None
+
+
+def _paginate_barcodes(entries, area_w, area_h):
+    """Splits the barcodes into as few divider pages as it takes to keep every one of them
+    at a scannable size - none is ever dropped for lack of room. Returns [(entries, plan), ...]."""
+    symbol_modules = max((len(e["modules"]) for e in entries if e["modules"]), default=0) + 2 * BARCODE_QUIET_MODULES
+    min_caption_w = max(fitz.get_text_length(barcode_caption(e), fontname="hebo", fontsize=7) for e in entries)
+
+    pages = []
+    remaining = list(entries)
+    while remaining:
+        take = len(remaining)
+        plan = _plan_barcode_grid(take, area_w, area_h, symbol_modules, min_caption_w)
+        while plan is None and take > 1:
+            take -= 1
+            plan = _plan_barcode_grid(take, area_w, area_h, symbol_modules, min_caption_w)
+        if plan is None:
+            # Pathologically small page: one barcode per page, squeezed to whatever fits.
+            plan = {"cols": 1, "cell_w": area_w,
+                    "module_w": max(0.1, min(BARCODE_MAX_MODULE, area_w / symbol_modules)),
+                    "bar_h": max(5, min(BARCODE_MAX_BAR_H, area_h - BARCODE_CAPTION_H))}
+        pages.append((remaining[:take], plan))
+        remaining = remaining[take:]
+    return pages
+
+
+def _build_barcode_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, collision_note, barcode_entries):
+    """Divider sheet for installer campaigns: the same green/red border, code and matched
+    count as build_divider_sheet(), with a Code 128 barcode for every job number that goes
+    into this code's pack laid out underneath. Runs onto extra divider pages if the
+    barcodes can't all fit on one at a scannable size."""
+    is_match = (matched_count == expected_count) and not collision_note
+    border_color = (0.18, 0.63, 0.36) if is_match else (0.75, 0.22, 0.17)
+    label_count = str(matched_count) if matched_count == expected_count else f"{matched_count}/{expected_count}"
+
+    disclaimer = None
+    if not is_match:
+        diff = expected_count - matched_count
+        if diff > 0:
+            disclaimer = f"Short by {diff} store(s) (expected {expected_count})"
+        elif diff < 0:
+            disclaimer = f"{-diff} extra store(s) matched (expected {expected_count})"
+        else:
+            disclaimer = "Possible mismatch - please verify"
+
+    margin = 50  # keeps content clear of the 40pt border stroke
+    left, right, top, bottom = margin, page_width - margin, margin, page_height - margin
+    header_h = min(90, (bottom - top) * 0.28)
+    disclaimer_h = 20 if disclaimer else 0
+    grid_top = top + header_h + disclaimer_h + 10
+    area_w, area_h = right - left, bottom - grid_top
+
+    entries = [dict(e, modules=code128_modules(e["barcode"])) for e in barcode_entries]
+    pages = _paginate_barcodes(entries, area_w, area_h)
+
+    doc = fitz.open()
+    for page_idx, (chunk, plan) in enumerate(pages):
+        page = doc.new_page(width=page_width, height=page_height)
+        page.draw_rect(fitz.Rect(15, 15, page_width - 15, page_height - 15), color=border_color, width=40)
+
+        code_line = f"CODE {signature_code}" if len(pages) == 1 else f"CODE {signature_code} ({page_idx + 1}/{len(pages)})"
+        _fit_textbox(page, fitz.Rect(left, top, right, top + header_h), f"{code_line}\nMatched Labels: {label_count}",
+                     "hebo", 36, fitz.TEXT_ALIGN_CENTER, (0, 0, 0))
+        if disclaimer:
+            _fit_textbox(page, fitz.Rect(left, top + header_h, right, top + header_h + disclaimer_h), disclaimer,
+                         "hebo", 14, fitz.TEXT_ALIGN_CENTER, border_color)
+        page.draw_line(fitz.Point(left, grid_top - 5), fitz.Point(right, grid_top - 5), color=(0.8, 0.8, 0.8), width=1)
+
+        cols, cell_w, module_w, bar_h = plan["cols"], plan["cell_w"], plan["module_w"], plan["bar_h"]
+        cell_h = bar_h + BARCODE_CAPTION_H
+        rows = math.ceil(len(chunk) / cols)
+        block_h = rows * cell_h + (rows - 1) * BARCODE_GAP_Y
+        y0 = grid_top + max(0, (area_h - block_h) / 2)  # centre the block in the space left
+        for r in range(rows):
+            row_entries = chunk[r * cols:(r + 1) * cols]
+            row_w = len(row_entries) * cell_w + (len(row_entries) - 1) * BARCODE_GAP_X
+            x0 = left + (area_w - row_w) / 2  # centre a part-filled last row
+            cy = y0 + r * (cell_h + BARCODE_GAP_Y)
+            for c, entry in enumerate(row_entries):
+                cx = x0 + c * (cell_w + BARCODE_GAP_X)
+                if entry["modules"]:
+                    symbol_w = len(entry["modules"]) * module_w
+                    _draw_code128(page, cx + (cell_w - symbol_w) / 2, cy, module_w, bar_h, entry["modules"])
+                else:
+                    _fit_textbox(page, fitz.Rect(cx, cy, cx + cell_w, cy + bar_h), "No barcode - job number has unsupported characters",
+                                 "hebo", 9, fitz.TEXT_ALIGN_CENTER, (0.75, 0.22, 0.17))
+                _fit_textbox(page, fitz.Rect(cx, cy + bar_h + 2, cx + cell_w, cy + cell_h), barcode_caption(entry),
+                             "hebo", 12, fitz.TEXT_ALIGN_CENTER, (0, 0, 0))
+
+    return doc
+
+
+# ==========================================
 # UTILITY: PROFESSIONAL DIVIDER SHEET
 # ==========================================
-def build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, collision_note=False):
+def build_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, collision_note=False, barcode_entries=None):
     """Generates a professional divider page: green border if the number of distinct
     stores matched into this code equals the expected count from the signature links,
     red border otherwise (with a shortfall/excess disclaimer). The full missing-store
@@ -301,7 +478,13 @@ def build_divider_sheet(page_width, page_height, signature_code, matched_count, 
     is for the tool operator to read on the audit report, never on a divider a
     warehouse floor worker might see.
     Layout scales down on short pages (e.g. split-layout half-page dividers) so nothing
-    overflows or gets skipped past the bottom edge."""
+    overflows or gets skipped past the bottom edge.
+
+    barcode_entries (installer campaigns only) hands the whole job over to
+    _build_barcode_divider_sheet(), which can return more than one page."""
+    if barcode_entries:
+        return _build_barcode_divider_sheet(page_width, page_height, signature_code, matched_count, expected_count, collision_note, barcode_entries)
+
     is_match = (matched_count == expected_count) and not collision_note
     bottom_limit = page_height - 20
 
@@ -361,7 +544,7 @@ def build_unmatched_divider_sheet(page_width, page_height, count):
 # ==========================================
 # ENGINE: SPLIT LAYOUT (CUT & STACK)
 # ==========================================
-def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers):
+def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers, divider_barcodes=None):
     all_extracted_halves = []
     unmatched_halves = []
     blank_halves = []
@@ -443,9 +626,12 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             if item['code'] != current_code:
                 current_code = item['code']
                 info = divider_info_by_code.get(current_code, {'matched_count': 0, 'expected_count': 0, 'collision_note': None})
-                div_doc = build_divider_sheet(page_width, half_height, current_code, info['matched_count'], info['expected_count'], info['collision_note'])
+                div_doc = build_divider_sheet(page_width, half_height, current_code, info['matched_count'], info['expected_count'], info['collision_note'],
+                                              barcode_entries=(divider_barcodes or {}).get(current_code))
                 divider_docs.append(div_doc)
-                grouped_halves.append({'doc_type': 'divider', 'doc_ref': div_doc, 'half': 'full'})
+                # A barcode divider can run onto extra pages - each one becomes its own half
+                for div_page in range(len(div_doc)):
+                    grouped_halves.append({'doc_type': 'divider', 'doc_ref': div_doc, 'half': 'full', 'page_num': div_page})
 
             grouped_halves.append(item)
 
@@ -477,7 +663,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             new_page.show_pdf_page(top_rect, audit_doc, top_item['page_num'], clip=audit_rect)
         elif top_item['doc_type'] == 'divider':
             # Handle the divider specifically by referencing its doc_ref!
-            new_page.show_pdf_page(top_rect, top_item['doc_ref'], 0, clip=audit_rect)
+            new_page.show_pdf_page(top_rect, top_item['doc_ref'], top_item.get('page_num', 0), clip=audit_rect)
         else:
             src_page = doc[top_item['page_num']]
             src_clip = top_rect if top_item['half'] == 'top' else bottom_rect
@@ -490,7 +676,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
                 new_page.show_pdf_page(bottom_rect, audit_doc, bot_item['page_num'], clip=audit_rect)
             elif bot_item['doc_type'] == 'divider':
                 # Handle the divider specifically by referencing its doc_ref!
-                new_page.show_pdf_page(bottom_rect, bot_item['doc_ref'], 0, clip=audit_rect)
+                new_page.show_pdf_page(bottom_rect, bot_item['doc_ref'], bot_item.get('page_num', 0), clip=audit_rect)
             else:
                 src_page_b = doc[bot_item['page_num']]
                 src_clip_b = top_rect if bot_item['half'] == 'top' else bottom_rect
@@ -505,7 +691,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
 # ==========================================
 # ENGINE: STANDARD LAYOUT
 # ==========================================
-def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers):
+def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers, divider_barcodes=None):
     found_stores = set()
     current_store = None
     unmatched_pages = []
@@ -605,7 +791,8 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
             # Use the accurate post-dedup store count, not analyze_matches' found_stores-based
             # matched_count - that one still counts a store as "matched" even if every one of
             # its pages ended up diverted to Unmatched for being a duplicate.
-            div_doc = build_divider_sheet(page_width, page_height, code, code_final_store_counts[code], info['expected_count'], info['collision_note'])
+            div_doc = build_divider_sheet(page_width, page_height, code, code_final_store_counts[code], info['expected_count'], info['collision_note'],
+                                          barcode_entries=(divider_barcodes or {}).get(code))
             final_shuffled_doc.insert_pdf(div_doc)
             div_doc.close()
         for p_num in code_buckets[code]:
@@ -635,9 +822,12 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
 # ==========================================
 # MASTER ORCHESTRATOR
 # ==========================================
-def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, signature_header="Unknown Header", add_dividers=False):
+def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, signature_header="Unknown Header", add_dividers=False, divider_barcodes=None):
     """
     Main entry point. Detects layout and routes traffic to the correct processing engine.
+
+    divider_barcodes ({code: [barcode entries]}, installer campaigns only) puts a Code 128
+    barcode for each job number on that code's divider sheet. None leaves dividers as they are.
     """
     sorted_stores = sorted(store_mapping.keys(), key=len, reverse=True)
     
@@ -656,9 +846,9 @@ def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, sign
 
     # Traffic Router
     if is_split_layout:
-        final_shuffled_doc = process_split_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers)
+        final_shuffled_doc = process_split_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers, divider_barcodes)
     else:
-        final_shuffled_doc = process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers)
+        final_shuffled_doc = process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_height, pdf_filename, add_dividers, divider_barcodes)
 
     # Final Export Cleanup
     final_shuffled_doc.set_page_labels([])

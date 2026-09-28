@@ -7,7 +7,7 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS
 
 
 
@@ -299,6 +299,59 @@ def write_job_numbers_sheet(wb, master_job_data):
         job_sheet.range("B:B").api.EntireColumn.AutoFit()
 
 
+def find_shared_job_numbers(master_job_data):
+    """Job numbers that turn up in more than one pack group (in the same tab or across tabs).
+    That shouldn't happen, so the results page warns about each one - generation still goes ahead."""
+    job_to_groups = {}
+    for group in master_job_data:
+        for job in group["jobs"]:
+            job_to_groups.setdefault(job, []).append(group["header"])
+    return [f"{job} is in {', '.join(groups)}" for job, groups in job_to_groups.items() if len(groups) > 1]
+
+
+def assign_job_kinds(selected_tabs, tab_column_jobs):
+    """A job number that sits in more than one column - in the same pack group, another pack
+    group or another tab - has one "kind" per column. Kinds are numbered 1, 2, 3... in reading
+    order: first tab to last, then left to right within each tab.
+
+    Returns {(tab, col): kind}, with kind None for a job number that only has one column."""
+    occurrences = {}
+    for tab in selected_tabs:
+        for col, job in sorted(tab_column_jobs.get(tab, {}).items()):
+            occurrences.setdefault(job, []).append((tab, col))
+
+    kinds = {}
+    for places in occurrences.values():
+        for kind, place in enumerate(places, start=1):
+            kinds[place] = kind if len(places) > 1 else None
+    return kinds
+
+
+def build_divider_barcode_rows(tab_name, pack_summaries, column_jobs, job_kinds):
+    """Rows for the Divider Barcodes tab of the Signature Links file: for every code of every
+    selected pack, one row per job number that goes into that code's bag, with how many.
+    Columns with no quantity for a code, or with no job number in the Job ID row, are left out.
+
+    pack_summaries must be in left-to-right pack order. The "Barcode" value is what the
+    divider sheet's Code 128 barcode encodes: the job number, plus its kind when it has
+    more than one (e.g. "J476699-17 Kind 1"), so a scan tells kinds apart."""
+    rows = []
+    for p_sum in pack_summaries:
+        if not p_sum["is_selected"]:
+            continue
+        for sig in p_sum["unique_sigs"]:  # already in A, B, C... order
+            code = p_sum["letters"][sig]
+            for offset, val in enumerate(sig):
+                col = p_sum["start_idx"] + offset
+                job = column_jobs.get(col)
+                if val == 0 or not job:
+                    continue
+                kind = job_kinds.get((tab_name, col))
+                barcode = f"{job} Kind {kind}" if kind else job
+                rows.append([tab_name, p_sum["name"], code, job, kind, format_quantity(val), barcode])
+    return rows
+
+
 # =====================================================================
 # THE CORE GENERATOR ENGINE (PHASE 1, 2, and 3)
 # =====================================================================
@@ -340,6 +393,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     shutil.copy(file_path, file2_path)
     
     tab_summaries = {}
+    tab_column_jobs = {}  # {tab: {col: job number}} for every pack column with a job number
     app = xw.App(visible=False)
     app.display_alerts = False
     
@@ -367,6 +421,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             # Each pack's columns carry their job number in the Job ID row. Keep the
             # first-seen order and drop repeats within the same pack.
             job_row_values = raw_values[tab_info["job_id_row"] - 1]
+            tab_column_jobs[tab_name] = {}
             for pack in tab_info["pack_ranges"]:
                 pack_jobs = []
                 for c in range(pack["start"], pack["end"] + 1):
@@ -374,6 +429,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     if val is None or str(val).strip() == "":
                         continue
                     job = str(val).strip()
+                    tab_column_jobs[tab_name][c] = job
                     if job not in pack_jobs:
                         pack_jobs.append(job)
                 master_job_data.append({
@@ -660,7 +716,24 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 format16 = workbook.add_format({'font_size': 16, 'align': 'center'})
                 
                 # Set Font Size 16
-                worksheet.set_column(0, len(df_dict) - 1, None, format16) 
+                worksheet.set_column(0, len(df_dict) - 1, None, format16)
+                worksheet.autofit()
+
+            # --- DIVIDER BARCODES TAB (installer tabs only) ---
+            # The job numbers behind every code, so the Label Shuffler can print a barcode
+            # for each one on that code's divider sheet. Kinds are numbered across ALL
+            # selected tabs, installer or not, since they describe the distribution file.
+            job_kinds = assign_job_kinds(selected_tabs, tab_column_jobs)
+            barcode_rows = []
+            for tab_name in selected_tabs:
+                if user_inputs.get(tab_name, {}).get("installer"):
+                    pack_summaries = list(reversed(tab_summaries.get(tab_name, [])))  # back to left-to-right
+                    barcode_rows += build_divider_barcode_rows(tab_name, pack_summaries, tab_column_jobs.get(tab_name, {}), job_kinds)
+            if barcode_rows:
+                df_barcodes = pd.DataFrame(barcode_rows, columns=DIVIDER_BARCODE_COLUMNS)
+                df_barcodes.to_excel(writer, sheet_name=DIVIDER_BARCODE_SHEET, index=False)
+                worksheet = writer.sheets[DIVIDER_BARCODE_SHEET]
+                worksheet.set_column(0, len(DIVIDER_BARCODE_COLUMNS) - 1, None, writer.book.add_format({'font_size': 12}))
                 worksheet.autofit()
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
@@ -669,5 +742,6 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
         metadata_path = os.path.join(project_dir, f"{base_metadata_name}.json")
         with open(metadata_path, 'w') as f:
             json.dump(project_metadata, f, indent=4)
-    
-    return file1_name, file2_name, file3_name
+
+    shared_job_warnings = find_shared_job_numbers(master_job_data)
+    return file1_name, file2_name, file3_name, shared_job_warnings

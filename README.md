@@ -19,6 +19,7 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 ### 3. 🖨️ PDF Label Shuffler
 *   **Signature Matching:** Upload raw PDF store labels and automatically sort them to perfectly match the Excel Signature Code groups.
 *   **Divider Injection:** Optional toggle to insert visual divider pages between different packing groups to assist floor workers.
+*   **Installer Barcodes:** Tick "This campaign is being sent to an installer" on a tab in the Distribution Mapper, and every divider sheet for that tab carries a Code 128 barcode for each job number in that code's bag, captioned with its kind and quantity (e.g. `J476699-09 Kind 1 x 1`).
 *   **Safe Duplicate Handling:** If the Signature Links file has duplicate store names, nothing is deleted — open the file, fix it, and click "Recheck File" to continue instantly, without re-uploading.
 *   **Audit Report:** Every shuffled PDF starts with a report page listing any missing/unmatched stores (grouped by code, auto-laid-out into columns) and flagging any code group where a store name repeated unexpectedly, so a mis-sorted batch is never silently trusted.
 

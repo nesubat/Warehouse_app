@@ -11,7 +11,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name
+from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 
 
@@ -144,7 +144,12 @@ def generate():
             "store": request.form.get(f"store_{tab}") or request.form.get(f"store_{safe_tab}"),
             "selected_packs": request.form.getlist(f"packs_{tab}") or request.form.getlist(f"packs_{safe_tab}")
         }
-    
+        # "Sent to an installer": every pack in the tab gets signature codes, so every divider
+        # sheet can carry its job-number barcodes (the page locks those pack checkboxes on).
+        if (request.form.get(f"installer_{tab}") or request.form.get(f"installer_{safe_tab}")) == "true" and tab in blueprints:
+            user_inputs[tab]["installer"] = True
+            user_inputs[tab]["selected_packs"] = [p["name"] for p in blueprints[tab]["pack_ranges"]]
+
    # 1. Grab the user's custom project name from the form
     raw_project_name = request.form.get('project_name', 'Untitled_Project')
     safe_project_name = clean_file_name(raw_project_name)
@@ -175,7 +180,7 @@ def generate():
         shutil.move(filepath, new_filepath)
     
     # 6. Pass the NEW filepath and project_dir to the engine
-    file1_name, file2_name, file3_name = generate_all_outputs(
+    file1_name, file2_name, file3_name, shared_job_warnings = generate_all_outputs(
         new_filepath, filename, selected_tabs, user_inputs, blueprints, project_dir
     )
     raw_files = [file1_name, file2_name, file3_name]
@@ -187,7 +192,8 @@ def generate():
     return render_template('matrix.html',
                            generation_complete=True,
                            project_folder=final_folder_name,
-                           generated_files=files_to_download)
+                           generated_files=files_to_download,
+                           shared_job_warnings=shared_job_warnings)
 
 @app.route('/download/<folder_name>/<filename>')
 def download_file(folder_name, filename):
@@ -462,9 +468,13 @@ def pdf_engine():
             
             tabs_data = {}
             duplicate_errors = []
+            installer_tabs = []
             try:
                 with pd.ExcelFile(excel_path) as xls:
+                    installer_tabs = sorted({tab for tab, _ in read_divider_barcodes(xls)})
                     for sheet in xls.sheet_names:
+                        if sheet == DIVIDER_BARCODE_SHEET:
+                            continue  # barcode data for the dividers, not a tab of store codes
                         df = pd.read_excel(xls, sheet_name=sheet)
                         packs = df.columns[1:].tolist()
                         tabs_data[sheet] = packs
@@ -513,7 +523,7 @@ def pdf_engine():
                                        duplicate_project_name=os.path.basename(project_folder),
                                        duplicate_excel_filename=os.path.basename(excel_path))
                 
-            return render_template('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name)
+            return render_template('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name, installer_tabs=installer_tabs)
             
         # STEP 2: Process the PDFs and Go to Success Screen
         elif step == '2':
@@ -526,9 +536,11 @@ def pdf_engine():
             os.makedirs(project_folder, exist_ok=True)
 
             all_sheets_data = {}
-            
+            barcode_lookup = {}
+
             try:
                 with pd.ExcelFile(excel_path) as xls:
+                    barcode_lookup = read_divider_barcodes(xls)
                     for sheet in xls.sheet_names:
                         all_sheets_data[sheet] = pd.read_excel(xls, sheet_name=sheet)
             except Exception as e:
@@ -590,7 +602,9 @@ def pdf_engine():
                             store_mapping=store_mapping,
                             output_pdf_path=output_pdf_path,
                             signature_header=pack_name,
-                            add_dividers=add_dividers_flag
+                            add_dividers=add_dividers_flag,
+                            # Installer tabs only: job-number barcodes on each code's divider
+                            divider_barcodes=barcode_lookup.get((tab_name, pack_name)) if add_dividers_flag else None
                         )
                         
                         # Log it for the download screen

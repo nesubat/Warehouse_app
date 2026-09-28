@@ -149,6 +149,9 @@
             {% for tab, packs in tabs_data.items() %}
             <div class="tab-card">
                 <h3 class="tab-title">Excel Tab: {{ tab }}</h3>
+                {% if installer_tabs and tab in installer_tabs %}
+                <p class="installer-badge">🚚 Installer campaign: divider sheets for this tab will carry a barcode for each job number.</p>
+                {% endif %}
 
                 <div class="pack-grid">
                     {% for pack in packs %}
@@ -168,7 +171,7 @@
                                     <p class="dropzone-filename"></p>
                                 </div>
                                 <!-- THE FIX: Use '---' as the separator to prevent underscore conflicts -->
-                                <input type="file" name="pdf---{{ tab }}---{{ pack }}" accept=".pdf" class="pdf-file-input dropzone-input" data-pack="{{ tab }}---{{ pack }}">
+                                <input type="file" name="pdf---{{ tab }}---{{ pack }}" accept=".pdf" class="pdf-file-input dropzone-input" data-pack="{{ tab }}---{{ pack }}"{% if installer_tabs and tab in installer_tabs %} data-installer="true"{% endif %}>
                             </div>
 
                             <div id="divider-container-{{ tab }}---{{ pack }}" style="display: none; margin-top: 8px; margin-left: 20px;">
