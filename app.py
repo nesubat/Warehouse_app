@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, session, url_for, send_file, flash
+from flask import Flask, render_template, request, redirect, url_for, send_file
 import os
 import shutil
 import json
@@ -13,13 +13,10 @@ from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
-from packing_label_generator import parse_packing_data, generate_packing_labels
-from dotenv import load_dotenv
+from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
 import openpyxl
 
 
-# Load environment variables from the .env file
-load_dotenv()
 
 
 
@@ -60,7 +57,6 @@ clean_old_projects()  # Retry cleanup if deletion fails
 app = Flask(__name__, 
             template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'fallback_development_key')
 app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
 app.config['TEMP_FOLDER'] = temp_dir
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -663,30 +659,28 @@ def create_packing_labels():
         original_filename = file.filename or ''
         extension = os.path.splitext(original_filename)[1].lower()
         if not original_filename:
-            flash("Choose an Excel file to scan.")
-        elif extension not in ('.xlsx', '.xls'):
-            flash("Unsupported file type. Choose an .xlsx or .xls file.")
-        else:
-            filename = secure_filename(original_filename)
-            if not filename:
-                flash("The uploaded filename is not valid.")
-            else:
-                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                try:
-                    close_if_open_elsewhere(filepath)
-                    file.save(filepath)
-                    filepath = convert_legacy_excel_to_xlsx(filepath)
-                    filename = os.path.basename(filepath)
+            return render_template('packing_labels.html', page_error="Choose an Excel file to scan.")
+        if extension not in ('.xlsx', '.xls'):
+            return render_template('packing_labels.html', page_error="Unsupported file type. Choose an .xlsx or .xls file.")
+        filename = secure_filename(original_filename)
+        if not filename:
+            return render_template('packing_labels.html', page_error="The uploaded filename is not valid.")
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        try:
+            close_if_open_elsewhere(filepath)
+            file.save(filepath)
+            filepath = convert_legacy_excel_to_xlsx(filepath)
+            filename = os.path.basename(filepath)
 
-                    wb = openpyxl.load_workbook(filepath, read_only=True)
-                    try:
-                        tabs = wb.sheetnames
-                    finally:
-                        wb.close()
+            wb = openpyxl.load_workbook(filepath, read_only=True)
+            try:
+                tabs = wb.sheetnames
+            finally:
+                wb.close()
 
-                    return render_template('packing_labels.html', tabs=tabs, filename=filename)
-                except Exception as e:
-                    flash(f"Could not scan '{original_filename}': {e}")
+            return render_template('packing_labels.html', tabs=tabs, filename=filename)
+        except Exception as e:
+            return render_template('packing_labels.html', page_error=f"Could not scan '{original_filename}': {e}")
     # Base variables for Step 2 & 3
     filename = request.form.get('filename')
     if not filename:
@@ -725,8 +719,10 @@ def create_packing_labels():
                     'warnings': warnings,
                     'error': None
                 })
+            except PackCheckError as e:
+                previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings})
             except Exception as e:
-                previews.append({'sheet_name': tab, 'error': str(e)})
+                previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}], 'warnings': []})
         
         return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews)
 
@@ -770,8 +766,7 @@ def create_packing_labels():
                                    generated_files=[output_pdf_name])
             
         except Exception as e:
-            flash(str(e))
-            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs)
+            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
 
     return render_template('packing_labels.html')
 

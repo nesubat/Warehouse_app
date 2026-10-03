@@ -1,4 +1,15 @@
 <!DOCTYPE html>
+{% macro issue_table(items, kind) %}
+<table class="issue-table issue-{{ kind }}">
+    {% for i in items %}
+    <tr>
+        <td class="issue-rows">{{ ('Row ' ~ i.rows) if i.rows else '' }}</td>
+        <td class="issue-col">{{ i.col }}</td>
+        <td class="issue-text">{{ i.text }}{% if i.detail %}<div class="issue-detail">{{ i.detail }}</div>{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endmacro %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -35,6 +46,17 @@
         /* Empty Field styling */
         .empty-field { background: #f9f9f9 !important; }
         .empty-field .cell-only-styling { color: #aaa !important; font-style: italic; }
+        .issue-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; color: #2c3e50; }
+        .issue-table td { padding: 6px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
+        .issue-table tr:first-child td { border-top: none; }
+        .issue-error td:first-child { border-left: 3px solid #e74c3c; }
+        .issue-warning td:first-child { border-left: 3px solid #f39c12; }
+        .issue-rows { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; width: 1%; }
+        .issue-col { white-space: nowrap; color: #7f8c8d; width: 1%; }
+        .issue-detail { color: #7f8c8d; font-size: 12px; margin-top: 2px; }
+        .issue-heading { margin: 0; font-size: 14px; }
+        .issue-heading.error { color: #c0392b; }
+        .issue-heading.warning { color: #a04000; margin-top: 14px; }
     </style>
 </head>
 <body>
@@ -68,16 +90,12 @@
             {% endif %}
         </div>
 
-        {% with messages = get_flashed_messages() %}
-          {% if messages %}
-            {% for message in messages %}
-              <div class="blueprint-card blueprint-error" style="margin-bottom: 20px;">
-                  <h4 style="color: #e74c3c; margin-bottom: 5px;">❌ Could Not Process File</h4>
-                  <p style="color: #c0392b; margin: 0;">{{ message }}</p>
-              </div>
-            {% endfor %}
-          {% endif %}
-        {% endwith %}
+        {% if page_error %}
+          <div class="blueprint-card blueprint-error" style="margin-bottom: 20px;">
+              <h4 style="color: #e74c3c; margin-bottom: 5px;">❌ Could Not Process File</h4>
+              <p style="color: #c0392b; margin: 0; white-space: pre-line;">{{ page_error }}</p>
+          </div>
+        {% endif %}
 
         <!-- STEP 1: FILE UPLOAD -->
         {% if not tabs and not generation_complete %}
@@ -150,7 +168,12 @@
                 {% set lock.has_error = true %}
                 <div class="blueprint-card blueprint-error">
                     <h4>❌ {{ bp.sheet_name }}</h4>
-                    <p style="color: #e74c3c; font-weight: bold;">{{ bp.error }}</p>
+                    <p class="issue-heading error">{{ bp.issues|length }} to fix before generating</p>
+                    {{ issue_table(bp.issues, 'error') }}
+                    {% if bp.warnings %}
+                    <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
+                    {{ issue_table(bp.warnings, 'warning') }}
+                    {% endif %}
                 </div>
                 {% else %}
                 <div class="blueprint-card">
@@ -160,9 +183,10 @@
                         <span class="metric-badge">Total Packs: {{ bp.total_packs }}</span>
                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
                     </div>
-                    {% for w in bp.warnings %}
-                    <p style="margin: 8px 0 0; padding: 8px 12px; background: #fdf2e9; border: 1px solid #f39c12; border-radius: 4px; color: #a04000; font-size: 13px;">⚠️ {{ w }}</p>
-                    {% endfor %}
+                    {% if bp.warnings %}
+                    <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
+                    {{ issue_table(bp.warnings, 'warning') }}
+                    {% endif %}
                 </div>
                 {% endif %}
             {% endfor %}

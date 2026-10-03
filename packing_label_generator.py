@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 import openpyxl
 import io
@@ -143,6 +144,152 @@ def _row_ranges(rows):
     return ", ".join(parts)
 
 
+ADDRESS_FIELDS = ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')
+INSTALL_YES = {'y', 'yes', 'true'}
+
+
+def is_install_flag(value):
+    return str(value or '').strip().lower() in INSTALL_YES
+
+
+def _norm(text):
+    """Comparison key: ignores capitals, spacing and punctuation ('12 Bourke Rd.' == '12  BOURKE RD')."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", str(text or '').lower()).split())
+
+
+class PackCheckError(ValueError):
+    """Blocking problems found in the sheet; carries the structured issues for the preview table."""
+    def __init__(self, issues, warnings):
+        self.issues, self.warnings = issues, warnings
+        super().__init__("\n".join(_issue_line(i) for i in issues))
+
+
+def _issue(rows, col, text, detail=''):
+    return {'rows': rows, 'col': col, 'text': text, 'detail': detail}
+
+
+def _issue_line(i):
+    return " · ".join(x for x in (f"Row {i['rows']}" if i['rows'] else '', i['col'], i['text']) if x)
+
+
+def _span(rows):
+    return _row_ranges(list(range(rows[0]['row'], rows[-1]['row'] + 1)))
+
+
+def _short(text, limit=40):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+STREET_TYPES = {
+    'street': 'st', 'road': 'rd', 'avenue': 'ave', 'boulevard': 'blvd', 'highway': 'hwy',
+    'drive': 'dr', 'parade': 'pde', 'place': 'pl', 'court': 'ct', 'crescent': 'cres',
+    'lane': 'ln', 'terrace': 'tce', 'arcade': 'arc',
+}
+
+
+def _address_key(text):
+    """Like _norm, plus 'Street' == 'St' etc. Only after a name, so '12 St Kilda Rd' keeps its Saint."""
+    words = _norm(text).split()
+    return " ".join(
+        STREET_TYPES.get(w, w) if i and words[i - 1].isalpha() else w
+        for i, w in enumerate(words)
+    )
+
+
+def _distinct(rows, key):
+    found = {}
+    for r in rows:
+        if r[key]:
+            found.setdefault(r[key], []).append(r['row'])
+    return found
+
+
+def _variants(rows, key, display):
+    """'4-5: 49 Church Street… · 58: 49 Church St…'"""
+    by_value = {}
+    for r in rows:
+        if r[key]:
+            by_value.setdefault(r[key], (r[display], []))[1].append(r['row'])
+    # Skip the leading words a variant shares with the first one, so the detail shows where they differ
+    def shared(a, b):
+        n = 0
+        while n < min(len(a), len(b)) and _norm(a[n]) == _norm(b[n]):
+            n += 1
+        return max(0, n - 1)
+
+    variants = [(text.split(), rs) for text, rs in by_value.values()]
+    ref = variants[0][0]
+    parts = []
+    for idx, (words, rs) in enumerate(variants):
+        same = max(shared(ref, w) for w, _ in variants[1:]) if idx == 0 else shared(ref, words)
+        parts.append(f"{_row_ranges(rs)}: {'…' if same else ''}{_short(' '.join(words[same:]))}")
+    return " · ".join(parts)
+
+
+def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
+    errors, warnings = [], []
+    no_address_packs = []
+
+    for pack_id, rows in pack_rows.items():
+        span = _span(rows)
+        pack = pack_groups[pack_id]['pack_spec_name']
+
+        stores = _distinct(rows, 'store_key')
+        if len(stores) > 1:
+            errors.append(_issue(span, col['store_name'], f"Store name differs in pack {pack}", _variants(rows, 'store_key', 'store')))
+        elif stores and any(not r['store_key'] for r in rows):
+            blank = [r['row'] for r in rows if not r['store_key']]
+            errors.append(_issue(_row_ranges(blank), col['store_name'], f"Store name blank in pack {pack}"))
+
+        if len({r['install'] for r in rows}) > 1:
+            flagged = [r['row'] for r in rows if r['install']]
+            errors.append(_issue(span, col['install'], f"Install mixed in pack {pack}", f"Y on {_row_ranges(flagged)}"))
+
+        if has_address:
+            addresses = _distinct(rows, 'address_key')
+            if len(addresses) > 1:
+                errors.append(_issue(span, col['address'], f"Address differs in pack {pack}", _variants(rows, 'address_key', 'address')))
+            elif addresses and any(not r['address_key'] for r in rows):
+                blank = [r['row'] for r in rows if not r['address_key']]
+                errors.append(_issue(_row_ranges(blank), col['address'], f"Address blank in pack {pack}"))
+            elif not addresses:
+                no_address_packs.append(rows[0]['row'])
+
+            if any(r['crosses_pack'] for r in rows):
+                warnings.append(_issue(span, col['address'], f"Merged address shared with next pack"))
+
+    if no_address_packs:
+        warnings.append(_issue(_row_ranges(no_address_packs), col['address'], "No address"))
+
+    # Across packs of the same store: store deliveries must agree, installer deliveries may differ
+    if has_address:
+        by_store = {}
+        for rows in pack_rows.values():
+            first = rows[0]
+            if first['store_key'] and first['address_key']:
+                by_store.setdefault(first['store_key'], []).append(first)
+        for store_rows in by_store.values():
+            for install in (False, True):
+                group = [r for r in store_rows if r['install'] == install]
+                if len(_distinct(group, 'address_key')) > 1:
+                    rows_text = _row_ranges([r['row'] for r in group])
+                    name = group[0]['store']
+                    if install:
+                        warnings.append(_issue(rows_text, col['address'], f"{name}: installer addresses differ", _variants(group, 'address_key', 'address')))
+                    else:
+                        errors.append(_issue(rows_text, col['address'], f"{name}: store address differs between packs", _variants(group, 'address_key', 'address')))
+
+    # Neighbouring packs with the same spec and store usually mean the Packing Spec cells weren't merged
+    ids = list(pack_rows)
+    for prev_id, next_id in zip(ids, ids[1:]):
+        prev, nxt = pack_groups[prev_id], pack_groups[next_id]
+        if _norm(prev['pack_spec_name']) == _norm(nxt['pack_spec_name']) and _norm(prev['store_name']) == _norm(nxt['store_name']):
+            span = _row_ranges(list(range(pack_rows[prev_id][0]['row'], pack_rows[next_id][-1]['row'] + 1)))
+            warnings.append(_issue(span, col['packing_spec'], f"Same spec {nxt['pack_spec_name']} split into separate packs — merge if one box"))
+
+    return errors, warnings
+
+
 def parse_packing_data(excel_path, header_row, sheet_name=None):
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
@@ -226,24 +373,27 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         return ws.cell(row=row, column=col).value, row, row
 
     pack_groups = {}
+    pack_rows = {}
     rows_missing_job = []
     rows_without_image = []
     rows_ambiguous_image = []
+    address_keys = [k for k in ADDRESS_FIELDS if k in cols]
+    col_ref = {k: f"{get_column_letter(c)} · {str(ws.cell(row=header_row, column=c).value or '').strip().title()}" for k, c in cols.items()}
+    addr_letters = [get_column_letter(cols[k]) for k in address_keys]
+    col_ref['address'] = f"{addr_letters[0]}–{addr_letters[-1]} · Address" if len(addr_letters) > 1 else (f"{addr_letters[0]} · Address" if addr_letters else "Address")
+    col_ref.setdefault('store_name', "Store Name")
+    col_ref.setdefault('install', "Install")
+    col_ref.setdefault('thumbnail', "Thumbnail")
     current_row = header_row + 1
     last_processed_row = current_row
-    
+
     while True:
         pack_spec_val, pack_top_row, pack_bottom_row = get_cell_info(current_row, cols['packing_spec'])
-        
-        if pack_spec_val is None or str(pack_spec_val).strip() == "": break 
-            
+
+        if pack_spec_val is None or str(pack_spec_val).strip() == "": break
+
         packing_spec = str(pack_spec_val).strip()
         pack_id = f"ROW_{pack_top_row}_{packing_spec}"
-        
-        store_name = ""
-        if 'store_name' in cols:
-            store_val, _, _ = get_cell_info(current_row, cols['store_name'])
-            store_name = str(store_val).strip() if store_val else ""
 
         def get_val(key):
             if key in cols:
@@ -251,30 +401,46 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
                 return str(val).strip() if val is not None else ""
             return ""
 
+        store_name = get_val('store_name')
+        address_parts = {k: get_val(k) for k in address_keys}
+        install = is_install_flag(get_val('install'))
+
+        # Address cells merged past this pack's edges (shared with a neighbouring pack)
+        crosses_pack = any(
+            lo < pack_top_row or hi > pack_bottom_row
+            for _, lo, hi in (get_cell_info(current_row, cols[k]) for k in address_keys)
+        )
+
         if pack_id not in pack_groups:
             pack_groups[pack_id] = {
                 'pack_spec_name': packing_spec,
                 'store_name': store_name,
-                'address_1': get_val('address_1'),
-                'address_2': get_val('address_2'),
-                'suburb': get_val('suburb'),
-                'state': get_val('state'),
-                'postcode': get_val('postcode'),
-                'country': get_val('country'),
+                'install': install,
+                **{k: address_parts.get(k, '') for k in ADDRESS_FIELDS},
                 'items': []
             }
-        
+            pack_rows[pack_id] = []
+
+        pack_rows[pack_id].append({
+            'row': current_row,
+            'store': store_name,
+            'store_key': _norm(store_name),
+            'address': ", ".join(v for v in address_parts.values() if v),
+            'address_key': _address_key(" ".join(address_parts.values())),
+            'install': install,
+            'crosses_pack': crosses_pack,
+        })
+
         dim_w = get_val('dim_w')
         dim_h = get_val('dim_h')
         dim_combined = get_val('dim_combined')
-        
-        # Stitch dimensions flawlessly
+
         if dim_combined: dimension = dim_combined
         elif dim_w and dim_h: dimension = f"{dim_w} x {dim_h}"
         elif dim_w: dimension = dim_w
         elif dim_h: dimension = dim_h
         else: dimension = ""
-        
+
         thumbnail_bytes = None
         if 'thumbnail' in cols:
             tc = cols['thumbnail']
@@ -287,24 +453,24 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
                 rows_without_image.append(current_row)
             if len(matches) > 1 or current_row in stacked_image_rows:
                 rows_ambiguous_image.append(current_row)
-        
+
         item = {
             'job_no': get_val('job_no'),
             'qty': get_val('qty') or "1",
             'desc': get_val('desc'),
             'dimension': dimension,
             'material': get_val('material'),
-            'install': get_val('install'),
+            'install': "INSTALLER" if install else "",
             'notes': get_val('notes'),
             'thumbnail_bytes': thumbnail_bytes
         }
-        
+
         if not item['job_no']:
             rows_missing_job.append(current_row)
         pack_groups[pack_id]['items'].append(item)
         last_processed_row = current_row
         current_row += 1
-        
+
     rows_missing_spec = []
     for row in range(current_row, ws.max_row + 1):
         spec_val, _, _ = get_cell_info(row, cols['packing_spec'])
@@ -313,22 +479,27 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
             rows_missing_spec.append(row)
 
     wb.close()
+
+    errors = []
     if rows_missing_spec:
-        shown = ", ".join(str(r) for r in rows_missing_spec[:15])
-        more = f" (+{len(rows_missing_spec) - 15} more)" if len(rows_missing_spec) > 15 else ""
-        raise ValueError(f"Packing Spec is empty in row(s) {shown}{more}, which have a Job Number. Every row needs a Packing Spec.")
+        errors.append(_issue(_row_ranges(rows_missing_spec), col_ref['packing_spec'], "Packing Spec empty"))
     if rows_missing_job:
-        shown = ", ".join(str(r) for r in rows_missing_job[:15])
-        more = f" (+{len(rows_missing_job) - 15} more)" if len(rows_missing_job) > 15 else ""
-        raise ValueError(f"Job Number is empty in row(s) {shown}{more}. Every row needs a Job Number.")
-    if not pack_groups:
-        raise ValueError(f"Could not find any data starting below row {header_row}.")
-        
+        errors.append(_issue(_row_ranges(rows_missing_job), col_ref['job_no'], "Job Number empty"))
+    if not pack_groups and not errors:
+        errors.append(_issue('', '', f"No data found below row {header_row}"))
+
     warnings = []
     if rows_without_image:
-        warnings.append(f"No thumbnail found in row(s) {_row_ranges(rows_without_image)}. These labels will print without an image.")
+        warnings.append(_issue(_row_ranges(rows_without_image), col_ref['thumbnail'], "No image"))
     if rows_ambiguous_image:
-        warnings.append(f"More than one image sits in the thumbnail area of row(s) {_row_ranges(rows_ambiguous_image)}. Check the right image is used.")
+        warnings.append(_issue(_row_ranges(rows_ambiguous_image), col_ref['thumbnail'], "More than one image"))
+
+    pack_errors, pack_warnings = _check_pack_consistency(pack_groups, pack_rows, bool(address_keys), col_ref)
+    errors += pack_errors
+    warnings += pack_warnings
+
+    if errors:
+        raise PackCheckError(errors, warnings)
 
     return pack_groups, last_processed_row, found_headers, warnings
 
