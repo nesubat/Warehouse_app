@@ -520,3 +520,60 @@ document.addEventListener('DOMContentLoaded', function() {
         dupeModal.showModal();
     }
 });
+// =========================================
+// 10. LABEL MAKER DRAG AND DROP CONFIGURATOR
+// =========================================    
+document.addEventListener("DOMContentLoaded", function() {
+    const layoutList = document.getElementById('attribute-list');
+    const headersList = document.getElementById('mapped-headers-list');
+    const hiddenInput = document.getElementById('attribute_order');
+    
+    if(!layoutList || !hiddenInput) return;
+    
+    const updateHiddenInput = () => {
+        const items = [...layoutList.querySelectorAll('.sortable-item')].map(item => item.getAttribute('data-id'));
+        hiddenInput.value = items.join(',');
+    };
+    updateHiddenInput();
+
+    let draggedItem = null;
+
+    document.querySelectorAll('.sortable-item').forEach(item => {
+        item.addEventListener('dragstart', function(e) {
+            draggedItem = this;
+            setTimeout(() => this.style.opacity = '0.4', 0);
+        });
+        item.addEventListener('dragend', function(e) {
+            this.style.opacity = '1';
+            draggedItem = null;
+            updateHiddenInput();
+        });
+    });
+
+    document.querySelectorAll('.drag-container').forEach(container => {
+        container.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            const afterElement = getDragAfterElement(this, e.clientY);
+            if (draggedItem) {
+                if (afterElement == null) {
+                    this.appendChild(draggedItem);
+                } else {
+                    this.insertBefore(draggedItem, afterElement);
+                }
+            }
+        });
+    });
+
+    function getDragAfterElement(container, y) {
+        const draggableElements = [...container.querySelectorAll('.sortable-item:not([style*="opacity: 0.4"])')];
+        return draggableElements.reduce(function(closest, child) {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (offset < 0 && offset > closest.offset) {
+                return { offset: offset, element: child };
+            } else {
+                return closest;
+            }
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+});

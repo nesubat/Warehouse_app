@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, session, url_for, send_file
+from flask import Flask, render_template, request, redirect, session, url_for, send_file, flash
 import os
 import shutil
 import json
@@ -13,6 +13,13 @@ from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
+from packing_label_generator import parse_packing_data, generate_packing_labels
+from dotenv import load_dotenv
+import openpyxl
+
+
+# Load environment variables from the .env file
+load_dotenv()
 
 
 
@@ -53,6 +60,7 @@ clean_old_projects()  # Retry cleanup if deletion fails
 app = Flask(__name__, 
             template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'fallback_development_key')
 app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
 app.config['TEMP_FOLDER'] = temp_dir
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -73,6 +81,10 @@ def matrix():
         if file.filename != '':
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            try:
+                close_if_open_elsewhere(filepath)
+            except Exception:
+                pass
             file.save(filepath)
 
             filepath = convert_legacy_excel_to_xlsx(filepath)
@@ -633,6 +645,135 @@ def pdf_engine():
                 
     projects_json = json.dumps(projects_info)
     return render_template('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
+
+
+# Make sure you have an upload folder configured in your app
+# app.config['UPLOAD_FOLDER'] = 'uploads/'
+
+
+
+@app.route('/packing-labels', methods=['GET', 'POST'])
+def create_packing_labels():
+    if request.method == 'GET':
+        return render_template('packing_labels.html')
+
+    # STEP 1: Handle File Upload
+    if 'file' in request.files:
+        file = request.files['file']
+        original_filename = file.filename or ''
+        extension = os.path.splitext(original_filename)[1].lower()
+        if not original_filename:
+            flash("Choose an Excel file to scan.")
+        elif extension not in ('.xlsx', '.xls'):
+            flash("Unsupported file type. Choose an .xlsx or .xls file.")
+        else:
+            filename = secure_filename(original_filename)
+            if not filename:
+                flash("The uploaded filename is not valid.")
+            else:
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                try:
+                    close_if_open_elsewhere(filepath)
+                    file.save(filepath)
+                    filepath = convert_legacy_excel_to_xlsx(filepath)
+                    filename = os.path.basename(filepath)
+
+                    wb = openpyxl.load_workbook(filepath, read_only=True)
+                    try:
+                        tabs = wb.sheetnames
+                    finally:
+                        wb.close()
+
+                    return render_template('packing_labels.html', tabs=tabs, filename=filename)
+                except Exception as e:
+                    flash(f"Could not scan '{original_filename}': {e}")
+    # Base variables for Step 2 & 3
+    filename = request.form.get('filename')
+    if not filename:
+        return redirect(url_for('create_packing_labels'))
+        
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    all_tabs = request.form.getlist('all_tabs')
+    selected_tabs = request.form.getlist('selected_tabs')
+    
+    # Save inputs so UI remembers what user typed
+    user_inputs = {}
+    for tab in all_tabs:
+        user_inputs[tab] = {
+            'selected': tab in selected_tabs,
+            'header_row': request.form.get(f'header_row_{tab}', '1')
+        }
+
+    # Action: Update Previews
+    if 'preview' in request.form:
+        previews = []
+        for tab in selected_tabs:
+            try:
+                header_row = int(user_inputs[tab]['header_row'])
+                # Unpack all 3 variables!
+                pack_groups, last_row, found_headers, warnings = parse_packing_data(filepath, header_row, sheet_name=tab)
+                
+                total_packs = len(pack_groups)
+                total_stores = len(set(g['store_name'] for g in pack_groups.values()))
+                
+                previews.append({
+                    'sheet_name': tab, 
+                    'total_packs': total_packs, 
+                    'total_stores': total_stores, 
+                    'last_row': last_row,
+                    'found_headers': found_headers, # Pass headers to the UI
+                    'warnings': warnings,
+                    'error': None
+                })
+            except Exception as e:
+                previews.append({'sheet_name': tab, 'error': str(e)})
+        
+        return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews)
+
+    # Action: Generate Final PDF & Save to Project
+    if 'generate' in request.form:
+        combined_pack_groups = {}
+        
+        # Grab the sorted layout order from the frontend, and filter out 'empty' slots
+        attribute_order_str = request.form.get('attribute_order', 'thumbnail,desc,dimension,job_no,qty')
+        attribute_order = [attr for attr in attribute_order_str.split(',') if attr and attr != 'empty']
+        
+        try:
+            # 1. Parse Data
+            for tab in selected_tabs:
+                header_row = int(user_inputs[tab]['header_row'])
+                pack_groups, _, _, _ = parse_packing_data(filepath, header_row, sheet_name=tab)
+                for key, val in pack_groups.items():
+                    combined_pack_groups[f"{tab} - {key}"] = val
+
+            # 2. Setup Project Folder structure
+            raw_project_name = request.form.get('project_name', 'Packing_Labels_Job')
+            safe_project_name = clean_file_name(raw_project_name)
+            time_stamp = datetime.now().strftime("%y%m%d_%H%M")
+            final_folder_name = f"{safe_project_name}_{time_stamp}"
+            project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
+            os.makedirs(project_dir, exist_ok=True)
+
+            # 3. Move the Excel File into the Project
+            new_filepath = os.path.join(project_dir, filename)
+            close_if_open_elsewhere(filepath)
+            shutil.move(filepath, new_filepath)
+
+            # 4. Generate the PDF with Custom Layout
+            output_pdf_name = f"Labels_{filename.split('.')[0]}.pdf"
+            output_pdf = os.path.join(project_dir, output_pdf_name)
+            generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
+            
+            return render_template('packing_labels.html', 
+                                   generation_complete=True, 
+                                   project_folder=final_folder_name, 
+                                   generated_files=[output_pdf_name])
+            
+        except Exception as e:
+            flash(str(e))
+            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs)
+
+    return render_template('packing_labels.html')
 
 if __name__ == '__main__':
     if getattr(sys, 'frozen', False):
