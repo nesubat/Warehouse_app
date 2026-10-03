@@ -31,6 +31,12 @@
                 <div class="portal-title">2. Labels shuffler </div>
                 <div class="portal-desc">Upload raw labels and sort them perfectly based on Signature Code groups.</div>
             </a>
+
+            <a href="/packing-labels" class="portal-card">
+                <div class="portal-icon">🏷️</div>
+                <div class="portal-title">3. Generate Packing Labels</div>
+                <div class="portal-desc">Create custom A4 packing labels from your Excel data.</div>
+            </a>
         </div>
     </div>
 
@@ -102,11 +108,33 @@
                 </div>
                 {% endif %}
 
+                <!-- COURIER CSV GROUP -->
+                {% if project.csv_files %}
+                <h4 class="file-group-title">🚚 Courier CSV</h4>
+                <div class="file-list">
+                    {% for file in project.csv_files %}
+                    <div class="file-row">
+                        <span class="file-name">{{ file }}</span>
+                        <div class="file-actions">
+                            <a href="{{ url_for('open_local_file', folder_name=project.name, filename=file) }}" class="btn-file open">📂 Open</a>
+                            <a href="{{ url_for('download_file', folder_name=project.name, filename=file) }}" class="btn-file download">⬇️ Download</a>
+                            <form action="{{ url_for('delete_single_file', folder_name=project.name, filename=file) }}" method="POST" style="margin: 0;">
+                                <button type="submit" class="btn-file delete" onclick="return confirm('Delete this file permanently?');">🗑️ Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
                 <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-                
-                <!-- Action Bar: Sub-Group & Delete -->
+
+                <!-- Action Bar: Sub-Group (or Stitch Labels for courier projects) & Delete -->
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <a href="javascript:void(0);" 
+                    {% if project.csv_files %}
+                    <button type="button" class="btn-action btn-stitch" disabled title="Coming soon">🧵 Stitch Labels</button>
+                    {% else %}
+                    <a href="javascript:void(0);"  
                     class="btn-action" 
                     style="background-color: #f39c12; color: white; text-decoration: none; padding: 10px 15px; border-radius: 5px; font-weight: bold;" 
                     onclick="event.preventDefault(); document.getElementById('modal-{{ project.name }}').showModal()">
@@ -141,7 +169,8 @@
                             </div>
                         </form>
                     </dialog>
-                
+                    {% endif %}
+
                     <!-- Master Project Delete -->
                     <form action="/delete/{{ project.name }}" method="POST" style="text-align: right;">
                         <button type="submit" class="btn-action btn-delete" onclick="return confirm('Are you sure you want to permanently delete this ENTIRE project?');">

@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, session, url_for, send_file
+from flask import Flask, render_template, request, redirect, url_for, send_file
 import os
 import shutil
 import json
@@ -13,6 +13,12 @@ from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
+from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
+from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
+                            EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
+import openpyxl
+
+
 
 
 
@@ -24,9 +30,47 @@ else:
         
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
+SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
+
+def force_delete_upload(file_path):
+    """Deletes an abandoned upload, closing it in Excel first (unsaved edits there are discarded)."""
+    try:
+        close_if_open_elsewhere(file_path)
+    except Exception as e:
+        print(f"[WARNING] Could not check Excel for {file_path}: {e}")
+    for _ in range(10):  # Excel can hold the lock for a moment after closing
+        try:
+            os.remove(file_path)
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            time.sleep(0.3)
+    else:
+        print(f"[WARNING] Could not delete {file_path}; the startup cleanup will retry.")
+    lock_file = os.path.join(os.path.dirname(file_path), "~$" + os.path.basename(file_path))
+    try:
+        os.remove(lock_file)
+    except OSError:
+        pass
+
+
+def is_abandoned_project(folder_path):
+    """Nothing was ever generated here: the folder holds only spreadsheets (the uploaded input).
+    Every real project has a generated .pdf or .json next to them."""
+    files = [f for f in os.listdir(folder_path) if not f.startswith('~$')]
+    return all(f.lower().endswith(('.xlsx', '.xls')) and os.path.isfile(os.path.join(folder_path, f)) for f in files)
+
+
+def force_delete_project(folder_path):
+    for f in os.listdir(folder_path):
+        if not f.startswith('~$'):
+            force_delete_upload(os.path.join(folder_path, f))
+    shutil.rmtree(folder_path, ignore_errors=True)
+
 
 # --- 7-DAY AUTO CLEANUP function---
 def clean_old_projects():
@@ -42,12 +86,19 @@ def clean_old_projects():
         
         if os.path.isdir(folder_path):
             creation_time = os.path.getctime(folder_path)
-            if (current_time - creation_time) > seven_days_in_seconds:
+            if (current_time - creation_time) > 24 * 60 * 60 and is_abandoned_project(folder_path):
+                force_delete_project(folder_path)
+                print(f"Cleaned up abandoned project: {folder_name}")
+            elif (current_time - creation_time) > seven_days_in_seconds:
                 try:
                     shutil.rmtree(folder_path, ignore_errors=True)
                     print(f"Cleaned up old project: {folder_name}")
                 except Exception as e:
                     print(f"Could not delete {folder_name}: {e}")
+        elif folder_name.lower().endswith(('.xlsx', '.xls')) and not folder_name.startswith('~$'):
+            if (current_time - os.path.getmtime(folder_path)) > 24 * 60 * 60:
+                force_delete_upload(folder_path)
+                print(f"Cleaned up abandoned upload: {folder_name}")
 
 clean_old_projects()  # Retry cleanup if deletion fails
 app = Flask(__name__, 
@@ -73,6 +124,10 @@ def matrix():
         if file.filename != '':
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            try:
+                close_if_open_elsewhere(filepath)
+            except Exception:
+                pass
             file.save(filepath)
 
             filepath = convert_legacy_excel_to_xlsx(filepath)
@@ -233,11 +288,12 @@ def dashboard():
                 # --- FILTER AND GROUP FILES ---
                 display_files = [f for f in files if not f.endswith('.json')]
                 # Sort JSON files by creation time (newest first)
-                json_files = sorted([f for f in files if f.endswith('.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
+                json_files = sorted([f for f in files if f.endswith('.json') and not f.endswith('.labelmap.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
 
                 
                 excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
                 pdf_files = [f for f in display_files if f.lower().endswith('.pdf')]
+                csv_files = [f for f in display_files if f.lower().endswith('.csv')]
                 
                 # Get human-readable date
                 timestamp = os.path.getctime(folder_path)
@@ -260,6 +316,7 @@ def dashboard():
                     "job_id": job_id,
                     "excel_files": excel_files,  # Pass the grouped Excel files
                     "pdf_files": pdf_files,       # Pass the grouped PDFs
+                    "csv_files": csv_files,
                     "json_files": json_files     # Pass the grouped JSON files
                 })
                 
@@ -326,6 +383,24 @@ def open_local_file(folder_name, filename):
 
     return '', 204  # Prevents the browser from reloading the page
 
+@app.route('/discard_upload', methods=['POST'])
+def discard_upload():
+    """Deletes a scanned-but-never-generated upload when the user leaves the page."""
+    safe_filename = os.path.basename(request.form.get('filename', ''))
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
+    if safe_filename.lower().endswith(('.xlsx', '.xls')) and os.path.isfile(file_path):
+        force_delete_upload(file_path)
+    return '', 204
+
+@app.route('/discard_project', methods=['POST'])
+def discard_project():
+    """Deletes a Label Shuffler project folder the user left before generating anything."""
+    safe_folder = os.path.basename(request.form.get('project', ''))
+    folder_path = os.path.join(PROJECTS_FOLDER, safe_folder)
+    if safe_folder not in ('', '.', '..') and os.path.isdir(folder_path) and is_abandoned_project(folder_path):
+        force_delete_project(folder_path)
+    return '', 204
+
 @app.route('/open_upload/<filename>')
 def open_upload_file(filename):
     """Same as /open_local, but for a freshly-uploaded file that still sits directly in the
@@ -350,7 +425,7 @@ def setup_subgroup(project_name):
     target_json = request.values.get('target_json')
     # 2. Dynamic Fallback: If target_json is missing, grab the first available .json file in the project folder
     if not target_json or target_json == 'default':
-        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json')]
+        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json') and not f.endswith('.labelmap.json')]
         target_json = json_files[0] if json_files else f"{safe_project}.json"
         print(f"[DEBUG] No target_json specified. Defaulting to: {target_json}")
     metadata_path = os.path.join(project_dir, target_json)
@@ -633,6 +708,203 @@ def pdf_engine():
                 
     projects_json = json.dumps(projects_info)
     return render_template('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
+
+
+# Make sure you have an upload folder configured in your app
+# app.config['UPLOAD_FOLDER'] = 'uploads/'
+
+
+
+def _consignment_edits(form):
+    """Edits made in the preview's consignment table, sent back as JSON in a hidden field."""
+    try:
+        edits = json.loads(form.get('consignment_edits') or '{}')
+    except ValueError:
+        return {}
+    return {str(k): v for k, v in edits.items() if isinstance(v, dict)} if isinstance(edits, dict) else {}
+
+
+@app.route('/packing-labels', methods=['GET', 'POST'])
+def create_packing_labels():
+    if request.method == 'GET':
+        return render_template('packing_labels.html')
+
+    # STEP 1: Handle File Upload
+    if 'file' in request.files:
+        file = request.files['file']
+        original_filename = file.filename or ''
+        extension = os.path.splitext(original_filename)[1].lower()
+        if not original_filename:
+            return render_template('packing_labels.html', page_error="Choose an Excel file to scan.")
+        if extension not in ('.xlsx', '.xls'):
+            return render_template('packing_labels.html', page_error="Unsupported file type. Choose an .xlsx or .xls file.")
+        filename = secure_filename(original_filename)
+        if not filename:
+            return render_template('packing_labels.html', page_error="The uploaded filename is not valid.")
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        try:
+            close_if_open_elsewhere(filepath)
+            file.save(filepath)
+            filepath = convert_legacy_excel_to_xlsx(filepath)
+            filename = os.path.basename(filepath)
+
+            wb = openpyxl.load_workbook(filepath, read_only=True)
+            try:
+                tabs = wb.sheetnames
+            finally:
+                wb.close()
+
+            return render_template('packing_labels.html', tabs=tabs, filename=filename)
+        except Exception as e:
+            return render_template('packing_labels.html', page_error=f"Could not scan '{original_filename}': {e}")
+    # Base variables for Step 2 & 3
+    filename = request.form.get('filename')
+    if not filename:
+        return redirect(url_for('create_packing_labels'))
+        
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(filename))
+    if not os.path.isfile(filepath):
+        return render_template('packing_labels.html', page_error="The uploaded file is no longer available. Scan it again.")
+    all_tabs = request.form.getlist('all_tabs')
+    selected_tabs = request.form.getlist('selected_tabs')
+    
+    # Save inputs so UI remembers what user typed
+    user_inputs = {}
+    for tab in all_tabs:
+        user_inputs[tab] = {
+            'selected': tab in selected_tabs,
+            'header_row': request.form.get(f'header_row_{tab}', '1')
+        }
+
+    # Action: Update Previews
+    if 'preview' in request.form:
+        previews = []
+        for tab in selected_tabs:
+            try:
+                header_row = int(user_inputs[tab]['header_row'])
+                # Unpack all 3 variables!
+                pack_groups, last_row, found_headers, warnings = parse_packing_data(filepath, header_row, sheet_name=tab)
+                
+                total_packs = len(pack_groups)
+                total_stores = len(set(g['store_name'] for g in pack_groups.values()))
+                
+                previews.append({
+                    'sheet_name': tab, 
+                    'total_packs': total_packs, 
+                    'total_stores': total_stores, 
+                    'last_row': last_row,
+                    'found_headers': found_headers, # Pass headers to the UI
+                    'warnings': warnings,
+                    'error': None
+                })
+            except PackCheckError as e:
+                previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings})
+            except Exception as e:
+                previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}], 'warnings': []})
+
+        courier = None
+        if previews and not any(p['error'] for p in previews):
+            combined = {}
+            for tab in selected_tabs:
+                groups, _, _, _ = parse_packing_data(filepath, int(user_inputs[tab]['header_row']), sheet_name=tab)
+                combined.update({f"{tab} - {k}": v for k, v in groups.items()})
+            edits = _consignment_edits(request.form)
+            options = service_options(load_service_usage(SERVICE_USAGE_FILE))
+            most_used = options[0]['code'] if options[0]['used'] else ''
+            fixed = {**DEFAULT_FIXED, 'service_code': most_used,
+                     **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
+            consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'])
+            series, all_series = detect_series(combined)
+            if len(all_series) > 1:
+                courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
+            courier = {
+                'consignments': [{**c, 'address': one_line(c['destination']),
+                                  'source_text': c['original']['raw'] if c['original']['postcode'] in c['original']['raw']
+                                                 else ", ".join(x for x in (c['original']['raw'], c['original']['suburb'], c['original']['state'], c['original']['postcode']) if x),
+                                  'original_json': json.dumps({k: c['original'][k] for k in EDITABLE_FIELDS + ('authority_to_leave',)})}
+                                 for c in consignments],
+                'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
+                'carton_count': len(cartons),
+                'warnings': courier_warnings,
+                'fixed': {'reference': series, **fixed},
+                'edits_json': json.dumps(edits),
+                'service_options': options,
+            }
+
+        return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier)
+
+    # Action: Generate Final PDF & Save to Project
+    if 'generate' in request.form:
+        combined_pack_groups = {}
+        
+        # Grab the sorted layout order from the frontend, and filter out 'empty' slots
+        attribute_order_str = request.form.get('attribute_order', 'thumbnail,desc,dimension,job_no,qty')
+        attribute_order = [attr for attr in attribute_order_str.split(',') if attr and attr != 'empty']
+        
+        missing = [label for key, label in (('who_pays', 'Who Pays'), ('service_code', 'Service Code'), ('reference', 'Consignment Reference'))
+                   if not request.form.get(key, '').strip()]
+        if missing:
+            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
+                                   page_error=f"Fill in {', '.join(missing)} before generating.")
+
+        project_dir = None
+        try:
+            # 1. Parse Data
+            for tab in selected_tabs:
+                header_row = int(user_inputs[tab]['header_row'])
+                pack_groups, _, _, _ = parse_packing_data(filepath, header_row, sheet_name=tab)
+                for key, val in pack_groups.items():
+                    combined_pack_groups[f"{tab} - {key}"] = val
+
+            # 2. Courier consignments, checked before anything is written or moved
+            fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
+            reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
+            consignments, cartons, _ = build_consignments(combined_pack_groups, _consignment_edits(request.form), fixed['service_code'])
+            unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
+            if unknown:
+                raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
+
+            # 3. Setup Project Folder structure
+            raw_project_name = request.form.get('project_name', 'Packing_Labels_Job')
+            safe_project_name = clean_file_name(raw_project_name)
+            time_stamp = datetime.now().strftime("%y%m%d_%H%M")
+            final_folder_name = f"{safe_project_name}_{time_stamp}"
+            project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
+            os.makedirs(project_dir, exist_ok=True)
+
+            # 4. Move the Excel File into the Project
+            new_filepath = os.path.join(project_dir, filename)
+            close_if_open_elsewhere(filepath)
+            shutil.move(filepath, new_filepath)
+
+            # 5. Generate the PDF with Custom Layout
+            output_pdf_name = f"Labels_{filename.split('.')[0]}.pdf"
+            output_pdf = os.path.join(project_dir, output_pdf_name)
+            page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
+
+            # 6. Courier consignment CSV and the label map used to match courier labels to pages
+            base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
+            csv_name, map_name = f"{base_name}.csv", f"{base_name}.labelmap.json"
+            write_courier_csv(os.path.join(project_dir, csv_name), cartons, consignments, reference, fixed)
+            write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
+                            output_pdf_name, csv_name, page_info)
+            record_service_usage(SERVICE_USAGE_FILE, consignments)
+
+            return render_template('packing_labels.html',
+                                   generation_complete=True,
+                                   project_folder=final_folder_name,
+                                   generated_files=[output_pdf_name, csv_name])
+
+        except Exception as e:
+            # Undo a half-made project so the upload is back where it was and Generate can be retried
+            if project_dir and os.path.isdir(project_dir):
+                moved = os.path.join(project_dir, filename)
+                if os.path.exists(moved) and not os.path.exists(filepath):
+                    shutil.move(moved, filepath)
+                shutil.rmtree(project_dir, ignore_errors=True)
+            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
+
+    return render_template('packing_labels.html')
 
 if __name__ == '__main__':
     if getattr(sys, 'frozen', False):

@@ -16,6 +16,8 @@
         <a href="{{ url_for('matrix') }}" class="active">⚙️ Distribution Mapper</a>
         <span class="divider" style="color: #ccc;">|</span>
         <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
     </div>
 
 <div class="container">
@@ -242,6 +244,9 @@
 </div>
 
 <!-- Master External Script -->
+    {% if filename and not generation_complete %}
+    <div id="discard-on-leave" hidden data-url="/discard_upload" data-field="filename" data-value="{{ filename }}"></div>
+    {% endif %}
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 
 </body>
