@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 import pandas as pd
 import openpyxl
 import io
@@ -417,6 +418,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
                 'store_name': store_name,
                 'install': install,
                 **{k: address_parts.get(k, '') for k in ADDRESS_FIELDS},
+                'excel_rows': [],
                 'items': []
             }
             pack_rows[pack_id] = []
@@ -468,6 +470,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         if not item['job_no']:
             rows_missing_job.append(current_row)
         pack_groups[pack_id]['items'].append(item)
+        pack_groups[pack_id]['excel_rows'].append(current_row)
         last_processed_row = current_row
         current_row += 1
 
@@ -658,7 +661,18 @@ def _counter_chip(page, x0, y0, text, size=11):
     return chip
 
 
+def assign_label_numbers(pack_groups):
+    """'Label X of Y': each store's pack groups numbered in file order (store names compared loosely)."""
+    totals = Counter(_norm(g['store_name']) for g in pack_groups.values())
+    seen = Counter()
+    for g in pack_groups.values():
+        key = _norm(g['store_name'])
+        seen[key] += 1
+        g['label_no'], g['label_total'] = seen[key], totals[key]
+
+
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None):
+    """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}."""
     doc = fitz.open()
     MM2PT = 2.83465
     MARGIN = 4 * MM2PT
@@ -682,19 +696,16 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     if not attribute_order:
         attribute_order = ['thumbnail', 'desc', 'dimension', 'job_no', 'qty']
 
-    # "Label X of Y" counts pack groups per store, in the order they appear
-    store_totals = {}
-    for g in pack_groups.values():
-        store_totals[g['store_name']] = store_totals.get(g['store_name'], 0) + 1
-    store_seen = {}
+    assign_label_numbers(pack_groups)
+    page_map = {}
 
-    for group_data in pack_groups.values():
+    for pack_key, group_data in pack_groups.items():
         items = group_data['items']
         total_items = len(items)
         store = group_data['store_name']
         spec = group_data.get('pack_spec_name', '')
-        store_seen[store] = store_seen.get(store, 0) + 1
-        label_text = f"LABEL {store_seen[store]} OF {store_totals[store]}"
+        label_text = f"LABEL {group_data['label_no']} OF {group_data['label_total']}"
+        first_page = len(doc)
 
         total_pages = 1 if total_items <= FIRST_PAGE_CELLS else 1 + math.ceil((total_items - FIRST_PAGE_CELLS) / NEXT_PAGE_CELLS)
         current_item_idx = 0
@@ -756,7 +767,13 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                     current_item_idx += 1
             page_num += 1
             if total_items == 0: break
+        page_map[pack_key] = list(range(first_page, len(doc)))
 
     doc.save(output_pdf_path)
     doc.close()
-    return output_pdf_path
+    return {
+        'pages': page_map,
+        'page_size_mm': [round(A4_W / MM2PT, 1), round(A4_H / MM2PT, 1)],
+        'courier_region_mm': {'x': round(MARGIN / MM2PT, 1), 'y': round(MARGIN / MM2PT, 1),
+                              'width': round(ZONE_A_W / MM2PT, 1), 'height': round(ZONE_A_H / MM2PT, 1)},
+    }

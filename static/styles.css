@@ -1157,3 +1157,17 @@ button:hover {
 .pl-page .pl-cell-qty { padding: 8px; }
 .pl-page .pl-cell-qty-box { border: 3px solid #000; margin: 0 70px; padding: 4px; font-weight: bold; font-size: 20px; color: #000; text-align: center; }
 .pl-page .pl-cell-empty { padding: 15px; color: #aaa; text-align: center; }
+
+/* Courier consignments (packing labels page) */
+.pl-page .pl-courier { margin-top: 30px; padding: 25px; background: #fff; border: 1px solid #dcdde1; border-radius: 6px; }
+.pl-page .pl-courier-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.pl-page .pl-courier-fields .input-field { width: auto; }
+.pl-page .pl-courier-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; color: #2c3e50; }
+.pl-page .pl-courier-table th { text-align: left; font-size: 12px; text-transform: uppercase; color: #7f8c8d; padding: 6px 10px; border-bottom: 2px solid #ecf0f1; }
+.pl-page .pl-courier-table td { padding: 8px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
+.pl-page .pl-courier-num { font-weight: 600; font-variant-numeric: tabular-nums; width: 1%; }
+.pl-page .pl-courier-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; font-size: 11px; font-weight: 600; border: 1px solid #1abc9c; color: #16a085; border-radius: 3px; }
+
+/* Dashboard: Stitch Labels (placeholder until stitching is built) */
+.btn-stitch { background-color: #8e44ad; color: white; border: none; padding: 10px 15px; border-radius: 5px; font-weight: bold; font-size: inherit; }
+.btn-stitch:disabled { opacity: 0.6; cursor: not-allowed; }

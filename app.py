@@ -14,6 +14,7 @@ from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, ge
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
+from courier_export import build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED
 import openpyxl
 
 
@@ -285,11 +286,12 @@ def dashboard():
                 # --- FILTER AND GROUP FILES ---
                 display_files = [f for f in files if not f.endswith('.json')]
                 # Sort JSON files by creation time (newest first)
-                json_files = sorted([f for f in files if f.endswith('.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
+                json_files = sorted([f for f in files if f.endswith('.json') and not f.endswith('.labelmap.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
 
                 
                 excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
                 pdf_files = [f for f in display_files if f.lower().endswith('.pdf')]
+                csv_files = [f for f in display_files if f.lower().endswith('.csv')]
                 
                 # Get human-readable date
                 timestamp = os.path.getctime(folder_path)
@@ -312,6 +314,7 @@ def dashboard():
                     "job_id": job_id,
                     "excel_files": excel_files,  # Pass the grouped Excel files
                     "pdf_files": pdf_files,       # Pass the grouped PDFs
+                    "csv_files": csv_files,
                     "json_files": json_files     # Pass the grouped JSON files
                 })
                 
@@ -420,7 +423,7 @@ def setup_subgroup(project_name):
     target_json = request.values.get('target_json')
     # 2. Dynamic Fallback: If target_json is missing, grab the first available .json file in the project folder
     if not target_json or target_json == 'default':
-        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json')]
+        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json') and not f.endswith('.labelmap.json')]
         target_json = json_files[0] if json_files else f"{safe_project}.json"
         print(f"[DEBUG] No target_json specified. Defaulting to: {target_json}")
     metadata_path = os.path.join(project_dir, target_json)
@@ -787,8 +790,27 @@ def create_packing_labels():
                 previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings})
             except Exception as e:
                 previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}], 'warnings': []})
-        
-        return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews)
+
+        courier = None
+        if previews and not any(p['error'] for p in previews):
+            combined = {}
+            for tab in selected_tabs:
+                groups, _, _, _ = parse_packing_data(filepath, int(user_inputs[tab]['header_row']), sheet_name=tab)
+                combined.update({f"{tab} - {k}": v for k, v in groups.items()})
+            consignments, cartons, courier_warnings = build_consignments(combined)
+            series, all_series = detect_series(combined)
+            if len(all_series) > 1:
+                courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
+            courier = {
+                'consignments': [{'number': c['number'], 'destination': c['destination'], 'address': one_line(c['destination']),
+                                  'cartons': c['cartons']} for c in consignments],
+                'carton_count': len(cartons),
+                'warnings': courier_warnings,
+                'fixed': {**DEFAULT_FIXED, 'reference': series,
+                          **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}},
+            }
+
+        return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier)
 
     # Action: Generate Final PDF & Save to Project
     if 'generate' in request.form:
@@ -798,6 +820,12 @@ def create_packing_labels():
         attribute_order_str = request.form.get('attribute_order', 'thumbnail,desc,dimension,job_no,qty')
         attribute_order = [attr for attr in attribute_order_str.split(',') if attr and attr != 'empty']
         
+        missing = [label for key, label in (('who_pays', 'Who Pays'), ('service_code', 'Service Code'), ('reference', 'Consignment Reference'))
+                   if not request.form.get(key, '').strip()]
+        if missing:
+            return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
+                                   page_error=f"Fill in {', '.join(missing)} before generating.")
+
         try:
             # 1. Parse Data
             for tab in selected_tabs:
@@ -822,12 +850,22 @@ def create_packing_labels():
             # 4. Generate the PDF with Custom Layout
             output_pdf_name = f"Labels_{filename.split('.')[0]}.pdf"
             output_pdf = os.path.join(project_dir, output_pdf_name)
-            generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
-            
-            return render_template('packing_labels.html', 
-                                   generation_complete=True, 
-                                   project_folder=final_folder_name, 
-                                   generated_files=[output_pdf_name])
+            page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
+
+            # 5. Courier consignment CSV and the label map used to match courier labels to pages
+            fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
+            reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
+            consignments, cartons, _ = build_consignments(combined_pack_groups)
+            base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
+            csv_name, map_name = f"{base_name}.csv", f"{base_name}.labelmap.json"
+            write_courier_csv(os.path.join(project_dir, csv_name), cartons, consignments, reference, fixed)
+            write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
+                            output_pdf_name, csv_name, page_info)
+
+            return render_template('packing_labels.html',
+                                   generation_complete=True,
+                                   project_folder=final_folder_name,
+                                   generated_files=[output_pdf_name, csv_name])
             
         except Exception as e:
             return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))

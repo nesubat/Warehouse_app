@@ -124,3 +124,50 @@ The order of blocks follows the layout chosen on the page. Each block's style be
 | Quantity | Large bold number in a heavy box, no unit |
 
 Text wraps onto extra lines rather than being cut off. If the blocks don't fit in the box, the text shrinks evenly down to 65% of its normal size. Only after that does the thumbnail shrink. Nothing is drawn outside the box.
+
+## Courier CSV and label map
+
+Generate also writes two files into the project folder, named after the consignment reference: `J477161 - <project>.csv` and `J477161 - <project>.labelmap.json`.
+
+### Before generating
+
+The preview lists every consignment (receiver, address, cartons) and asks for the courier fields: **Consignment Reference** (pre-filled with the job series, e.g. `J477161` from `J477161-54`), **Who Pays**, **Service Code**, **Item Type** (all required) and **Charge Account** (optional).
+
+### Consignments
+
+- One CSV row per pack (one packing label = one carton, `No Items = 1`).
+- Packs going to the **same delivery address** form one consignment, whichever store they belong to. An installer receiving packs for three stores gets one consignment; a retailer sending to its shop and to an installer gets two.
+- The first row of a consignment carries the consignment reference; later rows leave it blank. Every row of a consignment repeats the **same address text**, so the courier joins them.
+- **Item reference** (last column): `Label <X> - <Store>`, where X is the "LABEL X" printed on that pack's packing label.
+- **Dispatch Date** is the day the file is generated (`4-Oct`).
+- Packs with no postcode (e.g. Sample rows) are left out, with a warning.
+
+### Addresses
+
+Installer addresses typed into one cell, like `Steven Priestley - Wilson Storage, 68 Ricketts Road, Mount Waverley, Vic, 3149 - ATL` or `Digi Master Signs - 109A Almond Avenue, Mildura, VIC, 3500 (Attn Allen ATL)`, are split into name, street, suburb, state and postcode.
+
+| Name found | Receiver Name | Receiver Contact Name |
+|---|---|---|
+| Company only | Company | Attn name, if any |
+| Person only | Person | Attn name, if any |
+| Person and company | Company | Person (plus Attn name) |
+| None (store's own address) | Store name | Attn name, if any |
+
+- **Authority To Leave** is `Y` when the address contains `ATL`.
+- Street text longer than 30 characters is split into Address Line 1 and 2 at its last comma, semicolon or full stop.
+- Warnings flag a receiver with several addresses, the same street with a different suburb or postcode, and incomplete addresses.
+
+### Cartons
+
+- **Size:** `OB` + length + width + height in mm (`OB1370170170` = 137 × 17 × 17 cm). Other specs come from a table: `P7 Jiffy Bag` 48 × 36 × 3, `A4 Box` 31 × 22 × 18. Unknown specs leave the size blank, with a warning.
+- **Cubic:** L × W × H ÷ 1,000,000 (m³).
+- **Weight:** 1 kg for specs starting `P1`, `P5` or `P7`; 2 kg for everything else.
+
+### Label map JSON
+
+For matching courier labels to packing labels before stitching:
+
+- `courier_label_region_mm`: where the courier label goes on each label's first page (x, y, width, height from the top-left).
+- `stores` → for each label: `item_reference`, `label` / `of`, `pdf_pages`, `courier_label_page`, `consignment`, `headed_to` (receiver, address, installer or not), `csv_row`, `excel_rows`, `job_numbers`.
+- `consignments` → each consignment's parsed address, the original address text, and its cartons.
+
