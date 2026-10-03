@@ -246,7 +246,8 @@
                 {% if courier %}
                 <div class="pl-courier">
                     <h4 class="pl-config-title">3. Courier Consignments</h4>
-                    <p class="pl-config-hint">{{ courier.carton_count }} cartons in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment.</p>
+                    <p class="pl-config-hint">{{ courier.carton_count }} cartons in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
+                    <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
 
                     <div class="pl-courier-fields">
                         <div class="input-field">
@@ -258,13 +259,36 @@
                             <input type="text" id="who_pays" name="who_pays" value="{{ courier.fixed.who_pays }}" required>
                         </div>
                         <div class="input-field">
-                            <label for="service_code">Service Code</label>
-                            <input type="text" id="service_code" name="service_code" value="{{ courier.fixed.service_code }}" required>
-                        </div>
-                        <div class="input-field">
                             <label for="charge_account">Charge Account (3rd Party)</label>
                             <input type="text" id="charge_account" name="charge_account" value="{{ courier.fixed.charge_account }}">
                         </div>
+                    </div>
+
+                    <div class="pl-courier-toolbar">
+                        <div class="input-field pl-service-main">
+                            <label for="service_code">Service Code</label>
+                            <div class="pl-inline">
+                                <select id="service_code" name="service_code" required>
+                                    <option value=""{% if not courier.fixed.service_code %} selected{% endif %}>Choose a service…</option>
+                                    {% for o in courier.service_options %}
+                                    <option value="{{ o.code }}"{% if o.code == courier.fixed.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="button" id="apply-service" class="pl-btn-small">Apply to shown</button>
+                            </div>
+                        </div>
+                        <div class="input-field">
+                            <label for="courier-state-filter">State</label>
+                            <select id="courier-state-filter">
+                                <option value="">All states</option>
+                                {% for st in courier.states %}<option value="{{ st }}">{{ st }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="input-field pl-filter-text">
+                            <label for="courier-text-filter">Filter</label>
+                            <input type="search" id="courier-text-filter" placeholder="Receiver, suburb, postcode, store…">
+                        </div>
+                        <span class="pl-filter-count" id="courier-filter-count"></span>
                     </div>
 
                     {% if courier.warnings %}
@@ -275,18 +299,51 @@
                     {% endif %}
 
                     <table class="pl-courier-table">
-                        <thead><tr><th>#</th><th>Receiver</th><th>Address</th><th>Cartons</th></tr></thead>
+                        <thead><tr><th>#</th><th>Receiver</th><th>Address</th><th>Service Code</th><th>Cartons</th></tr></thead>
                         <tbody>
                         {% for c in courier.consignments %}
-                        <tr>
-                            <td class="pl-courier-num">{{ c.number }}</td>
-                            <td>
-                                {{ c.destination.receiver }}
-                                {% if c.destination.contact %}<div class="issue-detail">Attn {{ c.destination.contact }}</div>{% endif %}
-                                {% if c.destination.authority_to_leave %}<span class="pl-courier-tag">ATL</span>{% endif %}
+                        {% set d = c.destination %}
+                        <tr class="pl-con-row" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                            <td class="pl-courier-num">
+                                <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
-                            <td>{{ c.address }}</td>
+                            <td>
+                                <span class="pl-show-receiver">{{ d.receiver }}</span>
+                                <div class="issue-detail pl-show-contact">{% if d.contact %}Attn {{ d.contact }}{% endif %}</div>
+                                <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
+                                <span class="pl-courier-tag pl-tag-edited"{% if not c.edited %} hidden{% endif %}>Edited</span>
+                            </td>
+                            <td class="pl-show-address">{{ c.address }}</td>
+                            <td>
+                                <select class="pl-service-input" id="service-{{ c.number }}" aria-label="Service code for consignment {{ c.number }}">
+                                    <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
+                                    {% for o in courier.service_options %}
+                                    <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
                             <td>{% for x in c.cartons %}<div>{{ x.item_reference }} <span class="issue-detail">{{ x.packing_spec }}</span></div>{% endfor %}</td>
+                        </tr>
+                        <tr class="pl-edit-row" data-id="{{ c.id }}" hidden>
+                            <td colspan="5">
+                                <div class="pl-edit-grid">
+                                    {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact Name'), ('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode')] %}
+                                    <div class="input-field">
+                                        <label for="edit-{{ c.number }}-{{ field }}">{{ label }}</label>
+                                        <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}">
+                                    </div>
+                                    {% endfor %}
+                                    <label class="pl-edit-atl" for="edit-{{ c.number }}-atl">
+                                        <input type="checkbox" id="edit-{{ c.number }}-atl" data-field="authority_to_leave"{% if d.authority_to_leave %} checked{% endif %}> Authority to leave
+                                    </label>
+                                </div>
+                                <div class="issue-detail">From Excel: {{ c.source_text }}</div>
+                                <div class="pl-edit-actions">
+                                    <button type="button" class="pl-btn-small pl-edit-save">Save</button>
+                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-cancel">Cancel</button>
+                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-reset">Reset to Excel</button>
+                                </div>
+                            </td>
                         </tr>
                         {% endfor %}
                         </tbody>

@@ -14,7 +14,8 @@ from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, ge
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
-from courier_export import build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED
+from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
+                            EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
 
 
@@ -29,6 +30,7 @@ else:
         
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
+SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
@@ -713,6 +715,15 @@ def pdf_engine():
 
 
 
+def _consignment_edits(form):
+    """Edits made in the preview's consignment table, sent back as JSON in a hidden field."""
+    try:
+        edits = json.loads(form.get('consignment_edits') or '{}')
+    except ValueError:
+        return {}
+    return {str(k): v for k, v in edits.items() if isinstance(v, dict)} if isinstance(edits, dict) else {}
+
+
 @app.route('/packing-labels', methods=['GET', 'POST'])
 def create_packing_labels():
     if request.method == 'GET':
@@ -797,17 +808,27 @@ def create_packing_labels():
             for tab in selected_tabs:
                 groups, _, _, _ = parse_packing_data(filepath, int(user_inputs[tab]['header_row']), sheet_name=tab)
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
-            consignments, cartons, courier_warnings = build_consignments(combined)
+            edits = _consignment_edits(request.form)
+            options = service_options(load_service_usage(SERVICE_USAGE_FILE))
+            most_used = options[0]['code'] if options[0]['used'] else ''
+            fixed = {**DEFAULT_FIXED, 'service_code': most_used,
+                     **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
+            consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'])
             series, all_series = detect_series(combined)
             if len(all_series) > 1:
                 courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
             courier = {
-                'consignments': [{'number': c['number'], 'destination': c['destination'], 'address': one_line(c['destination']),
-                                  'cartons': c['cartons']} for c in consignments],
+                'consignments': [{**c, 'address': one_line(c['destination']),
+                                  'source_text': c['original']['raw'] if c['original']['postcode'] in c['original']['raw']
+                                                 else ", ".join(x for x in (c['original']['raw'], c['original']['suburb'], c['original']['state'], c['original']['postcode']) if x),
+                                  'original_json': json.dumps({k: c['original'][k] for k in EDITABLE_FIELDS + ('authority_to_leave',)})}
+                                 for c in consignments],
+                'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
                 'carton_count': len(cartons),
                 'warnings': courier_warnings,
-                'fixed': {**DEFAULT_FIXED, 'reference': series,
-                          **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}},
+                'fixed': {'reference': series, **fixed},
+                'edits_json': json.dumps(edits),
+                'service_options': options,
             }
 
         return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier)
@@ -826,6 +847,7 @@ def create_packing_labels():
             return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
                                    page_error=f"Fill in {', '.join(missing)} before generating.")
 
+        project_dir = None
         try:
             # 1. Parse Data
             for tab in selected_tabs:
@@ -834,7 +856,15 @@ def create_packing_labels():
                 for key, val in pack_groups.items():
                     combined_pack_groups[f"{tab} - {key}"] = val
 
-            # 2. Setup Project Folder structure
+            # 2. Courier consignments, checked before anything is written or moved
+            fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
+            reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
+            consignments, cartons, _ = build_consignments(combined_pack_groups, _consignment_edits(request.form), fixed['service_code'])
+            unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
+            if unknown:
+                raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
+
+            # 3. Setup Project Folder structure
             raw_project_name = request.form.get('project_name', 'Packing_Labels_Job')
             safe_project_name = clean_file_name(raw_project_name)
             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
@@ -842,32 +872,36 @@ def create_packing_labels():
             project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
             os.makedirs(project_dir, exist_ok=True)
 
-            # 3. Move the Excel File into the Project
+            # 4. Move the Excel File into the Project
             new_filepath = os.path.join(project_dir, filename)
             close_if_open_elsewhere(filepath)
             shutil.move(filepath, new_filepath)
 
-            # 4. Generate the PDF with Custom Layout
+            # 5. Generate the PDF with Custom Layout
             output_pdf_name = f"Labels_{filename.split('.')[0]}.pdf"
             output_pdf = os.path.join(project_dir, output_pdf_name)
             page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
 
-            # 5. Courier consignment CSV and the label map used to match courier labels to pages
-            fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
-            reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
-            consignments, cartons, _ = build_consignments(combined_pack_groups)
+            # 6. Courier consignment CSV and the label map used to match courier labels to pages
             base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
             csv_name, map_name = f"{base_name}.csv", f"{base_name}.labelmap.json"
             write_courier_csv(os.path.join(project_dir, csv_name), cartons, consignments, reference, fixed)
             write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
                             output_pdf_name, csv_name, page_info)
+            record_service_usage(SERVICE_USAGE_FILE, consignments)
 
             return render_template('packing_labels.html',
                                    generation_complete=True,
                                    project_folder=final_folder_name,
                                    generated_files=[output_pdf_name, csv_name])
-            
+
         except Exception as e:
+            # Undo a half-made project so the upload is back where it was and Generate can be retried
+            if project_dir and os.path.isdir(project_dir):
+                moved = os.path.join(project_dir, filename)
+                if os.path.exists(moved) and not os.path.exists(filepath):
+                    shutil.move(moved, filepath)
+                shutil.rmtree(project_dir, ignore_errors=True)
             return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
 
     return render_template('packing_labels.html')

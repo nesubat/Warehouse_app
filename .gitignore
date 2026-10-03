@@ -21,3 +21,5 @@ dist/
 
 # Ignore Python background files
 __pycache__/
+# Service code usage counts (runtime state)
+data/service_code_usage.json

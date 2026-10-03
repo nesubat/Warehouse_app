@@ -6,6 +6,7 @@ leave it blank and repeat the exact same address so the courier joins them.
 """
 import csv
 import json
+import os
 import re
 from collections import Counter
 from datetime import date
@@ -38,7 +39,74 @@ CSV_HEADER = [
     'Sender Country', 'Sender Contact', 'Sender Phone', 'Sender Email', 'Reference',
 ]
 
-DEFAULT_FIXED = {'who_pays': 'S', 'charge_account': '', 'service_code': 'IPECX'}
+DEFAULT_FIXED = {'who_pays': 'S', 'charge_account': '', 'service_code': ''}
+
+# Courier service codes offered in the preview.
+SERVICE_CODES = [
+    ('BORDERP', 'BORDER EXPRESS PARCEL'),
+    ('BORDERB', 'BORDER EXPRESS BULK'),
+    ('DTRLOF', 'DETRACK LOCAL FREIGHT'),
+    ('DHLWPXOD', 'DHL DDP EXPRESS PARCELS>30kG'),
+    ('DHLWPXUD', 'DHL DDP EXPRESS PARCELS<30KG'),
+    ('FXIEOIE', 'FEDEX INTERNATIONAL ECONOMY ECONOMY'),
+    ('FXPOIP', 'FEDEX INTERNATIONAL PRIORITY PRIORITY'),
+    ('FLASHFW', 'FLASH COURIERS EXP WAGON'),
+    ('FLASHVIP', 'FLASH COURIERS VIP CAR'),
+    ('FLASHFV', 'FLASH COURIERS EXP VAN'),
+    ('FLASHVW', 'FLASH COURIERS VIP WAGON'),
+    ('FLASHVV', 'FLASH COURIERS VIP VAN'),
+    ('FLASHS', 'FLASH COURIERS STD CAR'),
+    ('FLASHSF1', 'FLASH COURIERS STD FLATTOP'),
+    ('FLASHSF2', 'FLASH COURIERS STD FLATTOP 2SP'),
+    ('FLASHVF1', 'FLASH COURIERS VIP FLATTOP'),
+    ('FLASHVF2', 'FLASH COURIERS VIP FLATT2SP'),
+    ('FLASHSV', 'FLASH COURIERS STD VAN'),
+    ('FLASHFX', 'FLASH COURIERS EXP CAR'),
+    ('FLASHSW', 'FLASH COURIERS STD WAGON'),
+    ('STEFPP', 'STARTRACK PREMIUM (SATCHEL)'),
+    ('STEROAD', 'STARTRACK ROAD EXPRESS'),
+    ('STERET', 'STARTRACK ROAD EXPRESS TAILGATE'),
+    ('STERE2', 'STARTRACK ROAD EXPRESS 2 MAN SERVICE'),
+    ('STEPRM', 'STARTRACK PREMIUM'),
+    ('STNPRM', 'STARTRACK NATIONAL PREMIUM'),
+    ('STNFPP', 'STARTRACK NATIONAL PREMIUM(SATCHEL)'),
+    ('STNROAD', 'STARTRACK NATIONAL ROAD EXPRESS'),
+    ('TNTN', 'TNT (NSW) ROAD EXPRESS'),
+    ('TNTNONFC', 'TNT (NSW) OVERNIGHT EXPRESS'),
+    ('TNTN9AM', 'TNT (NSW) OVERNIGHT 9AM'),
+    ('TNTNSWSPEC', 'TNT (NSW) SPECIALISED (TAILGATE)'),
+    ('TNTIXP', 'TNT INTERNATIONAL EXPRESS PARCELS'),
+    ('IPECX', 'TOLL IPEC ROAD EXPRESS'),
+]
+SERVICE_CODE_SET = {code for code, _ in SERVICE_CODES}
+
+
+def load_service_usage(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        return {k: int(v) for k, v in data.items() if k in SERVICE_CODE_SET}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def service_options(usage):
+    """Service codes for the dropdowns, most used first; unused ones keep the catalogue order."""
+    order = {code: i for i, (code, _) in enumerate(SERVICE_CODES)}
+    ranked = sorted(SERVICE_CODES, key=lambda cd: (-usage.get(cd[0], 0), order[cd[0]]))
+    return [{'code': code, 'description': desc, 'used': usage.get(code, 0)} for code, desc in ranked]
+
+
+def record_service_usage(path, consignments):
+    """After a Generate: count each consignment's service code, so the most used rise to the top."""
+    usage = load_service_usage(path)
+    for c in consignments:
+        code = c['service_code_used']
+        if code in SERVICE_CODE_SET:
+            usage[code] = usage.get(code, 0) + 1
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(usage, f, indent=2)
 
 
 # ---------- address parsing ----------
@@ -169,8 +237,27 @@ def detect_series(pack_groups):
     return found.most_common(1)[0][0] if found else '', sorted(found)
 
 
-def build_consignments(pack_groups):
-    """Groups packs by delivery address. Returns (consignments, cartons, warnings)."""
+EDITABLE_FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode')
+
+
+def _apply_edit(dest, edit):
+    """The user's corrections from the preview table, on top of what was read from Excel."""
+    if not any(k in edit for k in EDITABLE_FIELDS + ('authority_to_leave',)):
+        return dest
+    dest = {**dest, **{k: _tidy(edit[k]) for k in EDITABLE_FIELDS if k in edit}}
+    dest['state'] = dest['state'].upper()
+    if 'authority_to_leave' in edit:
+        dest['authority_to_leave'] = bool(edit['authority_to_leave'])
+    return dest
+
+
+def build_consignments(pack_groups, edits=None, default_service=''):
+    """Groups packs by delivery address. Returns (consignments, cartons, warnings).
+
+    edits: {consignment id: {address fields..., 'service_code': ...}} from the preview table. The id is the
+    address as read from Excel, so it stays the same however often the preview is refreshed. Edits apply before
+    grouping, so changing an address to match another consignment's merges them, as the courier would."""
+    edits = edits or {}
     assign_label_numbers(pack_groups)
     consignments, cartons, warnings = {}, [], []
     skipped, unsized = [], []
@@ -185,9 +272,17 @@ def build_consignments(pack_groups):
         size = package_size(g['pack_spec_name'])
         if size is None:
             unsized.append(_tidy(g['pack_spec_name']))
-        addr_key = _address_key(one_line(dest))
+        source_id = _address_key(one_line(dest))
+        edit = edits.get(source_id, {})
+        final = _apply_edit(dest, edit)
+        addr_key = _address_key(one_line(final))
         if addr_key not in consignments:
-            consignments[addr_key] = {'number': len(consignments) + 1, 'destination': dest, 'cartons': []}
+            consignments[addr_key] = {
+                'number': len(consignments) + 1, 'id': source_id,
+                'destination': final, 'original': dest, 'edited': final is not dest,
+                'service_code': _tidy(edit.get('service_code')),
+                'cartons': [],
+            }
         con = consignments[addr_key]
         carton = {
             'pack_key': key, 'store': store, 'packing_spec': _tidy(g['pack_spec_name']),
@@ -203,6 +298,8 @@ def build_consignments(pack_groups):
         cartons.append(carton)
 
     cons = list(consignments.values())
+    for c in cons:
+        c['service_code_used'] = c['service_code'] or _tidy(default_service)
     if skipped:
         warnings.append(f"No usable address (no postcode), left out of the courier CSV: {'; '.join(skipped)}")
     if unsized:
@@ -251,7 +348,7 @@ def write_courier_csv(path, cartons, consignments, reference, fixed):
             row[12] = 'Y' if d['authority_to_leave'] else ''
             row[14] = fixed['who_pays']
             row[15] = fixed['charge_account']
-            row[16] = fixed['service_code']
+            row[16] = by_number[carton['consignment']]['service_code_used']
             row[17] = 1
             row[18] = carton['weight_kg']
             row[20] = carton['item_type']
@@ -289,6 +386,8 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
         'consignments': [{
             'number': c['number'],
             'destination': {k: v for k, v in c['destination'].items() if k != 'raw'},
+            'service_code': c['service_code_used'],
+            'edited_in_preview': c['edited'],
             'source_address': c['destination']['raw'],
             'cartons': [x['item_reference'] for x in c['cartons']],
         } for c in consignments],

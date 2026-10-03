@@ -595,3 +595,133 @@ document.addEventListener("DOMContentLoaded", function() {
         }, { offset: Number.NEGATIVE_INFINITY }).element;
     }
 });
+// =========================================
+// 11. COURIER CONSIGNMENTS (packing labels preview)
+// =========================================
+// Address corrections and per-consignment service codes are kept in the hidden #consignment-edits
+// field as JSON, keyed by consignment id, and sent with Update Previews and Generate.
+document.addEventListener('DOMContentLoaded', function () {
+    const editsField = document.getElementById('consignment-edits');
+    if (!editsField) return;
+
+    let edits = {};
+    try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
+    const save = () => { editsField.value = JSON.stringify(edits); };
+
+    const ADDRESS = ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode'];
+    const rows = [...document.querySelectorAll('.pl-con-row')];
+    const mainService = document.getElementById('service_code');
+    const applyBtn = document.getElementById('apply-service');
+    const stateFilter = document.getElementById('courier-state-filter');
+    const textFilter = document.getElementById('courier-text-filter');
+    const countLabel = document.getElementById('courier-filter-count');
+
+    const editOf = (id) => (edits[id] = edits[id] || {});
+    const tidy = (id) => { if (edits[id] && !Object.keys(edits[id]).length) delete edits[id]; save(); };
+
+    function show(row, d) {
+        row.querySelector('.pl-show-receiver').textContent = d.receiver;
+        row.querySelector('.pl-show-contact').textContent = d.contact ? 'Attn ' + d.contact : '';
+        row.querySelector('.pl-show-atl').hidden = !d.authority_to_leave;
+        row.querySelector('.pl-show-address').textContent =
+            [d.line1, d.line2, d.suburb, d.state, d.postcode].filter(Boolean).join(', ');
+        row.dataset.state = (d.state || '').toUpperCase();
+    }
+    function fill(editRow, d) {
+        editRow.querySelectorAll('[data-field]').forEach((input) => {
+            if (input.type === 'checkbox') input.checked = !!d[input.dataset.field];
+            else input.value = d[input.dataset.field] || '';
+        });
+    }
+    function read(editRow) {
+        const d = {};
+        editRow.querySelectorAll('[data-field]').forEach((input) => {
+            d[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.value.trim();
+        });
+        d.state = (d.state || '').toUpperCase();
+        return d;
+    }
+
+    rows.forEach((row) => {
+        const id = row.dataset.id;
+        const editRow = row.nextElementSibling;
+        const original = JSON.parse(row.dataset.original);
+        const current = () => {
+            const d = { ...original };
+            ADDRESS.concat('authority_to_leave').forEach((k) => { if (edits[id] && k in edits[id]) d[k] = edits[id][k]; });
+            return d;
+        };
+        const close = () => { editRow.hidden = true; };
+
+        row.querySelector('.pl-edit-btn').addEventListener('click', () => {
+            editRow.hidden = !editRow.hidden;
+            if (!editRow.hidden) { fill(editRow, current()); editRow.querySelector('input').focus(); }
+        });
+
+        editRow.querySelector('.pl-edit-save').addEventListener('click', () => {
+            const d = read(editRow);
+            const changed = ADDRESS.some((k) => (d[k] || '') !== (original[k] || '')) ||
+                            d.authority_to_leave !== !!original.authority_to_leave;
+            const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
+            edits[id] = changed ? { ...keep, ...d } : keep;
+            tidy(id);
+            show(row, changed ? d : original);
+            row.querySelector('.pl-tag-edited').hidden = !changed;
+            close();
+            applyFilters();
+        });
+        editRow.querySelector('.pl-edit-cancel').addEventListener('click', close);
+        editRow.querySelector('.pl-edit-reset').addEventListener('click', () => {
+            fill(editRow, original);
+        });
+
+        // Enter inside the edit form saves the row instead of submitting the whole page
+        editRow.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); editRow.querySelector('.pl-edit-save').click(); }
+            if (e.key === 'Escape') close();
+        });
+
+        const service = row.querySelector('.pl-service-input');
+        service.addEventListener('change', () => {
+            const value = service.value;
+            if (value) editOf(id).service_code = value; else if (edits[id]) delete edits[id].service_code;
+            tidy(id);
+        });
+    });
+
+    // Main service code: the default for rows left blank, and "Apply to shown" copies it into the visible rows
+    // Each row's first option ("Same as main (CODE)") follows the main dropdown
+    mainService.addEventListener('change', () => {
+        const label = mainService.value ? `Same as main (${mainService.value})` : 'Same as main';
+        rows.forEach((row) => { row.querySelector('.pl-service-input').options[0].textContent = label; });
+    });
+    applyBtn.addEventListener('click', () => {
+        const value = mainService.value;
+        if (!value) { mainService.focus(); return; }
+        rows.filter((row) => !row.hidden).forEach((row) => {
+            row.querySelector('.pl-service-input').value = value;
+            editOf(row.dataset.id).service_code = value;
+        });
+        save();
+    });
+
+    function applyFilters() {
+        const state = stateFilter.value;
+        const text = textFilter.value.trim().toLowerCase();
+        let shown = 0;
+        rows.forEach((row) => {
+            const visible = (!state || row.dataset.state === state) &&
+                            (!text || row.textContent.toLowerCase().includes(text));
+            row.hidden = !visible;
+            if (!visible) row.nextElementSibling.hidden = true;
+            if (visible) shown += 1;
+        });
+        countLabel.textContent = shown === rows.length ? `${rows.length} consignments` : `Showing ${shown} of ${rows.length}`;
+        applyBtn.textContent = shown === rows.length ? 'Apply to all' : `Apply to ${shown} shown`;
+    }
+    stateFilter.addEventListener('change', applyFilters);
+    textFilter.addEventListener('input', applyFilters);
+    textFilter.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
+    applyFilters();
+    save();
+});
