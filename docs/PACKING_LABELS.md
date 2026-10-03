@@ -11,6 +11,20 @@ Code: [packing_label_generator.py](../packing_label_generator.py) (reading, chec
 3. **Customise Cell Layout**: drag blocks to set their order inside each item box. Blocks for columns the file doesn't have show as empty slots and take no space on the label.
 4. **Create Project & Generate PDF**: saves the Excel file and the PDF into a new project folder.
 
+## Abandoned uploads (all three tools)
+
+Uploads wait in the `projects` folder until Generate turns them into a project. Leaving a page before generating (closing the tab, Home, Start Over, any other link) discards what that page uploaded. Submitting the page's own forms (Preview, Generate, Recheck) and "Open Excel File" don't count as leaving. Pressing Back keeps it.
+
+| Tool | Left behind before Generate | Discarded on leave |
+|---|---|---|
+| Packing Labels | the scanned Excel file in `projects/` | the file |
+| Distribution Mapper (Packing Sheet) | the scanned Excel file in `projects/` | the file |
+| Label Shuffler | a project folder holding the Signature links file (created at step 1) | the whole folder, **only if it holds nothing but spreadsheets** |
+
+- **Files open in Excel** are closed first **without saving**, then deleted along with Excel's `~$` lock file.
+- **A folder counts as abandoned** only when it contains nothing except `.xlsx` / `.xls` files. Every real project has a generated `.pdf` or `.json`, so picking an existing project in the Label Shuffler and then leaving never deletes it.
+- **Safety net:** on every app start, loose uploads and abandoned folders older than 1 day are deleted the same way, in case the browser couldn't report that the page was closed.
+
 ## Columns
 
 Headers are matched by keywords, ignoring capitals.

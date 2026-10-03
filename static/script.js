@@ -6,6 +6,24 @@
 document.addEventListener("DOMContentLoaded", function() {
 
     // =========================================
+    // 0. DISCARD UNGENERATED UPLOADS ON LEAVE
+    // =========================================
+    // A page with #discard-on-leave tells the server to delete its upload when the user leaves
+    // without generating. Submitting the page's own forms (Preview, Generate, Recheck) doesn't
+    // count as leaving, and Back/Forward keeps the page cached, so nothing is deleted then either.
+    const discardInfo = document.getElementById('discard-on-leave');
+    if (discardInfo) {
+        let submitting = false;
+        document.addEventListener('submit', () => { submitting = true; });
+        window.addEventListener('pagehide', (e) => {
+            if (submitting || e.persisted) return;
+            const data = new URLSearchParams();
+            data.append(discardInfo.dataset.field, discardInfo.dataset.value);
+            navigator.sendBeacon(discardInfo.dataset.url, data);
+        });
+    }
+
+    // =========================================
     // 1. GLOBAL UTILITIES (Smooth Scrolling)
     // =========================================
     document.body.addEventListener('click', function(e) {

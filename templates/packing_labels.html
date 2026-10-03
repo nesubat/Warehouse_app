@@ -15,61 +15,18 @@
     <meta charset="UTF-8">
     <title>Generate Packing Labels</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-    <style>
-        /* Specific Styles for the Visual Grid Configurator */
-        .fixed-badge {
-            padding: 4px 10px; border-radius: 4px; font-size: 13px; font-weight: bold;
-        }
-        .fixed-badge.found { background: #e8f8f5; color: #1abc9c; border: 1px solid #1abc9c; }
-        .fixed-badge.missing { background: #fdf2e9; color: #e67e22; border: 1px solid #f39c12; }
-
-        .drag-container { min-height: 120px; padding-bottom: 20px; }
-        
-        #mapped-headers-list { display: flex; flex-direction: column; gap: 10px; }
-        #mapped-headers-list .sortable-item {
-            background: #fff; border: 1px dashed #bdc3c7; 
-            padding: 0; border-radius: 4px; font-size: 14px; 
-            cursor: grab; transition: all 0.2s ease;
-        }
-        
-        #attribute-list {
-            width: 100%; max-width: 320px; border: 2px solid #000; background: #fff;
-            display: flex; flex-direction: column; margin: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        #attribute-list .sortable-item {
-            border-bottom: 1px dashed #bdc3c7; background: #fff;
-            cursor: grab; position: relative; color: #000; padding: 0; border-radius: 0;
-        }
-        #attribute-list .sortable-item:last-child { border-bottom: none; }
-        .sortable-item:active { cursor: grabbing !important; }
-        
-        /* Empty Field styling */
-        .empty-field { background: #f9f9f9 !important; }
-        .empty-field .cell-only-styling { color: #aaa !important; font-style: italic; }
-        .issue-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; color: #2c3e50; }
-        .issue-table td { padding: 6px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
-        .issue-table tr:first-child td { border-top: none; }
-        .issue-error td:first-child { border-left: 3px solid #e74c3c; }
-        .issue-warning td:first-child { border-left: 3px solid #f39c12; }
-        .issue-rows { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; width: 1%; }
-        .issue-col { white-space: nowrap; color: #7f8c8d; width: 1%; }
-        .issue-detail { color: #7f8c8d; font-size: 12px; margin-top: 2px; }
-        .issue-heading { margin: 0; font-size: 14px; }
-        .issue-heading.error { color: #c0392b; }
-        .issue-heading.warning { color: #a04000; margin-top: 14px; }
-    </style>
 </head>
 <body>
 
     <div class="sticky-nav">
         <a href="/#home">🏠 Home</a>
-        <span class="divider" style="color: #ccc;">|</span>
+        <span class="divider">|</span>
         <a href="/#dashboard-section">📊 Dashboard</a>
-        <span class="divider" style="color: #ccc;">|</span>
+        <span class="divider">|</span>
         <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
-        <span class="divider" style="color: #ccc;">|</span>
+        <span class="divider">|</span>
         <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
-        <span class="divider" style="color: #ccc;">|</span>
+        <span class="divider">|</span>
         <a href="/packing-labels" class="active">📦 Packing Labels</a>
     </div>
 
@@ -79,10 +36,10 @@
         <div id="loading-text">Processing...</div>
     </div>
 
-    <div class="container">
+    <div class="container pl-page">
         <h1>📦 Generate Packing Labels</h1>
         
-        <div style="margin-bottom: 20px; display: flex; gap: 15px;">
+        <div class="pl-top-links">
             <a href="/" class="nav-link">← Home</a>
             {% if tabs or generation_complete %}
             <span class="divider">|</span>
@@ -91,15 +48,15 @@
         </div>
 
         {% if page_error %}
-          <div class="blueprint-card blueprint-error" style="margin-bottom: 20px;">
-              <h4 style="color: #e74c3c; margin-bottom: 5px;">❌ Could Not Process File</h4>
-              <p style="color: #c0392b; margin: 0; white-space: pre-line;">{{ page_error }}</p>
+          <div class="blueprint-card blueprint-error pl-page-error">
+              <h4 class="pl-page-error-title">❌ Could Not Process File</h4>
+              <p class="pl-page-error-text">{{ page_error }}</p>
           </div>
         {% endif %}
 
         <!-- STEP 1: FILE UPLOAD -->
         {% if not tabs and not generation_complete %}
-        <div class="instructions-box" style="margin-bottom: 30px;">
+        <div class="instructions-box pl-instructions">
             <h4 class="instructions-title">⚠️ Label Auto-Mapper Requirements</h4>
             <ul class="instructions-list">
                 <li><strong>Header Row:</strong> Tell the engine which row contains your headers (e.g. 1 or 2). It will scan it automatically.</li>
@@ -118,15 +75,15 @@
                 </div>
                 <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls" required>
             </div>
-            <button type="submit" class="btn-generate" style="margin-top: 10px;">Scan File</button>
+            <button type="submit" class="btn-generate pl-submit">Scan File</button>
         </form>
         {% endif %}
 
         <!-- STEP 2: TAB MAPPING -->
         {% if tabs %}
-        <h3 style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <h3 class="pl-file-detected">
             ✅ File Detected: {{ filename }}
-            <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open" style="font-size: 13px;">
+            <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open pl-open-file">
                 📂 Open Excel File
             </a>
         </h3>
@@ -144,8 +101,8 @@
                     Tab: {{ tab }}
                 </label>
                 
-                <div class="input-group" style="margin-bottom: 5px;">
-                    <div class="input-field" style="width: 250px;">
+                <div class="input-group pl-header-row-group">
+                    <div class="input-field pl-header-row-field">
                         <label>Header Row Number</label>
                         <input type="number" name="header_row_{{ tab }}" value="{{ user_inputs[tab].header_row if user_inputs else '1' }}" required>
                     </div>
@@ -153,13 +110,13 @@
             </div>
             {% endfor %}
             
-            <button type="submit" name="preview" class="btn-full" style="background-color: #f39c12;">Auto-Map & Update Previews</button>
+            <button type="submit" name="preview" class="btn-full pl-btn-preview">Auto-Map & Update Previews</button>
 
             <!-- STEP 3: PREVIEW & GENERATE -->
             {% if previews %}
-            <hr class="hr-divider" id="preview-section" style="margin-top: 30px;">
+            <hr class="hr-divider pl-preview-divider" id="preview-section">
             <h3>🗺️ Data Previews</h3>
-            <p style="color: #7f8c8d; margin-bottom: 20px;">Edit the Header Row above and click "Update Previews" if the metrics below look incorrect.</p>
+            <p class="pl-preview-hint">Edit the Header Row above and click "Update Previews" if the metrics below look incorrect.</p>
             
             {% set lock = namespace(has_error=false) %}
             
@@ -178,7 +135,7 @@
                 {% else %}
                 <div class="blueprint-card">
                     <h4>✅ {{ bp.sheet_name }}</h4>
-                    <div class="metrics-bar" style="margin-bottom: 5px;">
+                    <div class="metrics-bar pl-metrics">
                         <span class="metric-badge">Last Row Parsed: {{ bp.last_row }}</span>
                         <span class="metric-badge">Total Packs: {{ bp.total_packs }}</span>
                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
@@ -199,40 +156,40 @@
             {% else %}
                 
                 <!-- 2-Column Seamless Visual Grid Configurator -->
-                <div style="margin-top: 30px; display: grid; grid-template-columns: 1fr 1fr; background: #fdfdfd; border: 1px solid #dcdde1; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <div class="pl-configurator">
                     
                     <!-- LEFT COLUMN: MAPPED HEADERS -->
-                    <div style="padding: 25px;">
-                        <h4 style="margin-top: 0; margin-bottom: 5px; color: #2c3e50;">1. Mapped Headers</h4>
+                    <div class="pl-config-col">
+                        <h4 class="pl-config-title">1. Mapped Headers</h4>
                         
                         <!-- Fixed Section -->
-                        <p style="color: #7f8c8d; font-size: 12px; margin-top: 20px; font-weight: bold; text-transform: uppercase;">Page Info (Fixed Bottom-Left)</p>
-                        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 25px;">
+                        <p class="pl-config-label pl-config-label-first">Page Info (Fixed Bottom-Left)</p>
+                        <div class="pl-fixed-badges">
                             <span class="fixed-badge {% if previews[0].found_headers.get('Packing Spec') %}found{% else %}missing{% endif %}">Packing Spec</span>
                             <span class="fixed-badge {% if previews[0].found_headers.get('Store Name') %}found{% else %}missing{% endif %}">Store Name</span>
                             <span class="fixed-badge {% if previews[0].found_headers.get('Address Info') %}found{% else %}missing{% endif %}">Address Info</span>
                         </div>
                         
                         <!-- Draggable Available Section -->
-                        <p style="color: #7f8c8d; font-size: 12px; margin-top: 10px; font-weight: bold; text-transform: uppercase;">Available Layout Blocks (Drag Right ➔)</p>
-                        <div id="mapped-headers-list" class="drag-container" style="background: #fff; padding: 15px; border-radius: 6px; border: 1px dashed #bdc3c7; min-height: 200px;">
+                        <p class="pl-config-label">Available Layout Blocks (Drag Right ➔)</p>
+                        <div id="mapped-headers-list" class="drag-container pl-headers-pool">
                             
                             <!-- INDIVIDUAL BLOCKS: Material, Install, Notes (if found and not default) -->
                             {% if previews[0].found_headers.get('Material') %}
                             <div class="sortable-item" draggable="true" data-id="material"><span class="badge-text">Material</span>
-                                <div class="cell-only-styling" style="padding: 12px; font-family: sans-serif; color: #34495e; font-size: 13px; text-align: center;">Material</div>
+                                <div class="cell-only-styling pl-cell-text">Material</div>
                             </div>
                             {% endif %}
                             
                             {% if previews[0].found_headers.get('Install') %}
                             <div class="sortable-item" draggable="true" data-id="install"><span class="badge-text">Install</span>
-                                <div class="cell-only-styling" style="padding: 12px; font-family: sans-serif; color: #c0392b; font-weight: bold; font-size: 13px; text-align: center;">Install</div>
+                                <div class="cell-only-styling pl-cell-install">Install</div>
                             </div>
                             {% endif %}
                             
                             {% if previews[0].found_headers.get('Notes') %}
                             <div class="sortable-item" draggable="true" data-id="notes"><span class="badge-text">Notes</span>
-                                <div class="cell-only-styling" style="padding: 12px; font-family: sans-serif; color: #34495e; font-size: 13px; text-align: center;">Notes</div>
+                                <div class="cell-only-styling pl-cell-text">Notes</div>
                             </div>
                             {% endif %}
                             
@@ -240,46 +197,46 @@
                     </div>
 
                     <!-- RIGHT COLUMN: CELL LAYOUT -->
-                    <div style="padding: 25px; background: #fff;">
-                        <h4 style="margin-top: 0; margin-bottom: 5px; color: #2c3e50;">2. Customize Cell Layout</h4>
-                        <p style="color: #7f8c8d; font-size: 13px; margin-bottom: 20px;">Drag blocks up/down to set the order, or drag them back to the left to remove them from the cell.</p>
+                    <div class="pl-config-col pl-config-col-right">
+                        <h4 class="pl-config-title">2. Customize Cell Layout</h4>
+                        <p class="pl-config-hint">Drag blocks up/down to set the order, or drag them back to the left to remove them from the cell.</p>
                         
                         <div id="attribute-list" class="drag-container">
                             
                             <!-- DEFAULT 5 SLOTS (Replaces with Empty Field if not found) -->
                             {% if previews[0].found_headers.get('Thumbnail') %}
                             <div class="sortable-item" draggable="true" data-id="thumbnail"><span class="badge-text">Thumbnail</span>
-                                <div class="cell-only-styling" style="padding: 10px;">
-                                    <div style="border: 1px dashed #bdc3c7; background: #f8f9fa; height: 75px; display: flex; align-items: center; justify-content: center; margin: 0 40px; color: #7f8c8d; font-weight: bold; border-radius: 4px;">📷 Image Thumbnail</div>
+                                <div class="cell-only-styling pl-cell-thumb">
+                                    <div class="pl-cell-thumb-box">📷 Image Thumbnail</div>
                                 </div>
                             </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling" style="padding: 15px; color: #aaa; text-align: center;">Empty Field (Drag Here)</div></div>{% endif %}
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
                             {% if previews[0].found_headers.get('Description') %}
                             <div class="sortable-item" draggable="true" data-id="desc"><span class="badge-text">Description</span>
-                                <div class="cell-only-styling" style="padding: 12px 10px; font-family: sans-serif; color: #2c3e50; font-size: 14px; text-align: center;">Description Text Goes Here</div>
+                                <div class="cell-only-styling pl-cell-desc">Description Text Goes Here</div>
                             </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling" style="padding: 15px; color: #aaa; text-align: center;">Empty Field (Drag Here)</div></div>{% endif %}
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
                             {% if previews[0].found_headers.get('Dimensions') %}
                             <div class="sortable-item" draggable="true" data-id="dimension"><span class="badge-text">Dimensions</span>
-                                <div class="cell-only-styling" style="padding: 10px; font-family: sans-serif; color: #2c3e50; font-size: 13px; font-weight: bold; text-align: center;">Dimensions</div>
+                                <div class="cell-only-styling pl-cell-dim">Dimensions</div>
                             </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling" style="padding: 15px; color: #aaa; text-align: center;">Empty Field (Drag Here)</div></div>{% endif %}
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
                             {% if previews[0].found_headers.get('Job Number') %}
                             <div class="sortable-item" draggable="true" data-id="job_no"><span class="badge-text">Job Number</span>
-                                <div class="cell-only-styling" style="padding: 6px 0;"><div style="background: #000; color: #fff; padding: 6px; font-weight: bold; font-size: 16px; letter-spacing: 0.04em; text-align: center;">Job Number</div></div>
+                                <div class="cell-only-styling pl-cell-job"><div class="pl-cell-job-bar">Job Number</div></div>
                             </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling" style="padding: 15px; color: #aaa; text-align: center;">Empty Field (Drag Here)</div></div>{% endif %}
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
                             {% if previews[0].found_headers.get('Quantity') %}
                             <div class="sortable-item" draggable="true" data-id="qty"><span class="badge-text">Quantity</span>
-                                <div class="cell-only-styling" style="padding: 8px;">
-                                    <div style="border: 3px solid #000; margin: 0 70px; padding: 4px; font-weight: bold; font-size: 20px; color: #000; text-align: center;">Quantity</div>
+                                <div class="cell-only-styling pl-cell-qty">
+                                    <div class="pl-cell-qty-box">Quantity</div>
                                 </div>
                             </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling" style="padding: 15px; color: #aaa; text-align: center;">Empty Field (Drag Here)</div></div>{% endif %}
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
                             
                         </div>
                         <input type="hidden" name="attribute_order" id="attribute_order" value="">
@@ -290,7 +247,7 @@
                     <label class="project-name-label">Name this Project / Job:</label>
                     <input type="text" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" required>
                 </div>
-                <button type="submit" name="generate" class="btn-generate" style="margin-top: 10px;">Create Project & Generate PDF</button>
+                <button type="submit" name="generate" class="btn-generate pl-submit">Create Project & Generate PDF</button>
             {% endif %}
             
             {% endif %}
@@ -321,6 +278,9 @@
         {% endif %}
     </div>
 
+    {% if tabs and filename and not generation_complete %}
+    <div id="discard-on-leave" hidden data-url="/discard_upload" data-field="filename" data-value="{{ filename }}"></div>
+    {% endif %}
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

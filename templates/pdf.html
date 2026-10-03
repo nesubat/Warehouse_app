@@ -22,6 +22,8 @@
         <a href="{{ url_for('matrix') }}">⚙️ Distribution Mapper</a>
         <span class="divider" style="color: #ccc;">|</span>
         <a href="{{ url_for('pdf_engine') }}" class="active">🏷️ Label Shuffler</a>
+        <span class="divider" style="color: #ccc;">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
     </div>
 
     <div class="container">
@@ -228,6 +230,11 @@
     <script id="project-data-store" type="application/json">
         {{ projects_json | default('{}') | safe }}
     </script>
+    {% if step == 2 and project_name %}
+    <div id="discard-on-leave" hidden data-url="/discard_project" data-field="project" data-value="{{ project_name }}"></div>
+    {% elif step == 1 and duplicate_project_name %}
+    <div id="discard-on-leave" hidden data-url="/discard_project" data-field="project" data-value="{{ duplicate_project_name }}"></div>
+    {% endif %}
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

@@ -32,6 +32,43 @@ os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
 
+def force_delete_upload(file_path):
+    """Deletes an abandoned upload, closing it in Excel first (unsaved edits there are discarded)."""
+    try:
+        close_if_open_elsewhere(file_path)
+    except Exception as e:
+        print(f"[WARNING] Could not check Excel for {file_path}: {e}")
+    for _ in range(10):  # Excel can hold the lock for a moment after closing
+        try:
+            os.remove(file_path)
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            time.sleep(0.3)
+    else:
+        print(f"[WARNING] Could not delete {file_path}; the startup cleanup will retry.")
+    lock_file = os.path.join(os.path.dirname(file_path), "~$" + os.path.basename(file_path))
+    try:
+        os.remove(lock_file)
+    except OSError:
+        pass
+
+
+def is_abandoned_project(folder_path):
+    """Nothing was ever generated here: the folder holds only spreadsheets (the uploaded input).
+    Every real project has a generated .pdf or .json next to them."""
+    files = [f for f in os.listdir(folder_path) if not f.startswith('~$')]
+    return all(f.lower().endswith(('.xlsx', '.xls')) and os.path.isfile(os.path.join(folder_path, f)) for f in files)
+
+
+def force_delete_project(folder_path):
+    for f in os.listdir(folder_path):
+        if not f.startswith('~$'):
+            force_delete_upload(os.path.join(folder_path, f))
+    shutil.rmtree(folder_path, ignore_errors=True)
+
+
 # --- 7-DAY AUTO CLEANUP function---
 def clean_old_projects():
     """Deletes any project folder older than 7 days on system boot."""
@@ -46,12 +83,19 @@ def clean_old_projects():
         
         if os.path.isdir(folder_path):
             creation_time = os.path.getctime(folder_path)
-            if (current_time - creation_time) > seven_days_in_seconds:
+            if (current_time - creation_time) > 24 * 60 * 60 and is_abandoned_project(folder_path):
+                force_delete_project(folder_path)
+                print(f"Cleaned up abandoned project: {folder_name}")
+            elif (current_time - creation_time) > seven_days_in_seconds:
                 try:
                     shutil.rmtree(folder_path, ignore_errors=True)
                     print(f"Cleaned up old project: {folder_name}")
                 except Exception as e:
                     print(f"Could not delete {folder_name}: {e}")
+        elif folder_name.lower().endswith(('.xlsx', '.xls')) and not folder_name.startswith('~$'):
+            if (current_time - os.path.getmtime(folder_path)) > 24 * 60 * 60:
+                force_delete_upload(folder_path)
+                print(f"Cleaned up abandoned upload: {folder_name}")
 
 clean_old_projects()  # Retry cleanup if deletion fails
 app = Flask(__name__, 
@@ -333,6 +377,24 @@ def open_local_file(folder_name, filename):
             print(f"[DEBUG] Could not open file locally: {e}")
 
     return '', 204  # Prevents the browser from reloading the page
+
+@app.route('/discard_upload', methods=['POST'])
+def discard_upload():
+    """Deletes a scanned-but-never-generated upload when the user leaves the page."""
+    safe_filename = os.path.basename(request.form.get('filename', ''))
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_filename)
+    if safe_filename.lower().endswith(('.xlsx', '.xls')) and os.path.isfile(file_path):
+        force_delete_upload(file_path)
+    return '', 204
+
+@app.route('/discard_project', methods=['POST'])
+def discard_project():
+    """Deletes a Label Shuffler project folder the user left before generating anything."""
+    safe_folder = os.path.basename(request.form.get('project', ''))
+    folder_path = os.path.join(PROJECTS_FOLDER, safe_folder)
+    if safe_folder not in ('', '.', '..') and os.path.isdir(folder_path) and is_abandoned_project(folder_path):
+        force_delete_project(folder_path)
+    return '', 204
 
 @app.route('/open_upload/<filename>')
 def open_upload_file(filename):
@@ -686,7 +748,9 @@ def create_packing_labels():
     if not filename:
         return redirect(url_for('create_packing_labels'))
         
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(filename))
+    if not os.path.isfile(filepath):
+        return render_template('packing_labels.html', page_error="The uploaded file is no longer available. Scan it again.")
     all_tabs = request.form.getlist('all_tabs')
     selected_tabs = request.form.getlist('selected_tabs')
     

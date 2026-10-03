@@ -1065,3 +1065,95 @@ button:hover {
 .sortable-item:active {
   cursor: grabbing !important;
 }
+
+/* =========================================
+   PACKING LABELS PAGE (packing_labels.html)
+========================================= */
+/* Specific Styles for the Visual Grid Configurator */
+.fixed-badge {
+    padding: 4px 10px; border-radius: 4px; font-size: 13px; font-weight: bold;
+}
+.fixed-badge.found { background: #e8f8f5; color: #1abc9c; border: 1px solid #1abc9c; }
+.fixed-badge.missing { background: #fdf2e9; color: #e67e22; border: 1px solid #f39c12; }
+
+.drag-container { min-height: 120px; padding-bottom: 20px; }
+
+#mapped-headers-list { display: flex; flex-direction: column; gap: 10px; }
+#mapped-headers-list .sortable-item {
+    background: #fff; border: 1px dashed #bdc3c7; 
+    padding: 0; border-radius: 4px; font-size: 14px; 
+    cursor: grab; transition: all 0.2s ease;
+}
+
+#attribute-list {
+    width: 100%; max-width: 320px; border: 2px solid #000; background: #fff;
+    display: flex; flex-direction: column; margin: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+#attribute-list .sortable-item {
+    border-bottom: 1px dashed #bdc3c7; background: #fff;
+    cursor: grab; position: relative; color: #000; padding: 0; border-radius: 0;
+}
+#attribute-list .sortable-item:last-child { border-bottom: none; }
+.sortable-item:active { cursor: grabbing !important; }
+
+/* Empty Field styling */
+.empty-field { background: #f9f9f9 !important; }
+.empty-field .cell-only-styling { color: #aaa !important; font-style: italic; }
+.issue-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; color: #2c3e50; }
+.issue-table td { padding: 6px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
+.issue-table tr:first-child td { border-top: none; }
+.issue-error td:first-child { border-left: 3px solid #e74c3c; }
+.issue-warning td:first-child { border-left: 3px solid #f39c12; }
+.issue-rows { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; width: 1%; }
+.issue-col { white-space: nowrap; color: #7f8c8d; width: 1%; }
+.issue-detail { color: #7f8c8d; font-size: 12px; margin-top: 2px; }
+.issue-heading { margin: 0; font-size: 14px; }
+.issue-heading.error { color: #c0392b; }
+.issue-heading.warning { color: #a04000; margin-top: 14px; }
+
+.sticky-nav .divider { color: #ccc; }
+
+.pl-page .pl-top-links { margin-bottom: 20px; display: flex; gap: 15px; }
+.pl-page .pl-page-error { margin-bottom: 20px; }
+.pl-page .pl-page-error-title { color: #e74c3c; margin-bottom: 5px; }
+.pl-page .pl-page-error-text { color: #c0392b; margin: 0; white-space: pre-line; }
+.pl-page .pl-instructions { margin-bottom: 30px; }
+.pl-page .pl-submit { margin-top: 10px; }
+.pl-page .pl-file-detected { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pl-page .pl-open-file { font-size: 13px; }
+.pl-page .pl-header-row-group { margin-bottom: 5px; }
+.pl-page .pl-header-row-field { width: 250px; }
+.pl-page .pl-btn-preview { background-color: #f39c12; }
+.pl-page .pl-preview-divider { margin-top: 30px; }
+.pl-page .pl-preview-hint { color: #7f8c8d; margin-bottom: 20px; }
+.pl-page .pl-metrics { margin-bottom: 5px; }
+
+/* Two-column layout configurator */
+.pl-page .pl-configurator {
+    margin-top: 30px; display: grid; grid-template-columns: 1fr 1fr; background: #fdfdfd;
+    border: 1px solid #dcdde1; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+.pl-page .pl-config-col { padding: 25px; }
+.pl-page .pl-config-col-right { background: #fff; }
+.pl-page .pl-config-title { margin-top: 0; margin-bottom: 5px; color: #2c3e50; }
+.pl-page .pl-config-label { color: #7f8c8d; font-size: 12px; margin-top: 10px; font-weight: bold; text-transform: uppercase; }
+.pl-page .pl-config-label-first { margin-top: 20px; }
+.pl-page .pl-config-hint { color: #7f8c8d; font-size: 13px; margin-bottom: 20px; }
+.pl-page .pl-fixed-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 25px; }
+.pl-page #mapped-headers-list.pl-headers-pool { background: #fff; padding: 15px; border-radius: 6px; border: 1px dashed #bdc3c7; min-height: 200px; }
+
+/* Cell previews: each block styled as it prints on the label */
+.pl-page .pl-cell-text { padding: 12px; font-family: sans-serif; color: #34495e; font-size: 13px; text-align: center; }
+.pl-page .pl-cell-install { padding: 12px; font-family: sans-serif; color: #c0392b; font-weight: bold; font-size: 13px; text-align: center; }
+.pl-page .pl-cell-thumb { padding: 10px; }
+.pl-page .pl-cell-thumb-box {
+    border: 1px dashed #bdc3c7; background: #f8f9fa; height: 75px; display: flex; align-items: center;
+    justify-content: center; margin: 0 40px; color: #7f8c8d; font-weight: bold; border-radius: 4px;
+}
+.pl-page .pl-cell-desc { padding: 12px 10px; font-family: sans-serif; color: #2c3e50; font-size: 14px; text-align: center; }
+.pl-page .pl-cell-dim { padding: 10px; font-family: sans-serif; color: #2c3e50; font-size: 13px; font-weight: bold; text-align: center; }
+.pl-page .pl-cell-job { padding: 6px 0; }
+.pl-page .pl-cell-job-bar { background: #000; color: #fff; padding: 6px; font-weight: bold; font-size: 16px; letter-spacing: 0.04em; text-align: center; }
+.pl-page .pl-cell-qty { padding: 8px; }
+.pl-page .pl-cell-qty-box { border: 3px solid #000; margin: 0 70px; padding: 4px; font-weight: bold; font-size: 20px; color: #000; text-align: center; }
+.pl-page .pl-cell-empty { padding: 15px; color: #aaa; text-align: center; }
