@@ -12,6 +12,7 @@ from collections import Counter
 from datetime import date
 
 from packing_label_generator import _address_key, _norm, assign_label_numbers, assign_barcodes, normalize_postcode
+from packing_specs import SpecStore, MAX_KG, _num as _round_to
 
 AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
 # New Zealand regions: the official ISO 3166-2:NZ codes, plus the codes Toll's portal uses
@@ -40,12 +41,7 @@ COMPANY_WORDS = {
 }
 LINE_LIMIT = 30  # longer street text is split into Address Line 1 / Line 2 at its last separator
 
-# Sizes (cm) for packing specs that don't spell out their dimensions like OB1370170170
-KNOWN_SIZES = {
-    'p7 jiffy bag': (48, 36, 3),
-    'a4 box': (31, 22, 18),
-}
-LIGHT_SPEC_PREFIXES = ('P1', 'P5', 'P7')  # bags: 1 kg; everything else 2 kg
+# Carton size, weight and item type come from the Packing Specs page (packing_specs.py)
 
 CSV_HEADER = [
     'Dispatch Date', 'Reference', 'Receiver Name', 'Receiver Address Line 1', 'Receiver Address Line 2',
@@ -228,21 +224,13 @@ def one_line(dest):
 
 # ---------- cartons ----------
 
-def package_size(spec):
-    """(length, width, height) in cm, or None when unknown."""
-    s = re.sub(r'\s+', '', str(spec)).upper()
-    m = re.fullmatch(r'OB(\d+)(\d{3})(\d{3})', s)
-    if m:
-        return tuple(int(v) / 10 for v in m.groups())
-    return KNOWN_SIZES.get(_norm(spec))
-
-
-def item_type(spec):
-    return 'Pallet' if str(spec).strip().lower().startswith('pallet') else 'Carton'
-
-
-def package_weight(spec):
-    return 1 if str(spec).strip().upper().startswith(LIGHT_SPEC_PREFIXES) else 2
+def carton_weight(override, default):
+    """A weight typed in the preview, if it's a usable number, else the spec's weight."""
+    try:
+        v = float(str(override).strip())
+    except (TypeError, ValueError):
+        return default
+    return _round_to(v, 2) if 0 < v <= MAX_KG else default
 
 
 def _num(v):
@@ -288,17 +276,20 @@ def source_destinations(pack_groups):
     return found
 
 
-def build_consignments(pack_groups, edits=None, default_service=''):
+def build_consignments(pack_groups, edits=None, default_service='', resolve_spec=None, weights=None):
     """Groups packs by delivery address. Returns (consignments, cartons, warnings).
 
     edits: {consignment id: {address fields..., 'service_code': ...}} from the preview table. The id is the
     address as read from Excel, so it stays the same however often the preview is refreshed. Edits apply before
-    grouping, so changing an address to match another consignment's merges them, as the courier would."""
-    edits = edits or {}
+    grouping, so changing an address to match another consignment's merges them, as the courier would.
+    resolve_spec: Packing Spec text -> size/weight/item type (SpecStore.resolver(); built-in defaults if None).
+    weights: {pack key: kg} typed in the preview's weight boxes."""
+    edits, weights = edits or {}, weights or {}
+    resolve_spec = resolve_spec or SpecStore(None).resolver()
     assign_label_numbers(pack_groups)
     assign_barcodes(pack_groups)
     consignments, cartons, warnings = {}, [], []
-    skipped, unsized = [], []
+    skipped, unsized, unread = [], [], []
 
     for key, g in pack_groups.items():
         store = _tidy(g['store_name'])
@@ -307,9 +298,11 @@ def build_consignments(pack_groups, edits=None, default_service=''):
         if dest is None or not dest['postcode']:
             skipped.append(f"{store or '(no store)'} ({_tidy(g['pack_spec_name'])}, row {g.get('excel_rows', ['?'])[0]})")
             continue
-        size = package_size(g['pack_spec_name'])
+        spec = resolve_spec(g['pack_spec_name'])
+        size = spec['size_cm']
         if size is None:
-            unsized.append(_tidy(g['pack_spec_name']))
+            (unread if spec['kind'] in ('OB', 'CS', 'PALLET', 'FP') else unsized).append(_tidy(g['pack_spec_name']))
+        weight = carton_weight(weights.get(key), spec['weight_kg'])
         source_id = _address_key(one_line(dest))
         edit = edits.get(source_id, {})
         final = _apply_edit(dest, edit)
@@ -330,8 +323,8 @@ def build_consignments(pack_groups, edits=None, default_service=''):
             'install': bool(g.get('install')), 'excel_rows': rows,
             'job_numbers': [i['job_no'] for i in g['items']],
             'barcodes': [i['barcode'] for i in g['items']],
-            'size_cm': size, 'weight_kg': package_weight(g['pack_spec_name']),
-            'item_type': item_type(g['pack_spec_name']),
+            'size_cm': size, 'weight_kg': weight, 'weight_default': spec['weight_kg'],
+            'item_type': spec['item_type'], 'spec_kind': spec['kind'],
             'consignment': con['number'], 'first_in_consignment': not con['cartons'],
         }
         con['cartons'].append(carton)
@@ -343,7 +336,11 @@ def build_consignments(pack_groups, edits=None, default_service=''):
     if skipped:
         warnings.append(f"No usable address (no postcode), left out of the courier CSV: {'; '.join(skipped)}")
     if unsized:
-        warnings.append(f"Unknown carton size for packing spec {', '.join(sorted(set(unsized)))}. Dimensions are left blank.")
+        warnings.append(f"No size saved for packing spec {', '.join(sorted(set(unsized)))}: add it on the Packing Specs page "
+                        f"and Update Previews. Until then its dimensions are left blank.")
+    if unread:
+        warnings.append(f"Couldn't read the size from {', '.join(sorted(set(unread)))} (expected e.g. OB1370170170, "
+                        f"FP120170). Dimensions are left blank.")
     for c in cons:
         d = c['destination']
         if not (d['suburb'] and d['state'] and d['postcode']):

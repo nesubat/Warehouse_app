@@ -19,7 +19,7 @@ import json
 import os
 
 from packing_label_generator import _norm, normalize_postcode
-from address_match import best_match, best_by_address
+from address_match import best_match, best_by_address, address_score
 
 # Only the columns the address book needs are read; everything else in the file is ignored.
 # Each field is recognised by keywords in its header (ignoring capitals and punctuation), so other
@@ -73,6 +73,11 @@ def _score(header, field):
 
 
 ADDRESS_FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country')
+# What a verified address changes on an entry it matched: the address itself, never the receiver or Attn
+# (those identify the entry; one address can be saved for several receivers / Attn names)
+PLACE_FIELDS = ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')
+UPDATE_FIELDS = PLACE_FIELDS + ('authority_to_leave',)
+SAME_PLACE = 0.85  # address_score() above which another copy for the same receiver + Attn is this place
 YES = {'y', 'yes', 'true', '1'}
 
 
@@ -204,7 +209,8 @@ def _row_address(row, columns):
 
 
 def _changes(entry, new):
-    changed = [f for f in ADDRESS_FIELDS if f in new and new[f] != (entry.get(f) or '')]
+    """Address details the portal changes on a matched entry (receiver and Attn are never changed)."""
+    changed = [f for f in PLACE_FIELDS if f in new and new[f] != (entry.get(f) or '')]
     if 'authority_to_leave' in new and bool(new['authority_to_leave']) != bool(entry.get('authority_to_leave')):
         changed.append('authority_to_leave')
     return changed
@@ -214,7 +220,9 @@ def build_review(data, filename, label_map_paths, book):
     """Proposed changes for the review screen.
 
     Each proposal: {key, rows (CSV line numbers), status ('update' | 'same' | 'conflict' | 'new'),
-    matched_by, entry (current book entry or None), new (address from the CSV), changed (field names)}."""
+    matched_by, entry (current book entry or None), new (address from the CSV), changed (field names),
+    merges (older copies of this place for the same receiver + Attn, folded into the entry),
+    siblings (other receivers / Attn names saved at the old address, which get the same correction)}."""
     rows, header, columns = pick_sheet(read_sheets(data, filename))
     by_reference = load_label_maps(label_map_paths)
     proposals, nearby = {}, {}  # nearby: per-postcode short-lists, shared by every row of this file
@@ -280,14 +288,28 @@ def build_review(data, filename, label_map_paths, book):
                 p['variants'].append({'rows': [line], 'new': new})
                 p['status'] = 'conflict'  # rows for the same entry disagree: the user must fix the file
             continue
+        merges, siblings = [], []
         if entry:
             changed = _changes(entry, new)
             status = 'update' if changed else 'same'
+            # Older copies of this place for the same receiver + Attn (St Kilda saved once with state D and
+            # once with VIC): folded into the verified entry so the book keeps one
+            verified = {**entry, **{f: new[f] for f in PLACE_FIELDS if f in new}}
+            merges = [{**e, 'differs': _changes(e, new)} for e in book.same_identity(entry)
+                      if address_score(verified, e) >= SAME_PLACE]
+            if merges:
+                status = 'update'
+            if any(f in PLACE_FIELDS for f in changed) or merges:
+                # Other receivers / Attn names saved at the old address get the corrected address too
+                skip = {entry['id']} | {m['id'] for m in merges}
+                siblings = list({e['id']: e for place in [entry] + merges for e in book.at_address(place)
+                                 if e['id'] not in skip and _changes(e, new)}.values())
         else:
             changed, status = list(new.keys()), 'new'
             matched_by = 'several saved addresses for this receiver' if ambiguous else 'not in the address book'
         proposals[key] = {'key': key, 'rows': [line], 'status': status, 'matched_by': matched_by, 'ambiguous': ambiguous, 'likely': likely,
-                          'entry': entry, 'new': new, 'changed': changed, 'variants': [{'rows': [line], 'new': new}]}
+                          'entry': entry, 'new': new, 'changed': changed, 'variants': [{'rows': [line], 'new': new}],
+                          'merges': merges, 'siblings': siblings}
 
     for p in proposals.values():  # which fields the conflicting rows disagree on, for highlighting
         p['variant_diff'] = [f for f in ADDRESS_FIELDS + ('authority_to_leave',)
@@ -300,8 +322,11 @@ def build_review(data, filename, label_map_paths, book):
 def apply_review(proposals, chosen_keys, book):
     """Writes the ticked proposals, and marks every address the portal confirmed unchanged as verified
     (those need no tick: the portal already agrees with the address book).
-    Returns (applied, confirmed, added, problems)."""
-    applied = confirmed = added = 0
+
+    A ticked update changes only the entry's address details (never its receiver or Attn), folds the
+    older copies of that place for the same receiver + Attn into it, and gives the corrected address to the
+    other receivers / Attn names saved at the old address. Returns (applied, confirmed, added, merged, problems)."""
+    applied = confirmed = added = merged = 0
     problems = []
     for p in proposals:
         if p['status'] == 'same' and p['entry']:
@@ -314,12 +339,23 @@ def apply_review(proposals, chosen_keys, book):
             continue
         try:
             if p['entry']:
-                book.apply_verified(p['entry']['id'], p['new'])
+                fields = {f: p['new'][f] for f in UPDATE_FIELDS if f in p['new']}
+                place = {f: fields[f] for f in PLACE_FIELDS if f in fields}
+                stale = [m for m in p.get('merges') or [] if m['id'] != p['entry']['id']]
+                # Who else is saved at the old address, read before anything changes
+                skip = {p['entry']['id']} | {m['id'] for m in stale}
+                others = {e['id'] for old in [p['entry']] + stale for e in book.at_address(old) if e['id'] not in skip}
+                target = book.apply_verified(p['entry']['id'], fields)
                 applied += 1
+                for m in stale:
+                    merged += book.merge_into(target['id'], m['id'])
+                for other_id in others:
+                    if place and book.get(other_id):
+                        book.apply_verified(other_id, place)
             else:
                 created = book.create(p['new'])
                 book.apply_verified(created['id'], {})
                 added += 1
         except Exception as e:  # one bad row shouldn't stop the rest
             problems.append(f"CSV row {', '.join(map(str, p['rows']))}: {e}")
-    return applied, confirmed, added, problems
+    return applied, confirmed, added, merged, problems

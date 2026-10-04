@@ -993,3 +993,56 @@ document.addEventListener('DOMContentLoaded', function () {
     more.addEventListener('click', () => load(false));
     load(true);
 });
+
+// =========================================
+// 13. PACKING SPECS PAGE + PALLET WEIGHTS
+// =========================================
+// "+ Add spec" adds a blank row from the <template>; each row gets the next free index for its field names.
+document.addEventListener('DOMContentLoaded', function () {
+    const add = document.getElementById('ps-add');
+    if (!add) return;
+    const body = document.querySelector('#ps-named tbody');
+    const template = document.getElementById('ps-row-template');
+    let next = Number(add.dataset.next || 0);
+
+    add.addEventListener('click', () => {
+        const html = template.innerHTML.replaceAll('__i__', String(next));
+        next += 1;
+        const holder = document.createElement('tbody');
+        holder.innerHTML = html.trim();
+        const row = holder.firstElementChild;
+        body.append(row);
+        row.querySelector('.ps-name').focus();
+    });
+    body.addEventListener('click', (e) => {
+        const drop = e.target.closest('.ps-drop-new');
+        if (drop) drop.closest('tr').remove();
+    });
+});
+
+// Packing Labels preview: a carton's weight typed in the consignment table is kept in the hidden
+// #carton-weights field ({pack key: kg}) and sent with Update Previews and Generate. Clearing the box
+// goes back to the Packing Specs weight.
+document.addEventListener('DOMContentLoaded', function () {
+    const field = document.getElementById('carton-weights');
+    if (!field) return;
+    let weights = {};
+    try { weights = JSON.parse(field.value || '{}') || {}; } catch (e) { weights = {}; }
+
+    document.querySelectorAll('.pl-weight-input').forEach((input) => {
+        input.addEventListener('change', () => {
+            const value = input.value.trim();
+            const number = Number(value);
+            const ok = value !== '' && Number.isFinite(number) && number > 0 && number <= 5000;
+            input.classList.toggle('pl-weight-bad', value !== '' && !ok);
+            const changed = ok && number !== Number(input.dataset.default);
+            if (changed) weights[input.dataset.pack] = number;
+            else delete weights[input.dataset.pack];
+            if (value === '') input.value = input.dataset.default;
+            input.classList.toggle('pl-weight-changed', changed);
+            field.value = JSON.stringify(weights);
+        });
+        // Enter inside the weight box must not submit the whole page
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+    });
+});

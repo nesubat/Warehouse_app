@@ -297,6 +297,31 @@ class AddressBook:
                                        (_norm(receiver),)).fetchall()
         return [self._row(r) for r in rows]
 
+    def same_identity(self, entry):
+        """The receiver's other entries with the same Attn (other addresses, or stale copies of this one)."""
+        rows = self._connect().execute("SELECT * FROM addresses WHERE receiver_key = ? AND contact_key = ? AND id != ? LIMIT 50",
+                                       (_norm(entry.get('receiver')), _norm(entry.get('contact')), entry['id'])).fetchall()
+        return [self._row(r) for r in rows]
+
+    def merge_into(self, target_id, other_id):
+        """Folds a stale copy into the target entry: its learned spellings and use count move over, then it's
+        removed. Only for two entries of the same receiver + Attn. Returns False if there was nothing to merge."""
+        db = self._connect()
+        with db:
+            pair = db.execute("SELECT id, receiver_key, contact_key, use_count, last_used_at FROM addresses WHERE id IN (?, ?)",
+                              (target_id, other_id)).fetchall()
+            if target_id == other_id or len(pair) != 2:
+                return False
+            target, other = sorted(pair, key=lambda r: r['id'] != target_id)
+            if (target['receiver_key'], target['contact_key']) != (other['receiver_key'], other['contact_key']):
+                return False
+            db.execute("UPDATE aliases SET address_id = ? WHERE address_id = ?", (target_id, other_id))
+            db.execute("UPDATE addresses SET use_count = use_count + ?, "
+                       "last_used_at = COALESCE(MAX(last_used_at, ?), last_used_at, ?) WHERE id = ?",
+                       (other['use_count'], other['last_used_at'], other['last_used_at'], target_id))
+            db.execute("DELETE FROM addresses WHERE id = ?", (other_id,))
+        return True
+
     def mark_verified(self, address_id):
         """The courier portal confirmed this entry exactly as saved."""
         db = self._connect()

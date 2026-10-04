@@ -19,6 +19,7 @@ from packing_label_generator import parse_packing_data, generate_packing_labels,
 from address_book import AddressBook, AddressBookError
 from address_import import build_review, apply_review, all_label_maps, ImportProblem
 from address_match import suggestions as closest_addresses
+from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
 from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
                             source_destinations,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
@@ -38,6 +39,7 @@ else:
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
 SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
 ADDRESS_BOOK = AddressBook(os.path.join(BASE_DIR, 'data', 'address_book.db'))
+SPEC_STORE = SpecStore(os.path.join(BASE_DIR, 'data', 'packing_specs.json'))
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
@@ -738,6 +740,15 @@ def _consignment_edits(form):
     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
 
 
+def _carton_weights(form):
+    """Carton weights typed in the preview's consignment table: {pack key: kg}, from a hidden JSON field."""
+    try:
+        data = json.loads(form.get('carton_weights') or '{}')
+    except ValueError:
+        return {}
+    return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
+
+
 def _book_offered(form):
     """Excel addresses the address book has already been asked about, so a Reset to Excel sticks."""
     offered = _edits_field(form).get('__offered__', [])
@@ -815,8 +826,9 @@ def bulk_update_addresses():
             proposals = json.loads(request.form.get('proposals') or '[]')
         except ValueError:
             proposals = []
-        applied, confirmed, added, problems = apply_review(proposals, set(request.form.getlist('choose')), ADDRESS_BOOK)
-        return render_template('address_verify.html', done=True, applied=applied, confirmed=confirmed, added=added, problems=problems)
+        applied, confirmed, added, merged, problems = apply_review(proposals, set(request.form.getlist('choose')), ADDRESS_BOOK)
+        return render_template('address_verify.html', done=True, applied=applied, confirmed=confirmed, added=added,
+                               merged=merged, problems=problems)
 
     if request.method == 'POST':
         upload = request.files.get('file')
@@ -834,6 +846,41 @@ def bulk_update_addresses():
                                filename=upload.filename, columns=sorted(columns))
 
     return render_template('address_verify.html')
+
+
+def _spec_rows_from(form):
+    formula = {p: {'weight': form.get(f'formula_{p}_weight'), 'item_type': form.get(f'formula_{p}_item_type'),
+                   'third_size': form.get(f'formula_{p}_third_size')} for p in FORMULA_PREFIXES}
+    named = []
+    for i in form.getlist('row'):
+        named.append({k: form.get(f'named_{i}_{k}') for k in ('name', 'length', 'width', 'height', 'weight', 'item_type')}
+                     | {'remove': form.get(f'named_{i}_remove'), 'seen_at': form.get(f'named_{i}_seen_at')})
+    return formula, named
+
+
+@app.route('/packing-specs', methods=['GET', 'POST'])
+def packing_specs_page():
+    """Sizes, weights and item types for every Packing Spec, used for the courier CSV."""
+    errors, saved = {}, request.args.get('saved') == '1'
+    if request.method == 'POST':
+        formula, named = _spec_rows_from(request.form)
+        errors = SPEC_STORE.save_page(formula, named)
+        if not errors:
+            return redirect(url_for('packing_specs_page', saved=1))
+        data = {'formula': formula, 'named': [r for r in named if not r.get('remove')]}
+        named_rows = list(enumerate(named))
+    else:
+        data = SPEC_STORE.load()
+        named_rows = list(enumerate(data['named']))
+    code = request.args.get('code', '').strip()
+    tried = None
+    if code:
+        found = parse_formula(code, SPEC_STORE.load()['formula']['FP']['third_size'])
+        tried = {'code': code, 'kind': found[0] if found else None, 'size': found[1] if found else None,
+                 'named': SPEC_STORE.resolver()(code) if not found else None}
+    return render_template('packing_specs.html', formula=data['formula'], named_rows=named_rows, errors=errors,
+                           saved=saved, prefixes=FORMULA_PREFIXES, labels=FORMULA_LABELS, examples=FORMULA_EXAMPLES,
+                           item_types=ITEM_TYPES, tried=tried)
 
 
 @app.route('/address-book')
@@ -961,8 +1008,15 @@ def create_packing_labels():
             most_used = options[0]['code'] if options[0]['used'] else ''
             fixed = {**DEFAULT_FIXED, 'service_code': most_used,
                      **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
-            consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'])
+            weights = _carton_weights(request.form)
+            consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'],
+                                                                         SPEC_STORE.resolver(), weights)
             consignments = _check_against_book(consignments, edits)
+            # Specs the Packing Specs page doesn't know yet are listed there for the user to fill in
+            try:
+                SPEC_STORE.note_unknown(x['packing_spec'] for x in cartons if x['spec_kind'] == 'unknown')
+            except OSError as e:
+                print(f"[WARNING] Could not note new packing specs: {e}")
             series, all_series = detect_series(combined)
             if len(all_series) > 1:
                 courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
@@ -974,6 +1028,8 @@ def create_packing_labels():
                                  for c in consignments],
                 'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
                 'carton_count': len(cartons),
+                'weights_json': json.dumps(weights),
+                'spec_gaps': any(x['spec_kind'] in ('unknown', 'incomplete') for x in cartons),
                 'unverified': sum(c['book'] == 'unverified' for c in consignments),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
@@ -1013,7 +1069,8 @@ def create_packing_labels():
             # 2. Courier consignments, checked before anything is written or moved
             fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
             reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
-            consignments, cartons, _ = build_consignments(combined_pack_groups, _consignment_edits(request.form), fixed['service_code'])
+            consignments, cartons, _ = build_consignments(combined_pack_groups, _consignment_edits(request.form), fixed['service_code'],
+                                                          SPEC_STORE.resolver(), _carton_weights(request.form))
             unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
             if unknown:
                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")

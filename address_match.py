@@ -82,6 +82,18 @@ def address_score(a, b):
     return 0.45 * numbers + 0.35 * words + 0.20 * suburb
 
 
+def _attn_score(a, b):
+    """0..1 similarity of two Attn names; a short form counts ('Sam' ~ 'Samantha')."""
+    a, b = _norm(a), _norm(b)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a.startswith(b) or b.startswith(a):
+        return 0.8
+    return SequenceMatcher(None, a, b).ratio() * 0.7
+
+
 def score(address, entry):
     n = name_score(address.get('receiver'), entry.get('receiver'))
     s = address_score(address, entry)
@@ -94,8 +106,18 @@ def best_match(address, candidates):
     ranked = [(s, e) for s, e in ranked if s[1] >= MIN_NAME and s[2] >= MIN_ADDRESS and s[0] >= MIN_TOTAL]
     if not ranked:
         return None
+    # One address can be saved for several receivers / Attn names. Those aren't rival places (a verified
+    # address reaches all of them), so among entries at the same address take the best name, then the
+    # closest Attn; only a candidate at another address has to be clearly beaten.
+    place = lambda e: _address_key(" ".join(str(e.get(k) or '') for k in ('line1', 'line2', 'suburb', 'postcode')))
+    best = {}
+    for s, e in ranked:
+        key = (round(s[0], 6), _attn_score(address.get('contact'), e.get('contact')))
+        if place(e) not in best or key > best[place(e)][0]:
+            best[place(e)] = (key, s, e)
+    ranked = sorted(((s, e) for _, s, e in best.values()), key=lambda x: x[0][0], reverse=True)
     if len(ranked) > 1 and ranked[0][0][0] - ranked[1][0][0] < MIN_LEAD:
-        return None  # two near-equal candidates: don't guess
+        return None  # two near-equal candidates at different addresses: don't guess
     (total, n, s), entry = ranked[0]
     return entry, total, n, s
 

@@ -30,6 +30,8 @@
         <a href="/packing-labels" class="active">📦 Packing Labels</a>
         <span class="divider">|</span>
         <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
     </div>
 
     <!-- Loading Overlay -->
@@ -259,6 +261,7 @@
                     <h4 class="pl-config-title">3. Courier Consignments</h4>
                     <p class="pl-config-hint">{{ courier.carton_count }} cartons in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
                     <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
+                    <input type="hidden" id="carton-weights" name="carton_weights" value="{{ courier.weights_json }}">
 
                     <div class="pl-courier-fields">
                         <div class="input-field">
@@ -307,6 +310,7 @@
                     <table class="issue-table issue-warning">
                         {% for w in courier.warnings %}<tr><td class="issue-text">{{ w }}</td></tr>{% endfor %}
                     </table>
+                    {% if courier.spec_gaps %}<p class="pl-spec-link"><a href="{{ url_for('packing_specs_page') }}" target="_blank" rel="noopener">📐 Open Packing Specs</a> in a new tab, fill in the sizes, then press "Auto-Map &amp; Update Previews" here.</p>{% endif %}
                     {% endif %}
 
                     {% if courier.unverified %}
@@ -340,7 +344,18 @@
                                     {% endfor %}
                                 </select>
                             </td>
-                            <td>{% for x in c.cartons %}<div>{{ x.item_reference }} <span class="issue-detail">{{ x.packing_spec }}</span></div>{% endfor %}</td>
+                            <td>{% for x in c.cartons %}
+                                <div class="pl-carton">{{ x.item_reference }} <span class="issue-detail">{{ x.packing_spec }}</span>
+                                    <div class="issue-detail pl-carton-facts">
+                                        {% if x.size_cm %}{{ x.size_cm|join(' × ') }} cm{% else %}<span class="pl-no-size">no size</span>{% endif %}
+                                        · {{ x.item_type }}
+                                    </div>
+                                    <label class="pl-weight-field" title="From Packing Specs: {{ x.weight_default }} kg">Weight
+                                        <input type="text" inputmode="decimal" class="pl-weight-input{% if x.weight_kg != x.weight_default %} pl-weight-changed{% endif %}"
+                                               data-pack="{{ x.pack_key }}" data-default="{{ x.weight_default }}" value="{{ x.weight_kg }}"
+                                               aria-label="Weight in kg of {{ x.item_reference }}"> kg
+                                    </label>
+                                </div>{% endfor %}</td>
                         </tr>
                         <tr class="pl-edit-row" data-id="{{ c.id }}" hidden>
                             <td colspan="5">

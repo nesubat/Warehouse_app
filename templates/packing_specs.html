@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Packing Specs</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    <div class="sticky-nav">
+        <a href="/#home">🏠 Home</a>
+        <span class="divider">|</span>
+        <a href="/#dashboard-section">📊 Dashboard</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('packing_specs_page') }}" class="active">📐 Packing Specs</a>
+    </div>
+
+    <div class="container ab-page ps-page" id="packing-specs">
+        <h1>📐 Packing Specs</h1>
+        <p class="ab-intro">The size, weight and item type the courier CSV uses for each Packing Spec. Codes like OB, CS, Pallet and FP carry their size in the code; every other spec (A4 box, P7 jiffy bag…) uses the values saved here. Changes apply to the next preview or Generate. Weights are where each carton starts in the preview, where they can be changed for one job.</p>
+
+        {% if saved %}<p class="ps-saved" role="status">✅ Saved. The next preview uses these values.</p>{% endif %}
+        {% if errors %}<p class="ps-error-banner" role="alert">Nothing was saved: fix the {{ errors|length }} highlighted {{ 'row' if errors|length == 1 else 'rows' }} below.</p>{% endif %}
+
+        <form method="POST" action="{{ url_for('packing_specs_page') }}" id="ps-form">
+
+            <h2 class="ps-heading">Codes with the size in them</h2>
+            <p class="ps-hint">The numbers are millimetres: OB1370170170 is 1370 × 170 × 170 mm = 137 × 17 × 17 cm. They can run together or be separated (OB 170 x 170 x 1200). When the digits could be split more than one way, sizes in whole centimetres win (1701701200 → 17 × 17 × 120). Use <a href="#ps-try">Check a code</a> below to see how a code is read.</p>
+            <div class="ab-table-wrap">
+                <table class="ps-table">
+                    <thead><tr><th>Code</th><th>Example</th><th>Weight (kg)</th><th>Item type</th><th>3rd size (cm)</th></tr></thead>
+                    <tbody>
+                    {% for p in prefixes %}
+                    {% set f = formula[p] %}
+                    <tr class="{% if errors['formula-' ~ p] %}ps-row-error{% endif %}">
+                        <td class="ps-code">{{ labels[p] }}</td>
+                        <td class="ps-example">{{ examples[p] }}</td>
+                        <td><input type="text" inputmode="decimal" name="formula_{{ p }}_weight" value="{{ f.weight if f.weight is not none else '' }}" aria-label="{{ labels[p] }} weight in kg" class="ps-num" required></td>
+                        <td>
+                            <select name="formula_{{ p }}_item_type" aria-label="{{ labels[p] }} item type">
+                                {% for t in item_types %}<option{% if f.item_type == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+                            </select>
+                        </td>
+                        <td>
+                            {% if p == 'FP' %}
+                            <input type="text" inputmode="decimal" name="formula_FP_third_size" value="{{ f.third_size if f.third_size is not none else '' }}" aria-label="FP third size in cm" class="ps-num" required>
+                            <div class="ps-cell-hint">Used when an FP code gives only two sizes. A third number in the code is used instead.</div>
+                            {% else %}<span class="ps-na">—</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% if errors['formula-' ~ p] %}<tr class="ps-row-error"><td colspan="5" class="ps-error">{{ errors['formula-' ~ p] }}</td></tr>{% endif %}
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p class="ps-hint">Every carton's weight can also be changed in the Packing Labels preview; the weight here is what it starts at.</p>
+
+            <h2 class="ps-heading">Other specs</h2>
+            <p class="ps-hint">Name each spec exactly as it's written in the Packing Spec column (capitals and punctuation don't matter). Specs found in a file that aren't listed yet are added here automatically, marked <span class="ps-tag">Needs size</span>.</p>
+            <div class="ab-table-wrap">
+                <table class="ps-table" id="ps-named">
+                    <thead><tr><th>Packing Spec</th><th>Length (cm)</th><th>Width (cm)</th><th>Height (cm)</th><th>Weight (kg)</th><th>Item type</th><th><span class="sr-only">Remove</span></th></tr></thead>
+                    <tbody>
+                    {% for i, s in named_rows %}
+                    {% set err = errors['named-' ~ i] %}
+                    {% set missing = not (s.length and s.width and s.height) %}
+                    <tr class="ps-named-row{% if missing %} ps-needs{% endif %}{% if err %} ps-row-error{% endif %}">
+                        <td>
+                            <input type="hidden" name="row" value="{{ i }}">
+                            <input type="text" name="named_{{ i }}_name" value="{{ s.name or '' }}" aria-label="Packing Spec name" class="ps-name">
+                            {% if missing %}<span class="ps-tag">Needs size</span>{% endif %}
+                        </td>
+                        {% for k in ('length', 'width', 'height', 'weight') %}
+                        <td><input type="text" inputmode="decimal" name="named_{{ i }}_{{ k }}" value="{{ s[k] if s[k] is not none else '' }}" aria-label="{{ k|title }}" class="ps-num"></td>
+                        {% endfor %}
+                        <td>
+                            <select name="named_{{ i }}_item_type" aria-label="Item type">
+                                {% for t in item_types %}<option{% if (s.item_type or 'Carton') == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+                            </select>
+                        </td>
+                        <td class="ps-remove"><label title="Remove this spec"><input type="checkbox" name="named_{{ i }}_remove" value="1"{% if s.remove %} checked{% endif %}> Remove</label></td>
+                    </tr>
+                    {% if err %}<tr class="ps-row-error"><td colspan="7" class="ps-error">{{ err }}</td></tr>{% endif %}
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <template id="ps-row-template">
+                <tr class="ps-named-row ps-new-row">
+                    <td><input type="hidden" name="row" value="__i__"><input type="text" name="named___i___name" aria-label="Packing Spec name" class="ps-name" placeholder="e.g. Half A3 box"></td>
+                    <td><input type="text" inputmode="decimal" name="named___i___length" aria-label="Length" class="ps-num"></td>
+                    <td><input type="text" inputmode="decimal" name="named___i___width" aria-label="Width" class="ps-num"></td>
+                    <td><input type="text" inputmode="decimal" name="named___i___height" aria-label="Height" class="ps-num"></td>
+                    <td><input type="text" inputmode="decimal" name="named___i___weight" aria-label="Weight" class="ps-num"></td>
+                    <td><select name="named___i___item_type" aria-label="Item type">{% for t in item_types %}<option>{{ t }}</option>{% endfor %}</select></td>
+                    <td class="ps-remove"><button type="button" class="ab-btn ab-btn-plain ps-drop-new" title="Remove this new row">✕</button></td>
+                </tr>
+            </template>
+
+            <div class="ps-actions">
+                <button type="button" class="ab-btn ab-btn-plain" id="ps-add" data-next="{{ named_rows|length }}">+ Add spec</button>
+                <button type="submit" class="ab-btn">Save changes</button>
+            </div>
+        </form>
+
+        <h2 class="ps-heading" id="ps-try">Check a code</h2>
+        <form method="GET" action="{{ url_for('packing_specs_page') }}#ps-try" class="ps-try">
+            <input type="text" name="code" value="{{ tried.code if tried else '' }}" placeholder="e.g. OB1701701200 or A4 box" aria-label="Packing Spec to check">
+            <button type="submit" class="ab-btn ab-btn-plain">Check</button>
+        </form>
+        {% if tried %}
+        <p class="ps-try-result">
+            {% if tried.kind and tried.size %}<strong>{{ tried.code }}</strong> → read as {{ labels[tried.kind] }}: {{ tried.size|join(' × ') }} cm, {{ formula[tried.kind].weight }} kg, {{ formula[tried.kind].item_type }}.
+            {% elif tried.kind %}<strong>{{ tried.code }}</strong> starts with {{ labels[tried.kind] }}, but its size can't be read. Write it as e.g. OB1370170170 or OB 1370 170 170.
+            {% elif tried.named and tried.named.size_cm %}<strong>{{ tried.code }}</strong> uses the saved spec: {{ tried.named.size_cm|join(' × ') }} cm, {{ tried.named.weight_kg }} kg, {{ tried.named.item_type }}.
+            {% elif tried.named and tried.named.kind == 'incomplete' %}<strong>{{ tried.code }}</strong> is listed above but has no size yet.
+            {% else %}<strong>{{ tried.code }}</strong> isn't a code with a size in it and isn't listed above. Add it under Other specs.{% endif %}
+        </p>
+        {% endif %}
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

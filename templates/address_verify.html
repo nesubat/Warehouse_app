@@ -33,6 +33,9 @@
                     {% else %}
                     {{ address(p.new, p.changed if p.entry else []) }}
                     {% endif %}
+                    {% if p.merges %}<div class="av-merge-note">Also replaces {{ 'an older saved copy' if p.merges|length == 1 else p.merges|length ~ ' older saved copies' }} for this receiver, so the book keeps one:
+                        {% for m in p.merges %}<div class="av-merge-old">{{ address(m, m.differs) }}</div>{% endfor %}</div>{% endif %}
+                    {% if p.siblings %}<div class="ab-detail av-sibling-note">The same address is also saved for {% for s in p.siblings %}{{ s.receiver }}{% if s.contact %} (Attn {{ s.contact }}){% endif %}{{ ', ' if not loop.last }}{% endfor %}: {{ 'it gets' if p.siblings|length == 1 else 'they get' }} the corrected address too, keeping {{ 'its' if p.siblings|length == 1 else 'their' }} own receiver and Attn.</div>{% endif %}
                     {% if p.likely %}<div class="av-likely-note">Close match, not exact — check it's the same place before applying.</div>{% endif %}
                     {% if p.status == 'conflict' %}<div class="av-conflict-note">These CSV rows give different addresses for the same entry. Fix the file and add it again.</div>{% endif %}
                     {% if p.status == 'new' and p.ambiguous %}<div class="av-conflict-note">This receiver already has several saved addresses, so it wasn't matched. Tick to add it as another verified address.</div>
@@ -66,6 +69,8 @@
         <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
         <span class="divider">|</span>
         <a href="{{ url_for('address_book_page') }}" class="active">📇 Address Book</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
     </div>
 
     <div class="container ab-page av-page">
@@ -82,7 +87,7 @@
         {% if done %}
         <div class="success-box av-done">
             <h2 class="success-title">✅ Address book updated</h2>
-            <p>{{ applied }} address{{ '' if applied == 1 else 'es' }} updated, {{ confirmed }} confirmed as already correct{% if added %}, {{ added }} new address{{ '' if added == 1 else 'es' }} added{% endif %} — all marked as verified.</p>
+            <p>{{ applied }} address{{ '' if applied == 1 else 'es' }} updated, {{ confirmed }} confirmed as already correct{% if added %}, {{ added }} new address{{ '' if added == 1 else 'es' }} added{% endif %} — all marked as verified.{% if merged %} {{ merged }} older duplicate{{ '' if merged == 1 else 's' }} merged into {{ 'its' if merged == 1 else 'their' }} verified address.{% endif %}</p>
             {% if problems %}
             <ul class="av-problems">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
             {% endif %}
@@ -105,7 +110,7 @@
                 <span class="av-pill av-same">{{ counts.same }} already up to date</span>
                 {% if counts.conflict %}<span class="av-pill av-conflict">{{ counts.conflict }} conflicting</span>{% endif %}
             </p>
-            <p class="av-hint">Columns read: {% for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave'] if f in columns %}{{ LABELS[f] }}{{ ', ' if not loop.last }}{% endfor %}. Changed parts are <mark>highlighted</mark>. Untick anything you don't want saved.</p>
+            <p class="av-hint">Columns read: {% for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave'] if f in columns %}{{ LABELS[f] }}{{ ', ' if not loop.last }}{% endfor %}. Changed parts are <mark>highlighted</mark>. Only address details are updated: saved receiver names and Attn stay as they are. Untick anything you don't want saved.</p>
 
             {% set actionable = proposals|rejectattr('status', 'equalto', 'same')|list %}
             {% set up_to_date = proposals|selectattr('status', 'equalto', 'same')|list %}

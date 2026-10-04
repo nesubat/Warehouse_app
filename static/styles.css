@@ -1313,3 +1313,49 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-closest-why { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: #2471a3; }
 .pl-page .pl-closest-address { color: #5d6d7e; font-size: 12px; }
 .pl-page .pl-closest-none { margin: 0; padding: 8px 12px; background: #fff8e1; border: 1px solid #f5d27a; border-radius: 6px; font-size: 13px; color: #6d4c00; }
+
+/* Packing Specs page */
+.ps-page h2.ps-heading { font-size: 18px; color: #2c3e50; margin: 28px 0 6px; text-align: left; }
+.ps-hint { color: #7f8c8d; font-size: 13px; line-height: 1.5; max-width: 90ch; margin: 0 0 10px; }
+.ps-saved { background: #e9f7ef; border: 1px solid #a9dfbf; color: #1e8449; border-radius: 6px; padding: 10px 12px; margin: 0 0 12px; }
+.ps-error-banner { background: #fdedec; border: 1px solid #f5b7b1; color: #a93226; border-radius: 6px; padding: 10px 12px; margin: 0 0 12px; }
+.ps-table { width: 100%; border-collapse: collapse; font-size: 14px; color: #2c3e50; }
+.ps-table th { text-align: left; font-size: 12px; text-transform: uppercase; color: #7f8c8d; background: #f8f9fa; padding: 8px 10px; border-bottom: 1px solid #dcdde1; }
+.ps-table td { padding: 6px 10px; border-top: 1px solid #ecf0f1; vertical-align: middle; }
+.ps-table input[type="text"], .ps-table select { padding: 7px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; background: #fff; }
+.ps-table .ps-num { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
+.ps-table .ps-name { width: 100%; min-width: 180px; box-sizing: border-box; }
+.ps-code { font-weight: 700; white-space: nowrap; }
+.ps-example { color: #5d6d7e; font-size: 13px; }
+.ps-cell-hint { color: #7f8c8d; font-size: 12px; margin-top: 3px; max-width: 34ch; }
+.ps-na { color: #bdc3c7; }
+.ps-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; font-size: 11px; font-weight: 600; border: 1px solid #e0a100; color: #9a6700; background: #fff8e1; border-radius: 3px; }
+.ps-table tr.ps-needs > td { background: #fffbef; }
+.ps-table tr.ps-row-error > td { background: #fdedec; }
+.ps-error { color: #a93226; font-size: 13px; padding-top: 0; }
+.ps-remove { white-space: nowrap; font-size: 13px; color: #7f8c8d; }
+.ps-remove .ab-btn { padding: 4px 9px; }
+.ps-actions { display: flex; gap: 10px; justify-content: flex-end; margin: 12px 0 0; }
+.ps-try { display: flex; gap: 8px; max-width: 520px; }
+.ps-try input { flex: 1; padding: 9px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.ps-try-result { margin: 10px 0 30px; font-size: 14px; color: #2c3e50; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Packing Labels preview: carton size / weight under each carton, pallet weight box */
+.pl-page .pl-carton + .pl-carton { margin-top: 4px; }
+.pl-page .pl-carton-facts { display: block; }
+.pl-page .pl-no-size { color: #b9770e; font-weight: 600; }
+.pl-page .pl-weight-input { width: 64px; padding: 2px 5px; font-size: 12px; text-align: right; border: 1px solid #bdc3c7; border-radius: 3px; }
+.pl-page .pl-weight-input.pl-weight-bad { border-color: #e74c3c; background: #fdedec; }
+.pl-page .pl-spec-link { font-size: 13px; margin: 6px 0 0; }
+
+/* Weight box under every carton in the consignment table */
+.pl-page .pl-weight-field { display: inline-flex; align-items: center; gap: 5px; margin-top: 3px; font-size: 12px; color: #5d6d7e; cursor: text; }
+.pl-page .pl-weight-field .pl-weight-input { width: 70px; padding: 4px 6px; font-size: 13px; color: #2c3e50; background: #fff; }
+.pl-page .pl-weight-input:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 2px rgba(52,152,219,0.2); }
+.pl-page .pl-weight-input.pl-weight-changed { border-color: #e67e22; background: #fef5e7; }
+
+/* Update in bulk: older copies merged into the verified address */
+.av-merge-note { color: #6c3483; font-size: 12px; margin-top: 4px; }
+.av-merge-old { color: #7f8c8d; text-decoration: line-through; text-decoration-color: rgba(127,140,141,0.6); margin-top: 1px; }
+.av-sibling-note { margin-top: 4px; }

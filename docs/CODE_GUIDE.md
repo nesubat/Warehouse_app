@@ -136,7 +136,7 @@ Only `app.py` talks to Flask/the browser. The engines never render a web page th
 ```
 Warehouse_app/
 ├── app.py, core_math.py, matrix_engine.py, pdf_engine.py, subgroup_engine.py
-├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py
+├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py, packing_specs.py
 ├── templates/            → the 5 HTML pages Flask renders
 ├── static/               → script.js + styles.css (shared by all pages)
 ├── docs/CODE_GUIDE.md    → this guide
@@ -1204,23 +1204,36 @@ Because the key is the address alone, packs for **different stores going to the 
 
 ### 10.3 Carton facts from the Packing Spec
 
-**Size.** `OB` codes spell out millimetres:
+Size, weight and item type come from [packing_specs.py](../packing_specs.py) and the **📐 Packing Specs** page (`/packing-specs`, [packing_specs.html](../templates/packing_specs.html)). The values are saved in `data/packing_specs.json`, written atomically (temp file + replace).
+
+**Codes with the size in them: OB, CS, Pallet, FP** (`parse_formula()`). The numbers are millimetres, ÷ 10 for cm:
 
 ```
-OB 1370 170 170   regex OB(\d+)(\d{3})(\d{3})
-   │     │   └── height 170 mm
-   │     └────── width  170 mm
-   └──────────── length: whatever digits remain → 1370 mm
-÷ 10 → 137 × 17 × 17 cm
+OB 1370 170 170  → 137 × 17 × 17 cm
+CS 170 170 1200  → 17 × 17 × 120 cm
+Pallet 1200 800 500 → 120 × 80 × 50 cm
+FP 120 170       → 12 × 17 × 5 cm   (FP usually gives two sizes; the third comes from the page, 5 cm by default)
 ```
 
-The last two numbers are always 3 digits, so everything before them is the length, however long. Other specs come from `KNOWN_SIZES` (`P7 Jiffy Bag` 48 × 36 × 3, `A4 Box` 31 × 22 × 18); unknown specs leave the size blank, with a warning.
+The numbers can be separated (`OB 170 x 170 x 1200`) or run together (`OB1701701200`). When they run together, `split_dimensions()` tries every way to cut the digits into sizes of 2–4 digits with no leading zero:
+
+1. Sizes are whole centimetres, so every millimetre value ends in 0: `1701701200` can only be `170 170 1200` (not `1701 701 200`).
+2. If that doesn't settle it, the old rule applies: the later sizes are 3 digits and the length takes the rest (`1375170170` → `1375 170 170` = 137.5 × 17 × 17).
+3. An FP code is read as two sizes unless only a three-way split gives whole centimetres (`FP12017050` → 12 × 17 × 5 from the code).
+
+Each code type's **weight** and **item type** are set on the page (OB, CS and FP 2 kg Carton; Pallet 200 kg Pallet), plus FP's **3rd size**.
+
+**Other specs** (A4 box, Half A4 box, A3 box, Half A3 box, SRA3, P7 / P5 / P1 jiffy bag…) are matched by name, ignoring capitals and punctuation, and use the length, width, height, weight and item type saved on the page. A spec found in a file that the page doesn't list is added to it with no values, marked **Needs size** (`note_unknown()`). Until it's filled in, its dimensions stay blank in the CSV and the preview warns with a link to the page. A spec with no weight uses 2 kg.
+
+**Weights in the preview.** Every carton in the consignment table has a **Weight** box, starting at its spec's weight from the page (a pallet at 200 kg). A changed value is outlined, kept in the hidden `carton_weights` field (`{pack key: kg}`) and sent with Update Previews and Generate (`carton_weight()`). An empty box goes back to the spec's weight; a value that isn't a number between 0 and 5,000 is outlined red and ignored. Under each carton the table also shows the size and item type that will go into the CSV.
+
+**Check a code** at the bottom of the page shows how any Packing Spec will be read.
 
 | Field | Rule |
 |---|---|
 | Total Cubic (m³) | L × W × H ÷ 1,000,000, rounded to 3 places: `137 × 17 × 17 = 39,593 cm³ → 0.04` |
-| Total Weight | 1 kg if the spec starts with `P1`, `P5` or `P7` (bags); 2 kg for everything else |
-| Item Type | `Pallet` if the spec starts with "pallet"; otherwise `Carton` |
+| Total Weight | the weight typed in the preview, else the spec's weight from the page |
+| Item Type | the spec's item type from the page |
 | No Items | always 1 (one row per pack) |
 
 ### 10.4 The CSV row
@@ -1393,7 +1406,8 @@ The portal's text is saved exactly as it comes — including lines Toll has shor
 - **Short-list** (`AddressBook.near()`): only entries with the same postcode (indexed). In a crowded postcode (more than 100 entries, e.g. a CBD), the name and street words of all its entries are read once per import (`cache`) and the 30 sharing the most words with the row are scored.
 - **Name score** (`name_score()`, 0–1): shared words (ignoring *Pty Ltd, The, Store, Shop…*), one name containing the other (a single shared word like *Rebel* is weak evidence), and character similarity for typos (only worked out when the cheap upper bound could pass).
 - **Address score** (`address_score()`, 0–1): the **numbers** must agree (shop/unit/street numbers like `S240`, `4-10`). If each side has a number the other lacks (`Shop 1040` vs `Shop 2210` at the same centre), the score is 0, because that's a different shop. The **street words** must overlap, with Street = St etc., and a word cut short by the portal still counts (`Jamie` ≈ `Jamieson`). The **suburb** must be the same.
-- **Accepted** (`best_match()`) only if name ≥ 45 %, address ≥ 55 %, the average ≥ 70 %, **and** it beats the runner-up by 10 points. Otherwise the row is new, never a guess. So another brand in the same centre, or the same brand at another shop number, is not matched.
+- **Same address, several receivers / Attn names:** entries at the same address aren't rivals (a verified address reaches all of them). Among them the best name wins, then the Attn closest to the row's (`_attn_score()`: `Sam` ≈ `Samantha`).
+- **Accepted** (`best_match()`) only if name ≥ 45 %, address ≥ 55 %, the average ≥ 70 %, **and** it beats the best candidate at another address by 10 points. Otherwise the row is new, never a guess. So another brand in the same centre, or the same brand at another shop number, is not matched.
 - **Speed**: under 1.5 ms a row at 50,000 entries, about 3–4 ms in a postcode with 2,000 entries, so a 1,000-row file takes 1–4 s.
 
 **3. Review.** Several CSV rows for one entry (one per carton) become one proposal. The rows you can act on (conflicting, to update, not matched) come first, then the **Apply ticked changes** / **Choose another file** buttons, then a separate **Already up to date** table, so you can apply without scrolling past rows that need nothing. Each proposal is:
@@ -1405,7 +1419,18 @@ The portal's text is saved exactly as it comes — including lines Toll has shor
 | already up to date | the portal agrees with the book; marked ✓ Verified automatically on apply | no tick box |
 | conflicting | rows for the same entry give different addresses (both shown, differences highlighted); fix the file and add it again | can't tick |
 
-**4. Apply** (`apply_review()`): every **already up to date** entry is marked verified (`mark_verified()`), no tick needed. Each ticked update goes through `AddressBook.apply_verified()`: the entry takes the portal's address and gets `verified_at` set, shown as **✓ Verified** on the Address Book page. Its learned Excel spellings stay linked, so the next file with the same spelling gets the verified address. If the verified address is one the book already holds under another entry, the two are **merged**: the existing entry keeps the address, takes over the use count and spellings, and the duplicate is removed. One bad row doesn't stop the others; problems are listed on the result screen. When nothing needs changing, the button reads **Mark as verified**.
+**What a verified address changes.** Only the address details: lines, suburb, state, postcode, country (`PLACE_FIELDS`) and ATL. The saved **receiver name and Attn are never changed**. They identify the entry, and one address is often saved for several receivers or Attn names. So a portal row reading `TEST OPTICAL PTY LTD`, Attn `Samantha` updates the entry `Test Optical`, Attn `Sam` without renaming it.
+
+**One copy per place.** For each matched entry, `build_review()` also looks for:
+
+| | What | Shown on the review | On apply |
+|---|---|---|---|
+| `merges` | older copies of the **same place** for the **same receiver + Attn** (`same_identity()`, address score ≥ 0.85), e.g. St Kilda saved once with state `D` and once with `VIC` | "Also replaces an older saved copy…", with the old copy struck through and its differences highlighted. The row is ticked even if the address itself was already right | `merge_into()`: its learned spellings and use count move to the verified entry, and the copy is deleted |
+| `siblings` | **other receivers / Attn names** saved at the old address (`at_address()`) | "The same address is also saved for …" | each gets the corrected address details through `apply_verified()`, keeping its own receiver and Attn |
+
+So after a portal file confirms an address, the book holds one copy of it per receiver + Attn, all with the verified details.
+
+**4. Apply** (`apply_review()`): every **already up to date** entry is marked verified (`mark_verified()`), no tick needed. Each ticked update goes through `AddressBook.apply_verified()` with the address details only: the entry takes the portal's address and gets `verified_at` set, shown as **✓ Verified** on the Address Book page. Then its `merges` are folded in and its `siblings` corrected, as above. Its learned Excel spellings stay linked, so the next file with the same spelling gets the verified address. If the verified address is one the book already holds under another entry, the two are **merged**: the existing entry keeps the address, takes over the use count and spellings, and the duplicate is removed. One bad row doesn't stop the others; problems are listed on the result screen. When nothing needs changing, the button reads **Mark as verified**.
 
 ---
 
@@ -1784,8 +1809,8 @@ sequenceDiagram
 | Change which words mark a name as a company | `courier_export.py` → `COMPANY_WORDS` |
 | Change when a street splits into Address Line 1 / Line 2 | `courier_export.py` → `LINE_LIMIT` |
 | Change how a messy address is read | `courier_export.py` → `_split_name_address()` and `resolve_destination()` |
-| Change sizes of non-OB packing specs | `courier_export.py` → `KNOWN_SIZES` |
-| Change carton weights or Item Type | `courier_export.py` → `LIGHT_SPEC_PREFIXES` / `package_weight()` / `item_type()` |
+| Change sizes, weights or Item Type of packing specs | the **📐 Packing Specs** page; defaults for a fresh install: `packing_specs.py` → `DEFAULT_FORMULA`, `DEFAULT_NAMED` |
+| Change how OB / CS / Pallet / FP codes are read | `packing_specs.py` → `parse_formula()`, `split_dimensions()` |
 | Add or rename a courier service code | `courier_export.py` → `SERVICE_CODES` |
 | Change the courier CSV columns | `courier_export.py` → `CSV_HEADER` and `write_courier_csv()` |
 | Change the packing-label checks (errors vs warnings) | `packing_label_generator.py` → `_check_pack_consistency()` and the end of `parse_packing_data()` |
