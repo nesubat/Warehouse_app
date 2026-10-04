@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import xlwings as xw
 import pandas as pd
 
@@ -279,18 +280,96 @@ def close_if_open_elsewhere(file_path):
     never reach the file the user is actually looking at.
     """
     target = os.path.normcase(os.path.normpath(file_path))
-    for running_app in list(xw.apps):
-        for book in list(running_app.books):
-            try:
-                book_path = os.path.normcase(os.path.normpath(book.fullname))
-            except Exception:
+    same = lambda path: os.path.normcase(os.path.normpath(path)) == target
+    name = os.path.basename(file_path)
+    closed = 0
+    seen_apps = set()
+    for window in _excel_windows():
+        try:
+            # A Protected View window ("Enable Editing" bar) knows only its source file
+            source = os.path.join(window.SourcePath, window.SourceName)
+        except Exception:
+            source = None
+        try:
+            if source is not None:
+                if same(source):
+                    print(f"[DEBUG] '{name}' is open in Protected View — closing it.")
+                    closed += _close_with_retry(window.Close, file_path)
                 continue
-            if book_path == target:
-                print(f"[DEBUG] '{os.path.basename(file_path)}' is already open in another Excel window — closing it first.")
-                try:
-                    book.api.Close(SaveChanges=False)
-                except Exception as e:
-                    print(f"[WARNING] Could not close the already-open copy of {file_path}: {e}")
+            excel = window.Application
+            if excel.Hwnd in seen_apps:
+                continue
+            seen_apps.add(excel.Hwnd)
+            books = excel.Workbooks
+            for i in range(books.Count, 0, -1):
+                book = books.Item(i)
+                if same(book.FullName):
+                    print(f"[DEBUG] '{name}' is already open in Excel — closing it without saving.")
+                    closed += _close_with_retry(lambda: book.Close(SaveChanges=False), file_path)
+            views = excel.ProtectedViewWindows
+            for i in range(views.Count, 0, -1):
+                view = views.Item(i)
+                if same(os.path.join(view.SourcePath, view.SourceName)):
+                    print(f"[DEBUG] '{name}' is open in Protected View — closing it.")
+                    closed += _close_with_retry(view.Close, file_path)
+        except Exception as e:
+            print(f"[WARNING] Skipped an Excel window while looking for {name}: {e}")
+    if closed:
+        _wait_until_released(file_path)
+    return closed
+
+
+def _excel_windows():
+    """COM objects for every Excel window on screen or hidden, across all Excel processes.
+
+    xlwings' own list (xw.apps) looks at one window per process and crashes when that window is
+    a Protected View window, so the windows are walked here directly and each is handled on its own."""
+    try:
+        import pythoncom, win32gui
+        from ctypes import byref, windll
+        from win32com.client import Dispatch
+        from xlwings import _xlwindows as xlw
+    except ImportError:
+        return
+    pythoncom.CoInitialize()
+    hwnd = windll.user32.GetTopWindow(None)
+    while hwnd:
+        try:
+            desk = win32gui.FindWindowEx(hwnd, 0, "XLDESK", None)
+            child = win32gui.FindWindowEx(desk, 0, "EXCEL7", None) if desk else 0
+            if child:
+                ptr = xlw.accessible_object_from_window(child)
+                yield Dispatch(xlw._PyCom_PyObjectFromIUnknown(ptr, byref(xlw._IDISPATCH_GUID), True))
+        except Exception:
+            pass
+        hwnd = windll.user32.GetWindow(hwnd, 2)  # next window
+
+
+def _close_with_retry(close, file_path, attempts=6):
+    """Excel refuses calls while it's busy (e.g. someone is typing in a cell), so try a few times."""
+    for attempt in range(attempts):
+        try:
+            close()
+            return 1
+        except Exception as e:
+            if attempt == attempts - 1:
+                print(f"[WARNING] Could not close the already-open copy of {file_path}: {e}")
+            time.sleep(0.5)
+    return 0
+
+
+def _wait_until_released(file_path, timeout=5.0):
+    """Windows can hold Excel's lock for a moment after the workbook closes."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            with open(file_path, 'r+b'):
+                return True
+        except PermissionError:
+            time.sleep(0.2)
+        except OSError:
+            return True  # file gone or not openable for another reason; nothing to wait for
+    return False
 
 
 def get_available_project_files(project_dir):

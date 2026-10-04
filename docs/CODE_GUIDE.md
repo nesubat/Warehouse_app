@@ -185,6 +185,8 @@ Runs **once, immediately, the moment the file is imported** (note it's called at
 
 The same startup sweep now also removes **abandoned uploads**: loose `.xlsx`/`.xls` files left in the `projects/` root, and project folders that hold nothing but spreadsheets, once they're more than 1 day old (see [4.4](#44-project--file-management-delete-delete_file-open_local-open_upload) for how they're normally cleaned up straight away).
 
+**Freeing port 5001 (`free_port`).** When `app.py` is started directly (`python app.py` or the `.exe`), it first stops **any process already listening on port 5001** — typically an earlier copy of the app left running in another terminal — so the new copy never fails with "address already in use". It reads Windows' `netstat -ano` (a listening socket is one whose foreign address ends in `:0`, which works whatever language Windows is in), stops each process found with `taskkill /T /F` (its child processes too), prints `Stopped python.exe (PID …), which was using port 5001.`, and waits until the port is free. In debug mode Flask runs `app.py` twice — a watcher that restarts the server whenever code changes, plus the server itself, which gets the environment variable `WERKZEUG_RUN_MAIN=true` — so the check runs only when that variable is **not** set; otherwise every code-change reload would stop the app's own watcher.
+
 There's no secret key and no `.env` file: the app never uses Flask's `session` or `flash()`. Error messages are passed straight into the page as template variables instead (e.g. `page_error` on the Packing Labels page).
 
 The rest of this section just creates the Flask `app` object and tells it where `templates/` and `static/` live, plus creates the `projects/` and `temp_pdf_engine/` folders if they don't exist yet.
@@ -491,15 +493,34 @@ The same shifting idea, but triggered by the *Sub-Group Engine* inserting a colu
 Small filesystem helpers. The first parses a filename like `"Stage - 2 - Final Book1.xlsx"` with a regex to produce `"Stage - 3 - Final Book1.xlsx"` — note that `subgroup_engine.py` actually contains its own (near-identical) inline version of this numbering logic and doesn't end up calling this particular function; it's kept here as a small reusable utility. The second just lists `.json` files in a project folder, sorted alphabetically (which conveniently also sorts them "Stage 1, Stage 2, Stage 3..." since that's how the filenames are constructed).
 
 ### `close_if_open_elsewhere(file_path)`
-Shared by both `matrix_engine.py`'s `/generate` (via `app.py`) and `subgroup_engine.py` — anywhere the app is about to grab exclusive `xlwings` control of a file, or move/rename it, that could collide with the user having the exact same file open for a look (e.g. via one of the "Open Excel File" buttons added to `matrix.html`/`pdf.html`).
-```python
-target = os.path.normcase(os.path.normpath(file_path))
-for running_app in list(xw.apps):
-    for book in list(running_app.books):
-        if os.path.normcase(os.path.normpath(book.fullname)) == target:
-            book.api.Close(SaveChanges=False)
+Called by **every Generate** — the Distribution Mapper's `/generate`, the Label Shuffler's Step 2, Packing Labels' Generate (first thing, before the sheet is even read) — plus `subgroup_engine.py` and the abandoned-upload cleanup: anywhere the app is about to read, grab exclusive `xlwings` control of, move or delete a file that the user might have open in Excel (e.g. via one of the "Open Excel File" buttons).
+
+It finds **every copy of that exact file open anywhere** and closes it **without saving**:
+
+```mermaid
+flowchart TD
+    A["_excel_windows(): walk every Excel window
+(visible or hidden, every Excel process)"] --> B{"Protected View window?
+(has SourcePath/SourceName)"}
+    B -- yes --> C{"Same file?"}
+    C -- yes --> D["window.Close()"]
+    B -- no --> E["window.Application → that Excel instance
+(each instance handled once)"]
+    E --> F["Every open workbook with the same full path
+→ Close(SaveChanges=False)"]
+    E --> G["Every Protected View copy of it
+→ Close()"]
+    D & F & G --> H["_wait_until_released(): wait (up to 5 s)
+until Windows lets go of the file"]
 ```
-It loops through every **currently running** Excel application instance (`xw.apps` — there can be more than one if the user has separate Excel windows open) and every workbook open in each one, comparing normalized full paths. If it finds the exact file already open somewhere, it force-closes *that specific copy* — discarding any unsaved edits in it — before the app's own automation proceeds. This is deliberately blunt: by the point this runs, the user has either already saved what they meant to keep, or is about to have the app write fresh content over the same file anyway, so a silently-discarded stray edit is a smaller risk than the alternative (Excel's file lock making the whole operation crash with a `PermissionError`, or silently handing the app a stale read-only view). If no Excel instance has the file open at all, the loops simply find nothing and the function is a no-op.
+
+- **Same file only.** Paths are compared in full (`os.path.normcase(os.path.normpath(...))`), so other workbooks — including one with the same *name* in a different folder — are left open.
+- **Protected View** (the yellow "Enable Editing" bar Excel shows for downloaded files) isn't a normal workbook, so it's handled separately. This matters for more than closing: xlwings' own list of Excel instances (`xw.apps`) looks at one window per Excel process and **crashes** if that window is a Protected View window. That's why `_excel_windows()` walks the windows itself (borrowing xlwings' `accessible_object_from_window` to reach each one's COM object) and skips anything it can't read instead of failing.
+- **Busy Excel.** Excel refuses COM calls while it's busy, e.g. while someone is typing in a cell. `_close_with_retry()` tries up to 6 times, 0.5 s apart.
+- **Lock release.** Windows can hold the file for a moment after Excel closes it, so `_wait_until_released()` waits until the file can be opened for writing before returning — the move or delete that follows then works first time.
+- Returns how many copies it closed; with nothing open it simply returns 0.
+
+This is deliberately blunt: by the time it runs, the user has either already saved what they meant to keep, or is about to have the app work on the saved file anyway, so a silently-discarded stray edit is a smaller risk than the alternative (Excel's file lock making the whole operation crash with a `PermissionError`, or the app reading a stale copy).
 
 ---
 
@@ -813,7 +834,7 @@ A pack group looks like this:
 {
   'pack_spec_name': 'OB1370170170', 'store_name': 'Provision Clayton', 'install': True,
   'address_1': 'Steven Priestley - Wilson Storage, 68 Ricketts Road, ...', 'suburb': '', 'state': '', 'postcode': '',
-  'excel_rows': [3], 'items': [{'job_no': 'J477161-54', 'qty': '2', 'thumbnail_bytes': ..., ...}],
+  'excel_rows': [3], 'items': [{'job_no': 'J477161-54', 'qty': '2', 'thumbnails': [...], ...}],
   'label_no': 1, 'label_total': 1,          # added by assign_label_numbers()
 }
 ```
@@ -882,7 +903,6 @@ Checks collect **all** problems before reporting, then raise one `PackCheckError
 | 12 | The same store has several installer packs with different addresses (could be different installers) |
 | 15 | Neighbouring packs have the same Packing Spec and store but aren't merged (possibly a missed merge) |
 | — | A row has no thumbnail image |
-| — | More than one image sits in a row's thumbnail area |
 
 **Always fine:** (1) the address merged across some rows of a pack and typed identically in the rest; (11) a store's installer pack having a different address from its store packs. Addresses are compared with `_address_key`, so capitals, spacing, punctuation and Street/St differences never trigger an error.
 
@@ -924,7 +944,7 @@ row    = walk the rows, adding heights, until the running total passes the centr
 
 The column is found the same way. Using the centre means a picture whose top edge pokes into the row above still belongs to its own row.
 
-**Matching a row to its picture.** Only the row's own thumbnail cell and the cells one column either side are searched — never the rows above or below (that used to let an image-less row borrow its neighbour's picture). No match → "No image" warning; two matches, or two pictures stacked in one cell → "More than one image" warning. Rows with no image simply print without one.
+**Matching a row to its pictures.** Images are taken from the row's **own thumbnail cell only** — never a neighbouring row or column. Every image in that cell is used, not just the first: each cell holds a list of images, in reading order (top to bottom, then left to right). A **merged thumbnail cell** counts as one cell: every row it covers gets all the images placed anywhere inside it, so a thumbnail merged over 5 rows gives all 5 boxes the same image(s), and one merged 3 + 2 gives rows 1–3 the first merge's images and rows 4–5 the second's. (Merged Job Number cells work the same way through `get_cell_info`: a job number merged over 5 rows makes 5 boxes with that job number, each with its own row's images.) A row with no image gets a "No image" warning and prints without one.
 
 ### 9.7 Drawing the labels: page and cell math
 
@@ -967,7 +987,7 @@ pages = 1 + ceil((items − 12) / 18)    otherwise        e.g. 32 items → 1 + 
 
 | Block | Style | Height (s = text scale, t = thumbnail scale) |
 |---|---|---|
-| Thumbnail | 35% of the box height, centred | 0.35 × box height × t |
+| Thumbnail | 35% of the box height. One image: centred, 70% of the box width. Several: side by side across the box, up to 3 per row, then more rows. Every image keeps its own proportions (`_fit_rect`). | 0.35 × box height × t |
 | Description | regular text, wrapped | lines × 9s × 1.2 |
 | Dimensions | bold text, wrapped | lines × 9s × 1.2 |
 | Material, Notes | regular text, value only (no header name) | lines × 9s × 1.2 |
@@ -1072,7 +1092,7 @@ head = "Sign Online"      text = "117 Firebrace St, HORSHAM, VIC, 3400"
 | Last token is… | Becomes |
 |---|---|
 | exactly 4 digits | postcode |
-| then one of `VIC NSW QLD SA WA TAS NT ACT` | state |
+| then an Australian state (`VIC NSW QLD SA WA TAS NT ACT`) or a New Zealand region code (`AUK BOP CAN CIT GIS HKB MBH MWT NSN NTL OTA STL TAS TKI WGN WKO WTC`, ISO 3166-2:NZ) | state |
 | then anything, if more than one token remains | suburb |
 
 A second pattern handles the case without commas between them: `Mount Waverley VIC 3149` as one token → `(suburb)? (STATE) (dddd)`. If the tail doesn't look like this (a normal store address), the Suburb/State/Postcode **columns** from Step 0 are used instead.
@@ -1111,7 +1131,9 @@ receiver = "Sign Online"   contact = "Adam"
 → line1 = "Shop T11-14 The Strand Melbourne"     line2 = "250 Elizabeth St"
 ```
 
-**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state is upper-cased; `\.0$` is removed from the postcode (Excel's `3149.0`); country is `AU`.
+**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state is upper-cased; `\.0$` is removed from the postcode (Excel's `3149.0`).
+
+**Country** comes from the Country column (or a trailing `New Zealand` / `Australia` in a one-cell address) when there is one; otherwise it's `NZ` for a New Zealand region code and `AU` for everything else. `TAS` is both Tasmania and the Tasman region, so on its own it means Australia — give such addresses a Country of New Zealand. Changing the state in the ✏️ edit form re-applies this rule.
 
 Final result:
 
@@ -1602,6 +1624,7 @@ sequenceDiagram
 | Change how packs are detected (merged cells vs single column) | `matrix_engine.py` → `generate_tab_map()` |
 | Change what makes File 1 / File 3 skip generation | `matrix_engine.py` → the `any_packs_selected` flag in `generate_all_outputs()` |
 | Change the sub-group item-number validation messages | `subgroup_engine.py` → `_map_item_columns()` and the two `raise SubgroupValidationError(...)` call sites |
+| Change the app's port, or what happens to whatever is already using it at startup | `app.py` → `PORT` and `free_port()` |
 | Change how long until old projects auto-delete | `app.py` → `clean_old_projects()` (`seven_days_in_seconds`) |
 | Change the duplicate-store-name check for the PDF shuffler | `app.py` → `/pdf` route, Step 1 (`dupes = store_col[store_col.duplicated()]...`) — note it no longer deletes anything on a duplicate; see [Section 4.6](#46-the-pdf-label-shuffler-route-pdf) |
 | Change the "Open Excel File" / "Recheck File" duplicate-fix flow | `app.py` → `/pdf` Step 1's `resume_filename` handling, and `templates/pdf.html`'s duplicate modal footer |
@@ -1614,7 +1637,7 @@ sequenceDiagram
 | Change the audit report's colors/text, or the Missing Stores column layout | `pdf_engine.py` → `build_audit_report()` and `group_missing_stores_by_code()` |
 | Change the near-duplicate store-name collision detection (only flips a divider red now, no audit-report text) | `pdf_engine.py` → `find_name_collisions()` and `analyze_matches()` |
 | Change the same-store-matched-more-than-once detection (standard layout only) | `pdf_engine.py` → `process_standard_layout()`'s `store_instance_count` / `is_continuation` logic |
-| Change when the app force-closes a file the user has open in Excel | `core_math.py` → `close_if_open_elsewhere()` (called from `app.py`'s `/generate` and `subgroup_engine.py`) |
+| Change when the app force-closes a file the user has open in Excel | `core_math.py` → `close_if_open_elsewhere()` (called at the start of every Generate in `app.py`, from `subgroup_engine.py`, and by the upload cleanup); how windows are found → `_excel_windows()` |
 | Change any button/card color or spacing | `static/styles.css` (grouped by component — see [Section 13](#13-staticstylescss--the-look--feel) table) |
 | Change what happens when a form is submitted (spinner, validation) | `static/script.js` (find the relevant numbered section — see [Section 12](#12-staticscriptjs--the-frontend-brain)) |
 | Add a brand-new page/route | Add a `@app.route(...)` function in `app.py`, a matching file in `templates/`, and link to it from `templates/index.html`'s nav bar |

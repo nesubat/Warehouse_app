@@ -6,6 +6,8 @@ import shutil
 import json
 import sys
 import stat
+import socket
+import subprocess
 import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
@@ -603,7 +605,10 @@ def pdf_engine():
         # STEP 2: Process the PDFs and Go to Success Screen
         elif step == '2':
             excel_path = request.form.get('excel_path')
-            project_name = request.form.get('project_name') 
+            project_name = request.form.get('project_name')
+            # Close any copy of the Signature Links file open in Excel, without saving
+            if excel_path and os.path.isfile(excel_path):
+                close_if_open_elsewhere(excel_path)
             temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
             os.makedirs(temp_dir, exist_ok=True)
             # ---> THE FIX: Define project_folder HERE, before any loops!
@@ -847,6 +852,10 @@ def create_packing_labels():
             return render_template('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
                                    page_error=f"Fill in {', '.join(missing)} before generating.")
 
+        # Close any copy of this file open in Excel (unsaved edits are discarded), so the saved
+        # file is what gets read and nothing stops it moving into the project folder
+        close_if_open_elsewhere(filepath)
+
         project_dir = None
         try:
             # 1. Parse Data
@@ -874,7 +883,6 @@ def create_packing_labels():
 
             # 4. Move the Excel File into the Project
             new_filepath = os.path.join(project_dir, filename)
-            close_if_open_elsewhere(filepath)
             shutil.move(filepath, new_filepath)
 
             # 5. Generate the PDF with Custom Layout
@@ -906,10 +914,57 @@ def create_packing_labels():
 
     return render_template('packing_labels.html')
 
+PORT = 5001
+
+
+def free_port(port):
+    """Stops every process listening on the port (e.g. an earlier copy of this app left running),
+    then waits until the port is free so this copy can start."""
+    try:
+        netstat = subprocess.run(['netstat', '-ano', '-p', 'TCP'], capture_output=True, text=True, timeout=15).stdout
+    except Exception as e:
+        print(f"[WARNING] Could not check port {port}: {e}")
+        return
+    pids = set()
+    for line in netstat.splitlines():
+        parts = line.split()
+        # Proto, Local Address, Foreign Address, State, PID. A listening socket has no foreign
+        # address (0.0.0.0:0 / [::]:0); checking that instead of the word LISTENING works in any language.
+        if (len(parts) >= 5 and parts[0] == 'TCP' and parts[1].rsplit(':', 1)[-1] == str(port)
+                and parts[2].rsplit(':', 1)[-1] == '0' and parts[-1].isdigit()):
+            pids.add(int(parts[-1]))
+    pids.discard(os.getpid())
+    pids.discard(0)
+
+    for pid in sorted(pids):
+        info = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                              capture_output=True, text=True).stdout.strip()
+        name = info.split('","')[0].strip('"') if info.startswith('"') else 'unknown program'
+        result = subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"Stopped {name} (PID {pid}), which was using port {port}.")
+        else:
+            print(f"[WARNING] Could not stop {name} (PID {pid}) on port {port}: {result.stderr.strip() or result.stdout.strip()}")
+
+    if pids:
+        for _ in range(50):  # Windows can take a moment to release the port
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(('127.0.0.1', port))
+                    return
+                except OSError:
+                    time.sleep(0.2)
+        print(f"[WARNING] Port {port} is still in use.")
+
+
 if __name__ == '__main__':
+    # In debug mode Flask runs this file twice: a watcher that restarts the server on code changes, and the
+    # server itself (WERKZEUG_RUN_MAIN=true). Only the first may clear the port, or the server would stop its own watcher.
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        free_port(PORT)
     if getattr(sys, 'frozen', False):
-        app.run(debug=False, port=5001)
+        app.run(debug=False, port=PORT)
     else:
-        app.run(debug=True, port=5001)
+        app.run(debug=True, port=PORT)
 
     

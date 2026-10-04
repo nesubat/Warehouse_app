@@ -13,7 +13,23 @@ from datetime import date
 
 from packing_label_generator import _address_key, _norm, assign_label_numbers
 
-STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
+AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
+# New Zealand regions (ISO 3166-2:NZ). TAS is also Tasmania, so on its own it means Australia.
+NZ_REGIONS = {'AUK', 'BOP', 'CAN', 'CIT', 'GIS', 'HKB', 'MBH', 'MWT', 'NSN', 'NTL', 'OTA', 'STL', 'TAS',
+              'TKI', 'WGN', 'WKO', 'WTC'}
+STATES = AU_STATES | NZ_REGIONS
+_STATE_PATTERN = "|".join(sorted(STATES))
+COUNTRIES = {'australia': 'AU', 'au': 'AU', 'aus': 'AU', 'new zealand': 'NZ', 'nz': 'NZ', 'nzl': 'NZ'}
+
+
+def _country(column_value, state):
+    """Country column if given, else NZ for a New Zealand-only region code, else AU."""
+    named = COUNTRIES.get(_norm(column_value))
+    if named:
+        return named
+    if _tidy(column_value):
+        return _tidy(column_value).upper()
+    return 'NZ' if state in NZ_REGIONS - AU_STATES else 'AU'
 COMPANY_WORDS = {
     'sign', 'signs', 'signage', 'storage', 'pty', 'ltd', 'group', 'services', 'service', 'print', 'printing',
     'display', 'displays', 'install', 'installs', 'installations', 'solutions', 'co', 'company', 'graphics',
@@ -160,10 +176,13 @@ def resolve_destination(group):
     head, text, attn, atl = _split_name_address(raw)
     tokens = [t.strip() for t in text.split(',') if t.strip()]
     suburb, state, postcode = col_suburb, col_state, col_postcode
+    country = _tidy(group.get('country'))
 
-    # Whole address typed into one cell: take suburb/state/postcode from its tail
+    # Whole address typed into one cell: take [country,] postcode, state and suburb from its tail
+    if tokens and _norm(tokens[-1]) in COUNTRIES and len(tokens) > 1:
+        country = tokens.pop()
     if tokens:
-        m = re.fullmatch(r'(?i)(?:(.*?)\s+)?(VIC|NSW|QLD|SA|WA|TAS|NT|ACT)\s+(\d{4})', tokens[-1])
+        m = re.fullmatch(rf'(?i)(?:(.*?)\s+)?({_STATE_PATTERN})\s+(\d{{4}})', tokens[-1])
         if m:
             tokens.pop()
             postcode, state = m.group(3), m.group(2)
@@ -190,10 +209,11 @@ def resolve_destination(group):
 
     line1, line2 = _split_lines(", ".join(tokens))
     postcode = re.sub(r'\.0$', '', str(postcode))  # 3149.0 from numeric cells
+    state = _tidy(state).upper()
     return {
         'receiver': receiver, 'contact': contact,
         'line1': line1, 'line2': line2,
-        'suburb': _tidy(suburb), 'state': _tidy(state).upper(), 'postcode': postcode, 'country': 'AU',
+        'suburb': _tidy(suburb), 'state': state, 'postcode': postcode, 'country': _country(country, state),
         'authority_to_leave': atl, 'raw': raw,
     }
 
@@ -246,6 +266,8 @@ def _apply_edit(dest, edit):
         return dest
     dest = {**dest, **{k: _tidy(edit[k]) for k in EDITABLE_FIELDS if k in edit}}
     dest['state'] = dest['state'].upper()
+    if 'state' in edit and dest['country'] in ('AU', 'NZ'):
+        dest['country'] = _country('', dest['state'])
     if 'authority_to_leave' in edit:
         dest['authority_to_leave'] = bool(edit['authority_to_leave'])
     return dest

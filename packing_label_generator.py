@@ -295,30 +295,31 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
     
-    image_map = extract_rich_value_images(excel_path, ws.title)
-    stacked_image_rows = set()
-    
+    # Every image in a cell is kept: {(row, col): [(reading-order key, image bytes), ...]}
+    image_map = {cell: [((0, 0, 0, 0), data)] for cell, data in extract_rich_value_images(excel_path, ws.title).items()}
+
     for image in getattr(ws, '_images', []):
         try:
-            r, c = None, None
+            r, c, order = None, None, (0, 0, 0, 0)
             if hasattr(image, 'anchor'):
                 if hasattr(image.anchor, '_from'):
                     r, c = _floating_image_cell(ws, image.anchor)
+                    f = image.anchor._from
+                    order = (f.row, f.rowOff, f.col, f.colOff)  # top-to-bottom, then left-to-right
                 elif isinstance(image.anchor, str):
                     c_letter, r_str = coordinate_from_string(image.anchor)
                     c = column_index_from_string(c_letter)
                     r = int(r_str)
-                    
-            if r and c and (r, c) in image_map:
-                stacked_image_rows.add(r)
-            elif r and c:
+
+            if r and c:
                 img_bytes = None
                 if hasattr(image, 'ref') and hasattr(image.ref, 'getvalue'):
                     img_bytes = image.ref.getvalue()
                 elif hasattr(image, '_data'):
                     img_bytes = image._data() if callable(image._data) else image._data
-                
-                if img_bytes: image_map[(r, c)] = io.BytesIO(img_bytes)
+
+                if img_bytes:
+                    image_map.setdefault((r, c), []).append((order, io.BytesIO(img_bytes)))
         except Exception:
             continue
 
@@ -377,7 +378,6 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     pack_rows = {}
     rows_missing_job = []
     rows_without_image = []
-    rows_ambiguous_image = []
     address_keys = [k for k in ADDRESS_FIELDS if k in cols]
     col_ref = {k: f"{get_column_letter(c)} · {str(ws.cell(row=header_row, column=c).value or '').strip().title()}" for k, c in cols.items()}
     addr_letters = [get_column_letter(cols[k]) for k in address_keys]
@@ -443,18 +443,19 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         elif dim_h: dimension = dim_h
         else: dimension = ""
 
-        thumbnail_bytes = None
+        thumbnails = []
         if 'thumbnail' in cols:
             tc = cols['thumbnail']
-            # Same row only: looking at neighbouring rows let an image-less row borrow the image above it
-            search_coords = [(current_row, tc), (current_row, tc - 1), (current_row, tc + 1)]
-            matches = [coord for coord in search_coords if coord in image_map]
-            if matches:
-                thumbnail_bytes = image_map[matches[0]]
-            else:
+            # Images come from the thumbnail cell itself, never a neighbouring cell. A merged
+            # thumbnail cell is one cell: every row it covers gets all the images inside it.
+            area = next((m for m in ws.merged_cells.ranges
+                         if m.min_row <= current_row <= m.max_row and m.min_col <= tc <= m.max_col), None)
+            cells = ([(r, c) for r in range(area.min_row, area.max_row + 1) for c in range(area.min_col, area.max_col + 1)]
+                     if area else [(current_row, tc)])
+            found = sorted((entry for cell in cells for entry in image_map.get(cell, [])), key=lambda e: e[0])
+            thumbnails = [data for _, data in found]
+            if not thumbnails:
                 rows_without_image.append(current_row)
-            if len(matches) > 1 or current_row in stacked_image_rows:
-                rows_ambiguous_image.append(current_row)
 
         item = {
             'job_no': get_val('job_no'),
@@ -464,7 +465,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
             'material': get_val('material'),
             'install': "INSTALLER" if install else "",
             'notes': get_val('notes'),
-            'thumbnail_bytes': thumbnail_bytes
+            'thumbnails': thumbnails
         }
 
         if not item['job_no']:
@@ -494,8 +495,6 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     warnings = []
     if rows_without_image:
         warnings.append(_issue(_row_ranges(rows_without_image), col_ref['thumbnail'], "No image"))
-    if rows_ambiguous_image:
-        warnings.append(_issue(_row_ranges(rows_ambiguous_image), col_ref['thumbnail'], "More than one image"))
 
     pack_errors, pack_warnings = _check_pack_consistency(pack_groups, pack_rows, bool(address_keys), col_ref)
     errors += pack_errors
@@ -555,6 +554,15 @@ def _draw_lines(page, lines, x0, x1, y, fontname, size, color):
     return y
 
 
+def _fit_rect(slot, data):
+    """The largest rect with the image's own proportions that fits inside slot, centred in it."""
+    pix = fitz.Pixmap(data.getvalue())
+    scale = min(slot.width / pix.width, slot.height / pix.height)
+    w, h = pix.width * scale, pix.height * scale
+    x0, y0 = slot.x0 + (slot.width - w) / 2, slot.y0 + (slot.height - h) / 2
+    return fitz.Rect(x0, y0, x0 + w, y0 + h)
+
+
 def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page=None):
     """Stacks the chosen blocks top-down; returns the total height used. Draws only when draw_page is given."""
     pad = 4
@@ -564,16 +572,28 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
     y = cell.y0 + pad
     for attr in attribute_order:
         if attr == 'thumbnail':
-            if not item.get('thumbnail_bytes'):
+            images = item.get('thumbnails') or []
+            if not images:
                 continue
             h = cell.height * 0.35 * thumb_scale
-            w = cell.width * 0.7
             if draw_page:
-                rect = fitz.Rect(cell.x0 + (cell.width - w) / 2, y, cell.x0 + (cell.width + w) / 2, y + h)
-                try:
-                    draw_page.insert_image(rect, stream=item['thumbnail_bytes'].getvalue())
-                except Exception:
-                    draw_page.insert_textbox(rect, "Image Error", fontsize=8, align=1)
+                # One image: centred, 70% of the box width. Several: share the full inner width,
+                # up to 3 side by side, then further rows; each keeps its own proportions.
+                n = len(images)
+                per_row = min(n, 3)
+                rows = math.ceil(n / per_row)
+                area_w = cell.width * 0.7 if n == 1 else inner_w
+                x0 = cell.x0 + (cell.width - area_w) / 2
+                slot_w = (area_w - (per_row - 1) * 2) / per_row
+                slot_h = (h - (rows - 1) * 2) / rows
+                for i, data in enumerate(images):
+                    sx = x0 + (i % per_row) * (slot_w + 2)
+                    sy = y + (i // per_row) * (slot_h + 2)
+                    rect = fitz.Rect(sx, sy, sx + slot_w, sy + slot_h)
+                    try:
+                        draw_page.insert_image(_fit_rect(rect, data), stream=data.getvalue())
+                    except Exception:
+                        draw_page.insert_textbox(rect, "Image Error", fontsize=8, align=1)
             y += h + gap
 
         elif attr == 'job_no':
