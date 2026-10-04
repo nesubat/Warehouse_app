@@ -1201,3 +1201,61 @@ button:hover {
 /* Service code dropdowns */
 .pl-page #service_code { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px; background: #fff; max-width: 320px; }
 .pl-page select.pl-service-input { width: 190px; padding: 5px 6px; background: #fff; }
+
+/* =========================================
+   ADDRESS BOOK (address_book.html) + suggestions in the consignment edit form
+========================================= */
+.pl-page .pl-tag-book { border-color: #3498db; color: #2471a3; margin-left: 4px; }
+.pl-page .pl-suggest { list-style: none; margin: 4px 0 8px; padding: 4px; border: 1px solid #bdc3c7; border-radius: 6px; background: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.08); max-width: 640px; }
+.pl-page .pl-suggest li { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; color: #2c3e50; }
+.pl-page .pl-suggest li span { color: #7f8c8d; font-size: 12px; }
+.pl-page .pl-suggest li:hover, .pl-page .pl-suggest li[aria-selected="true"] { background: #eaf2f8; }
+
+.ab-page { max-width: 1240px; }
+.ab-page h1 { text-align: left; }
+.ab-intro { color: #7f8c8d; max-width: 75ch; line-height: 1.55; margin: 0 0 18px; }
+.ab-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.ab-search { flex: 1 1 320px; min-width: 0; padding: 11px 14px; font-size: 15px; border: 1px solid #ccc; border-radius: 6px; }
+.ab-search:focus { outline: 2px solid #3498db; outline-offset: 1px; border-color: #3498db; }
+.ab-btn { padding: 10px 16px; font-size: 14px; font-weight: 600; border-radius: 5px; border: 1px solid #2c3e50; background: #2c3e50; color: #fff; cursor: pointer; white-space: nowrap; }
+.ab-btn:hover { background: #34495e; }
+.ab-btn:focus-visible { outline: 2px solid #3498db; outline-offset: 2px; }
+.ab-btn-plain { background: #fff; color: #2c3e50; border-color: #bdc3c7; }
+.ab-btn-plain:hover { background: #f4f6f7; }
+.ab-meta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 10px 0 8px; font-size: 13px; color: #7f8c8d; min-height: 18px; }
+#ab-status { color: #16a085; font-weight: 600; }
+#ab-status.ab-status-error { color: #c0392b; }
+/* No overflow on the wrapper: a scrolling/clipping box would stop the header below from sticking to
+   the page under the nav bar. Narrow windows drop the least-needed columns instead (see media query). */
+.ab-table-wrap { border: 1px solid #dcdde1; border-radius: 6px; background: #fff; }
+.ab-table th:first-child { border-top-left-radius: 6px; }
+.ab-table th:last-child { border-top-right-radius: 6px; }
+@media (max-width: 1100px) {
+    /* Country, Used and Last used */
+    .ab-table th:nth-child(7), .ab-table td:nth-child(7),
+    .ab-table th:nth-child(9), .ab-table td:nth-child(9),
+    .ab-table th:nth-child(10), .ab-table td:nth-child(10) { display: none; }
+}
+.ab-table { width: 100%; border-collapse: collapse; font-size: 13px; color: #2c3e50; }
+.ab-table th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #7f8c8d; padding: 8px 10px; border-bottom: 2px solid #ecf0f1; white-space: nowrap; background: #fafbfb; position: sticky; top: var(--nav-height, 56px); z-index: 2; box-shadow: 0 1px 0 #ecf0f1; }
+.ab-table td { padding: 8px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
+.ab-table .ab-num { text-align: right; font-variant-numeric: tabular-nums; }
+.ab-actions { white-space: nowrap; width: 1%; }
+.ab-icon-btn { border: 1px solid transparent; background: none; cursor: pointer; padding: 2px 4px; border-radius: 4px; font-size: 14px; line-height: 1; }
+.ab-icon-btn:hover, .ab-icon-btn:focus-visible { border-color: #bdc3c7; background: #f4f6f7; }
+.ab-detail { color: #7f8c8d; font-size: 12px; margin-top: 2px; }
+.ab-flash { animation: ab-flash 1.6s ease-out; }
+@keyframes ab-flash { from { background: #e8f8f5; } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .ab-flash { animation: none; } }
+.ab-edit-row td { background: #f8f9fa; padding: 14px 16px; }
+.ab-edit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 12px; align-items: end; }
+.ab-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #7f8c8d; }
+.ab-field input { padding: 8px 10px; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: normal; color: #2c3e50; border: 1px solid #ccc; border-radius: 4px; }
+.ab-check { display: flex; align-items: center; gap: 6px; font-size: 13px; padding-bottom: 8px; }
+.ab-edit-error { color: #c0392b; font-size: 13px; margin: 8px 0 0; min-height: 0; }
+.ab-edit-error:empty { display: none; }
+.ab-edit-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.ab-hint { color: #95a5a6; font-size: 12px; }
+.ab-more { display: block; margin: 14px auto 0; }
+.ab-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ab-page [hidden] { display: none !important; }

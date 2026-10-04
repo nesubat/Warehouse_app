@@ -16,7 +16,9 @@ from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, ge
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
+from address_book import AddressBook, AddressBookError
 from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
+                            source_destinations,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
 
@@ -33,6 +35,7 @@ else:
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
 SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
+ADDRESS_BOOK = AddressBook(os.path.join(BASE_DIR, 'data', 'address_book.db'))
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
@@ -720,13 +723,79 @@ def pdf_engine():
 
 
 
-def _consignment_edits(form):
-    """Edits made in the preview's consignment table, sent back as JSON in a hidden field."""
+def _edits_field(form):
     try:
-        edits = json.loads(form.get('consignment_edits') or '{}')
+        data = json.loads(form.get('consignment_edits') or '{}')
     except ValueError:
         return {}
-    return {str(k): v for k, v in edits.items() if isinstance(v, dict)} if isinstance(edits, dict) else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _consignment_edits(form):
+    """Edits made in the preview's consignment table, sent back as JSON in a hidden field."""
+    return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
+
+
+def _book_offered(form):
+    """Excel addresses the address book has already been asked about, so a Reset to Excel sticks."""
+    offered = _edits_field(form).get('__offered__', [])
+    return [str(x) for x in offered] if isinstance(offered, list) else []
+
+
+def _same_address(a, b):
+    return all(str(a.get(k) or '').strip() == str(b.get(k) or '').strip() for k in EDITABLE_FIELDS) \
+        and bool(a.get('authority_to_leave')) == bool(b.get('authority_to_leave'))
+
+
+def _apply_address_book(pack_groups, edits, offered):
+    """Fills in addresses the book has learned for these Excel spellings (each spelling is offered once)."""
+    sources = source_destinations(pack_groups)
+    new = [sid for sid in sources if sid not in edits and sid not in offered]
+    try:
+        learned = ADDRESS_BOOK.lookup_aliases(new)
+    except Exception as e:
+        print(f"[WARNING] Address book lookup failed: {e}")
+        learned = {}
+    for sid, entry in learned.items():
+        if not _same_address(entry, sources[sid]):
+            edits[sid] = {**{k: entry[k] for k in EDITABLE_FIELDS}, 'authority_to_leave': entry['authority_to_leave'], 'source': 'book'}
+    return edits, offered + new
+
+
+@app.route('/address-book')
+def address_book_page():
+    return render_template('address_book.html', total=ADDRESS_BOOK.count())
+
+
+@app.route('/api/addresses')
+def api_addresses():
+    rows, has_more = ADDRESS_BOOK.search(request.args.get('q', ''),
+                                         request.args.get('limit', 50, type=int),
+                                         request.args.get('offset', 0, type=int))
+    return {'rows': rows, 'has_more': has_more}
+
+
+@app.route('/api/addresses', methods=['POST'])
+def api_address_create():
+    try:
+        return ADDRESS_BOOK.create(request.get_json(silent=True) or {}), 201
+    except AddressBookError as e:
+        return {'error': str(e)}, 400
+
+
+@app.route('/api/addresses/<int:address_id>', methods=['PUT'])
+def api_address_update(address_id):
+    try:
+        return ADDRESS_BOOK.update(address_id, request.get_json(silent=True) or {})
+    except AddressBookError as e:
+        return {'error': str(e)}, 400
+
+
+@app.route('/api/addresses/<int:address_id>', methods=['DELETE'])
+def api_address_delete(address_id):
+    if ADDRESS_BOOK.delete(address_id):
+        return '', 204
+    return {'error': 'That address no longer exists.'}, 404
 
 
 @app.route('/packing-labels', methods=['GET', 'POST'])
@@ -813,7 +882,7 @@ def create_packing_labels():
             for tab in selected_tabs:
                 groups, _, _, _ = parse_packing_data(filepath, int(user_inputs[tab]['header_row']), sheet_name=tab)
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
-            edits = _consignment_edits(request.form)
+            edits, offered = _apply_address_book(combined, _consignment_edits(request.form), _book_offered(request.form))
             options = service_options(load_service_usage(SERVICE_USAGE_FILE))
             most_used = options[0]['code'] if options[0]['used'] else ''
             fixed = {**DEFAULT_FIXED, 'service_code': most_used,
@@ -832,7 +901,7 @@ def create_packing_labels():
                 'carton_count': len(cartons),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
-                'edits_json': json.dumps(edits),
+                'edits_json': json.dumps({**edits, '__offered__': offered}),
                 'service_options': options,
             }
 
@@ -897,6 +966,10 @@ def create_packing_labels():
             write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
                             output_pdf_name, csv_name, page_info)
             record_service_usage(SERVICE_USAGE_FILE, consignments)
+            try:
+                ADDRESS_BOOK.record_used([(c['destination'], [x['source_id'] for x in c['cartons']]) for c in consignments])
+            except Exception as e:
+                print(f"[WARNING] Could not update the address book: {e}")
 
             return render_template('packing_labels.html',
                                    generation_complete=True,

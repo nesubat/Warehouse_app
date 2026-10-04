@@ -23,3 +23,8 @@ dist/
 __pycache__/
 # Service code usage counts (runtime state)
 data/service_code_usage.json
+
+# Address book database (local data)
+data/address_book.db
+data/address_book.db-wal
+data/address_book.db-shm

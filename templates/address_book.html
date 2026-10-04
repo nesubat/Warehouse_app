@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Address Book</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    <div class="sticky-nav">
+        <a href="/#home">🏠 Home</a>
+        <span class="divider">|</span>
+        <a href="/#dashboard-section">📊 Dashboard</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('address_book_page') }}" class="active">📇 Address Book</a>
+    </div>
+
+    <div class="container ab-page" id="address-book" data-total="{{ total }}">
+        <h1>📇 Address Book</h1>
+        <p class="ab-intro">Every delivery address sent in a courier CSV is saved here automatically, together with how it was spelled in the Excel file. The next time that spelling turns up, Packing Labels fills in the saved address for you. Correct an entry here and every future job uses the correction.</p>
+
+        <div class="ab-toolbar">
+            <input type="search" id="ab-search" class="ab-search" placeholder="Search receiver, contact, street, suburb or postcode…" aria-label="Search the address book" autocomplete="off" autofocus>
+            <button type="button" id="ab-add" class="ab-btn">+ Add address</button>
+        </div>
+        <div class="ab-meta">
+            <span id="ab-summary"></span>
+            <span id="ab-status" role="status" aria-live="polite"></span>
+        </div>
+
+        <div class="ab-table-wrap">
+            <table class="ab-table">
+                <thead>
+                    <tr>
+                        <th><span class="ab-sr">Actions</span></th>
+                        <th>Receiver</th>
+                        <th>Address</th>
+                        <th>Suburb</th>
+                        <th>State</th>
+                        <th>Postcode</th>
+                        <th>Country</th>
+                        <th title="Authority to leave">ATL</th>
+                        <th class="ab-num">Used</th>
+                        <th>Last used</th>
+                    </tr>
+                </thead>
+                <tbody id="ab-rows"></tbody>
+            </table>
+        </div>
+        <button type="button" id="ab-more" class="ab-btn ab-btn-plain ab-more" hidden>Load more</button>
+    </div>
+
+    <template id="ab-edit-template">
+        <tr class="ab-edit-row">
+            <td colspan="10">
+                <div class="ab-edit-grid">
+                    <label class="ab-field"><span>Receiver Name</span><input type="text" data-field="receiver" maxlength="200"></label>
+                    <label class="ab-field"><span>Contact Name</span><input type="text" data-field="contact" maxlength="200"></label>
+                    <label class="ab-field"><span>Address Line 1</span><input type="text" data-field="line1" maxlength="200"></label>
+                    <label class="ab-field"><span>Address Line 2</span><input type="text" data-field="line2" maxlength="200"></label>
+                    <label class="ab-field"><span>Suburb</span><input type="text" data-field="suburb" maxlength="200"></label>
+                    <label class="ab-field"><span>State</span><input type="text" data-field="state" maxlength="10"></label>
+                    <label class="ab-field"><span>Postcode</span><input type="text" data-field="postcode" maxlength="10" inputmode="numeric"></label>
+                    <label class="ab-field"><span>Country</span><input type="text" data-field="country" maxlength="10"></label>
+                    <label class="ab-check"><input type="checkbox" data-field="authority_to_leave"> Authority to leave</label>
+                </div>
+                <p class="ab-edit-error" role="alert"></p>
+                <div class="ab-edit-actions">
+                    <button type="button" class="ab-btn ab-save">Save</button>
+                    <button type="button" class="ab-btn ab-btn-plain ab-cancel">Cancel</button>
+                    <span class="ab-hint">Enter saves · Esc cancels · Receiver, Address Line 1 and Postcode are required</span>
+                </div>
+            </td>
+        </tr>
+    </template>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

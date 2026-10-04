@@ -100,6 +100,7 @@ These words appear everywhere in the code. If you're ever confused reading a fun
 | **Label map** | `….labelmap.json`, saved next to the PDF: which PDF page each label is on, where it's headed, and which CSV row is its courier carton. For a future "stitch labels" tool. |
 | **Comparison key** | A simplified copy of a text value (lower-case, no punctuation, Street = St…) used to decide whether two spellings mean the same thing. |
 | **Service code** | The courier service for a consignment (e.g. `STEROAD · STARTRACK ROAD EXPRESS`), picked from a list. |
+| **Address book** | `data/address_book.db`: every clean delivery address the app has sent, plus the raw Excel spellings that led to each one (**aliases**), so they're filled in automatically next time. |
 
 **Libraries and general terms**
 
@@ -135,11 +136,12 @@ Only `app.py` talks to Flask/the browser. The engines never render a web page th
 ```
 Warehouse_app/
 ├── app.py, core_math.py, matrix_engine.py, pdf_engine.py, subgroup_engine.py
-├── packing_label_generator.py, courier_export.py
+├── packing_label_generator.py, courier_export.py, address_book.py
 ├── templates/            → the 5 HTML pages Flask renders
 ├── static/               → script.js + styles.css (shared by all pages)
 ├── docs/CODE_GUIDE.md    → this guide
 ├── data/                  → service_code_usage.json (how often each courier service was picked)
+│                             address_book.db (the address book; -wal/-shm files appear next to it while the app runs)
 ├── temp_pdf_engine/       → scratch space, wiped after every PDF run
 └── projects/              → EVERY job you've ever created lives here
     ├── MyCampaign_Job-12345_260804_1000/        ← Distribution Mapper project
@@ -406,7 +408,19 @@ record_service_usage()"]
 - **Preview** parses each selected tab. A `PackCheckError` becomes that tab's issue table ([Section 9.5](#95-checks-errors-and-warnings)); any other exception becomes a one-line issue. Only when every tab is clean are the tabs combined (keys prefixed with the tab name) and passed to `build_consignments()` for the consignment table ([Section 10.6](#106-the-consignment-table-service-codes-and-edits)).
 - **Generate** follows "validate first, write last": required fields, edits and service codes are all checked **before** a project folder is created. If anything fails after that, the Excel file is moved back and the folder removed ([Section 10.8](#108-order-of-work-in-generate)).
 - If a reload arrives after the upload was already discarded, the route answers "The uploaded file is no longer available. Scan it again." instead of crashing.
-- `_consignment_edits(form)` safely decodes the hidden `consignment_edits` JSON; anything that isn't a dictionary is ignored.
+- `_consignment_edits(form)` safely decodes the hidden `consignment_edits` JSON; anything that isn't a dictionary is ignored. The same field also carries `__offered__`, the Excel addresses the address book has already been asked about ([10.10](#1010-the-address-book)).
+
+### 4.8 The Address Book routes: `/address-book` and `/api/addresses`
+
+| Route | Does |
+|---|---|
+| `GET /address-book` | The Address Book page (rows are loaded by JavaScript) |
+| `GET /api/addresses?q=&limit=&offset=` | Search; empty `q` lists the most recently used. Returns `{rows, has_more}` |
+| `POST /api/addresses` | Add an address (JSON body) |
+| `PUT /api/addresses/<id>` | Edit an address |
+| `DELETE /api/addresses/<id>` | Delete an address and the spellings learned for it |
+
+Problems the user can fix (missing fields, a duplicate) come back as `400 {"error": "..."}` and are shown in the edit row.
 
 ---
 
@@ -1248,6 +1262,52 @@ Sorting by a tuple compares the first value, and only on a tie the second — so
 
 All courier checks (required fields, known service codes) run **before** the project folder is created or the Excel file moved. If anything still fails afterwards, the Excel file is moved back and the half-made folder removed, so Generate can simply be retried. (Same "validate first, write last" idea as the Sub-Group Engine in [Section 7.2](#72-the-three-stages).)
 
+### 10.10 The address book
+
+[address_book.py](../address_book.py) keeps every clean delivery address in a local SQLite file, `data/address_book.db`. SQLite needs no server, comes with Python, and only loads the rows a query asks for, so memory stays flat however big the book gets. Everything goes through the `AddressBook` class, so moving to a cloud database later means replacing this one file.
+
+**Tables**
+
+| Table | Holds |
+|---|---|
+| `addresses` | one row per receiver + address (unique on the address key + receiver key), with `use_count`, `last_used_at`, `created_at`, `updated_at` |
+| `addresses_fts` | an FTS5 full-text index over receiver, contact, address lines, suburb, state and postcode, kept in sync by triggers |
+| `aliases` | raw Excel spelling (the consignment's source id) → the address it was saved as. Deleting an address deletes its aliases |
+
+**How it learns**
+
+1. **Generate** calls `record_used()` with every consignment's final address (after any ✏️ edits) and the source ids of all its packs, in one transaction. A new address is added; a known one gets its details refreshed and `use_count` + 1; every raw spelling is pointed at it.
+2. **Preview** calls `_apply_address_book()`: for each Excel address not yet asked about, `lookup_aliases()` finds what the book learned for that spelling. If it differs from what was read from Excel, it's applied as an edit marked `'source': 'book'`, and the row shows a blue **Address book** tag.
+3. Each spelling is offered **once per scan** (listed in `__offered__`), so **Reset to Excel** sticks. Saving your own edit replaces the book's.
+
+So correcting an address once — in the ✏️ form before Generate, or on the Address Book page — fixes it for every future file that spells it the same way.
+
+**Searching**
+
+- **Search-as-you-type:** finished words must match whole words; the last word, still being typed, matches as a prefix (`49 church st` → `"49" AND "church" AND "st"*`), so `49` doesn't also find `499`. A trailing space makes the last word whole too.
+- **Ranking:** FTS5's `bm25` relevance with column weights — receiver 4, address line 1 3, suburb and postcode 2, the rest lower — then most used first.
+- **One character** matches a large share of the book, and ranking all of it cost ~90 ms at 250k, so a one-character search returns the first matches unranked (~2 ms); the next keystroke gets full ranking.
+- Results come back one page at a time (`LIMIT 51` to know whether there's more), never with a full count, so typing stays fast at any size.
+
+**Concurrency.** Flask serves requests on several threads, so each thread gets its own connection (`threading.local`). The database runs in WAL mode, which lets searches read while a Generate is writing.
+
+**Measured** (synthetic addresses, this PC):
+
+| | 50,000 | 250,000 |
+|---|---|---|
+| File size | 35 MB | 156 MB |
+| Search (in Python), p50 | 0.2–1 ms | 0.5–11 ms |
+| Search through HTTP (request → JSON), p50 | — | 5–18 ms |
+| One Generate: look up 350 spellings / save 40 addresses | 5 ms / 6 ms | 8 ms / 6 ms |
+| Extra memory for the book | ~20 MB | ~40 MB |
+
+On the page, the first 50 rows appear ~20 ms after load, "Load more" and saving take ~15 ms, and the page never holds more than the pages loaded (≈1,400 elements, < 1 MB of JavaScript memory at 100 rows). Eight searches at once while a Generate saved ran with no errors.
+
+**The pages**
+
+- **Address Book page** ([address_book.html](../templates/address_book.html), `script.js` section 12): search box (waits 120 ms after the last keystroke and cancels stale requests), 50 rows at a time with **Load more**, ✏️ edit and 🗑️ delete per row, **+ Add address**. Edits happen in a row under the entry (Enter saves, Esc cancels); errors appear in that row. The column headings stay pinned just under the nav bar while you scroll: script.js measures the nav's height into `--nav-height`, and the table's wrapper deliberately has no `overflow` (a scrolling or clipping box would pin the headings to the box instead of the page). Below 1100 px wide, Country, Used and Last used are hidden so the table still fits.
+- **Consignment ✏️ form:** typing 2+ characters in Receiver Name or Address Line 1 shows up to 6 matches from the book (`attachAddressSuggestions`); ↑/↓ and Enter, or a click, fills the whole form.
+
 ### 10.9 The label map JSON
 
 `<reference> - <project>.labelmap.json`, saved in the project folder for the future **Stitch Labels** tool and never shown in the app:
@@ -1657,3 +1717,6 @@ sequenceDiagram
 | Change how blocks look inside a packing-label box | `packing_label_generator.py` → `TEXT_STYLES` and `_layout_cell()` (and the matching preview in `packing_labels.html`) |
 | Change how old abandoned uploads must be before cleanup | `app.py` → `clean_old_projects()` (`24 * 60 * 60`) |
 | Change what counts as an abandoned Label Shuffler folder | `app.py` → `is_abandoned_project()` |
+| Change how the address book searches or ranks | `address_book.py` → `_match_query()`, `RANK`, `search()` |
+| Change what the address book saves after Generate, or when it fills addresses in | `address_book.py` → `record_used()`; `app.py` → `_apply_address_book()` |
+| Move the address book somewhere else (e.g. a cloud database) | replace `address_book.py`, keeping the `AddressBook` methods; the file path is set in `app.py` (`ADDRESS_BOOK`) |

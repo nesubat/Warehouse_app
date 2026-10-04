@@ -273,6 +273,16 @@ def _apply_edit(dest, edit):
     return dest
 
 
+def source_destinations(pack_groups):
+    """{consignment id: address as read from Excel} for every pack with a usable address (for the address book)."""
+    found = {}
+    for g in pack_groups.values():
+        dest = resolve_destination(g)
+        if dest and dest['postcode']:
+            found.setdefault(_address_key(one_line(dest)), dest)
+    return found
+
+
 def build_consignments(pack_groups, edits=None, default_service=''):
     """Groups packs by delivery address. Returns (consignments, cartons, warnings).
 
@@ -302,12 +312,13 @@ def build_consignments(pack_groups, edits=None, default_service=''):
             consignments[addr_key] = {
                 'number': len(consignments) + 1, 'id': source_id,
                 'destination': final, 'original': dest, 'edited': final is not dest,
+                'edit_source': edit.get('source', '') if final is not dest else '',
                 'service_code': _tidy(edit.get('service_code')),
                 'cartons': [],
             }
         con = consignments[addr_key]
         carton = {
-            'pack_key': key, 'store': store, 'packing_spec': _tidy(g['pack_spec_name']),
+            'pack_key': key, 'source_id': source_id, 'store': store, 'packing_spec': _tidy(g['pack_spec_name']),
             'label_no': g['label_no'], 'label_total': g['label_total'],
             'item_reference': f"Label {g['label_no']} - {store}",
             'install': bool(g.get('install')), 'excel_rows': rows,

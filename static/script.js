@@ -667,6 +667,7 @@ document.addEventListener('DOMContentLoaded', function () {
             tidy(id);
             show(row, changed ? d : original);
             row.querySelector('.pl-tag-edited').hidden = !changed;
+            row.querySelector('.pl-tag-book').hidden = true;
             close();
             applyFilters();
         });
@@ -674,6 +675,9 @@ document.addEventListener('DOMContentLoaded', function () {
         editRow.querySelector('.pl-edit-reset').addEventListener('click', () => {
             fill(editRow, original);
         });
+
+        // Typing a receiver or street offers matches from the address book; picking one fills the form
+        attachAddressSuggestions(editRow, (entry) => fill(editRow, entry));
 
         // Enter inside the edit form saves the row instead of submitting the whole page
         editRow.addEventListener('keydown', (e) => {
@@ -725,3 +729,232 @@ document.addEventListener('DOMContentLoaded', function () {
     applyFilters();
     save();
 });
+
+// =========================================
+// 12. ADDRESS BOOK
+// =========================================
+// Type-ahead suggestions from the address book, used in the consignment edit form. Waits for a short
+// pause in typing, cancels a request that a newer keystroke made stale, and shows at most 6 matches.
+function attachAddressSuggestions(container, onPick) {
+    const list = container.querySelector('.pl-suggest');
+    if (!list) return;
+    let timer = null, controller = null, items = [], active = -1;
+
+    const hide = () => { list.hidden = true; list.replaceChildren(); items = []; active = -1; };
+    const highlight = (i) => {
+        active = i;
+        [...list.children].forEach((li, n) => li.setAttribute('aria-selected', String(n === i)));
+    };
+    const pick = (entry) => { onPick(entry); hide(); };
+    const render = (rows) => {
+        list.replaceChildren();
+        items = rows;
+        active = -1;
+        if (!rows.length) { hide(); return; }
+        rows.forEach((entry) => {
+            const li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            const name = document.createElement('strong');
+            name.textContent = entry.receiver + (entry.contact ? ` · Attn ${entry.contact}` : '');
+            const where = document.createElement('span');
+            where.textContent = entry.address;
+            li.append(name, where);
+            li.addEventListener('mousedown', (e) => { e.preventDefault(); pick(entry); });
+            list.append(li);
+        });
+        list.hidden = false;
+    };
+
+    container.querySelectorAll('[data-field="receiver"], [data-field="line1"]').forEach((input) => {
+        input.setAttribute('autocomplete', 'off');
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            const q = input.value.trim();
+            if (q.length < 2) { hide(); return; }
+            timer = setTimeout(async () => {
+                if (controller) controller.abort();
+                controller = new AbortController();
+                try {
+                    const res = await fetch(`/api/addresses?limit=6&q=${encodeURIComponent(q)}`, { signal: controller.signal });
+                    render((await res.json()).rows || []);
+                } catch (err) {
+                    if (err.name !== 'AbortError') hide();
+                }
+            }, 150);
+        });
+        input.addEventListener('keydown', (e) => {
+            if (list.hidden) return;
+            if (e.key === 'ArrowDown') { e.preventDefault(); highlight(Math.min(active + 1, items.length - 1)); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(Math.max(active - 1, 0)); }
+            else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopPropagation(); pick(items[active]); }
+            else if (e.key === 'Escape') { e.stopPropagation(); hide(); }
+        });
+        input.addEventListener('blur', () => setTimeout(hide, 150));
+    });
+}
+
+// The Address Book page: instant search, add, edit and delete. Only one page of results (50) is ever
+// in the page, so it stays quick with 50k+ addresses; "Load more" fetches the next page.
+document.addEventListener('DOMContentLoaded', function () {
+    const page = document.getElementById('address-book');
+    if (!page) return;
+
+    const search = document.getElementById('ab-search');
+    const body = document.getElementById('ab-rows');
+    const more = document.getElementById('ab-more');
+    const status = document.getElementById('ab-status');
+    const summary = document.getElementById('ab-summary');
+    const template = document.getElementById('ab-edit-template');
+    const PAGE = 50;
+    let query = '', offset = 0, timer = null, controller = null, total = Number(page.dataset.total || 0);
+
+    // The table header sticks just under the nav bar; follow the nav's real height if it changes
+    const nav = document.querySelector('.sticky-nav');
+    if (nav) {
+        const setNavHeight = () => document.documentElement.style.setProperty('--nav-height', `${nav.offsetHeight}px`);
+        setNavHeight();
+        new ResizeObserver(setNavHeight).observe(nav);
+    }
+
+    const say = (text, isError) => {
+        status.textContent = text;
+        status.classList.toggle('ab-status-error', !!isError);
+    };
+    const when = (ts) => ts ? new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+    const cell = (text, cls) => { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; return td; };
+
+    function rowFor(entry) {
+        const tr = document.createElement('tr');
+        tr.className = 'ab-row';
+        tr.dataset.id = entry.id;
+        const actions = document.createElement('td');
+        actions.className = 'ab-actions';
+        const edit = document.createElement('button');
+        edit.type = 'button'; edit.className = 'ab-icon-btn'; edit.textContent = '✏️';
+        edit.title = 'Edit'; edit.setAttribute('aria-label', `Edit ${entry.receiver}`);
+        edit.addEventListener('click', () => openEditor(tr, entry));
+        const del = document.createElement('button');
+        del.type = 'button'; del.className = 'ab-icon-btn'; del.textContent = '🗑️';
+        del.title = 'Delete'; del.setAttribute('aria-label', `Delete ${entry.receiver}`);
+        del.addEventListener('click', () => remove(tr, entry));
+        actions.append(edit, del);
+        const who = cell(entry.receiver);
+        if (entry.contact) { const c = document.createElement('div'); c.className = 'ab-detail'; c.textContent = `Attn ${entry.contact}`; who.append(c); }
+        tr.append(actions, who, cell([entry.line1, entry.line2].filter(Boolean).join(', ')), cell(entry.suburb),
+                  cell(entry.state), cell(entry.postcode), cell(entry.country), cell(entry.authority_to_leave ? 'Y' : ''),
+                  cell(entry.use_count, 'ab-num'), cell(when(entry.last_used_at)));
+        return tr;
+    }
+
+    async function load(reset) {
+        if (reset) offset = 0;
+        if (controller) controller.abort();
+        controller = new AbortController();
+        try {
+            const res = await fetch(`/api/addresses?limit=${PAGE}&offset=${offset}&q=${encodeURIComponent(query)}`, { signal: controller.signal });
+            const data = await res.json();
+            if (reset) body.replaceChildren();
+            data.rows.forEach((entry) => body.append(rowFor(entry)));
+            offset += data.rows.length;
+            more.hidden = !data.has_more;
+            const shown = body.querySelectorAll('.ab-row').length;
+            summary.textContent = query
+                ? (shown ? `${shown}${data.has_more ? '+' : ''} matching` : 'No matches')
+                : (total ? `${total.toLocaleString()} addresses · most recently used first` : 'No addresses yet. They are added automatically each time you generate packing labels, or use "Add address".');
+        } catch (err) {
+            if (err.name !== 'AbortError') say('Could not load addresses. Is the app still running?', true);
+        }
+    }
+
+    function editorFor(entry) {
+        const tr = template.content.firstElementChild.cloneNode(true);
+        tr.querySelectorAll('[data-field]').forEach((input) => {
+            const v = entry[input.dataset.field];
+            if (input.type === 'checkbox') input.checked = !!v; else input.value = v == null ? '' : v;
+        });
+        return tr;
+    }
+
+    function readEditor(tr) {
+        const d = {};
+        tr.querySelectorAll('[data-field]').forEach((input) => {
+            d[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.value.trim();
+        });
+        return d;
+    }
+
+    function wireEditor(tr, onSave, onCancel) {
+        const err = tr.querySelector('.ab-edit-error');
+        const save = async () => {
+            const problem = await onSave(readEditor(tr));
+            if (problem) err.textContent = problem;
+        };
+        tr.querySelector('.ab-save').addEventListener('click', save);
+        tr.querySelector('.ab-cancel').addEventListener('click', onCancel);
+        tr.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') onCancel();
+        });
+        tr.querySelector('input').focus();
+    }
+
+    async function send(url, method, data) {
+        const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined });
+        const json = res.status === 204 ? {} : await res.json();
+        return res.ok ? { ok: true, entry: json } : { ok: false, error: json.error || 'Something went wrong.' };
+    }
+
+    function openEditor(tr, entry) {
+        if (tr.nextElementSibling && tr.nextElementSibling.classList.contains('ab-edit-row')) return;
+        const editor = editorFor(entry);
+        tr.after(editor);
+        wireEditor(editor, async (data) => {
+            const r = await send(`/api/addresses/${entry.id}`, 'PUT', data);
+            if (!r.ok) return r.error;
+            const fresh = rowFor(r.entry);
+            fresh.classList.add('ab-flash');
+            tr.replaceWith(fresh);
+            editor.remove();
+            say(`Saved ${r.entry.receiver}.`);
+        }, () => editor.remove());
+    }
+
+    async function remove(tr, entry) {
+        if (!confirm(`Delete ${entry.receiver}, ${entry.address} from the address book?`)) return;
+        const r = await send(`/api/addresses/${entry.id}`, 'DELETE');
+        if (!r.ok) { say(r.error, true); return; }
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains('ab-edit-row')) next.remove();
+        tr.remove();
+        total -= 1;
+        say(`Deleted ${entry.receiver}.`);
+    }
+
+    document.getElementById('ab-add').addEventListener('click', () => {
+        if (body.querySelector('.ab-edit-row.ab-new')) return;
+        const editor = editorFor({ country: 'AU' });
+        editor.classList.add('ab-new');
+        body.prepend(editor);
+        wireEditor(editor, async (data) => {
+            const r = await send('/api/addresses', 'POST', data);
+            if (!r.ok) return r.error;
+            const fresh = rowFor(r.entry);
+            fresh.classList.add('ab-flash');
+            editor.replaceWith(fresh);
+            total += 1;
+            say(`Added ${r.entry.receiver}.`);
+        }, () => editor.remove());
+    });
+
+    search.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { query = search.value.trim(); load(true); }, 120);
+    });
+    search.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') e.preventDefault();
+        if (e.key === 'Escape') { search.value = ''; query = ''; load(true); }
+    });
+    more.addEventListener('click', () => load(false));
+    load(true);
+});
+

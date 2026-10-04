@@ -28,6 +28,8 @@
         <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
         <span class="divider">|</span>
         <a href="/packing-labels" class="active">📦 Packing Labels</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
     </div>
 
     <!-- Loading Overlay -->
@@ -316,7 +318,8 @@
                                 <span class="pl-show-receiver">{{ d.receiver }}</span>
                                 <div class="issue-detail pl-show-contact">{% if d.contact %}Attn {{ d.contact }}{% endif %}</div>
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
-                                <span class="pl-courier-tag pl-tag-edited"{% if not c.edited %} hidden{% endif %}>Edited</span>
+                                <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
+                                <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
                             </td>
                             <td class="pl-show-address">{{ c.address }}</td>
                             <td>
@@ -342,6 +345,7 @@
                                         <input type="checkbox" id="edit-{{ c.number }}-atl" data-field="authority_to_leave"{% if d.authority_to_leave %} checked{% endif %}> Authority to leave
                                     </label>
                                 </div>
+                                <ul class="pl-suggest" role="listbox" aria-label="Matching addresses from the address book" hidden></ul>
                                 <div class="issue-detail">From Excel: {{ c.source_text }}</div>
                                 <div class="pl-edit-actions">
                                     <button type="button" class="pl-btn-small pl-edit-save">Save</button>

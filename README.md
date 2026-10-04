@@ -32,6 +32,7 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **Messy Addresses Made Standard:** Installer addresses typed into one cell (e.g. `Steven Priestley - Wilson Storage, 68 Ricketts Road, Mount Waverley, Vic, 3149 - ATL`) are split into receiver, contact, address lines, suburb, state, postcode and Authority To Leave.
 *   **Courier Consignment CSV:** Packs going to the same address — even for different stores — are combined into one consignment. Carton size, cubic, weight and item type come from the Packing Spec (`OB1370170170` → 137 × 17 × 17 cm). Ready for import into the courier portal.
 *   **Review Before Generating:** A consignment table lets you fix any address (✏️), pick a courier service per consignment from a dropdown (most-used first), and filter by state to apply a service to many at once.
+*   **Address Book:** Every address sent to the courier is saved automatically, along with how it was spelled in Excel, so the next file with the same spelling gets the clean (or corrected) address filled in. Search, add, edit and delete on the 📇 Address Book page; suggestions appear as you type in the consignment edit form. Stored locally in `data/address_book.db` and built to stay instant at 50,000+ addresses.
 *   **Label Map:** A hidden JSON file records which PDF page each label is on and where it's headed, ready for a future "Stitch Labels" step that will place each courier label onto its packing label.
 
 ### 5. 🗂️ Project Dashboard & File Management
@@ -49,6 +50,7 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **Data Processing:** Pandas, OpenPyxl
 *   **Excel Automation:** xlwings (Runs Excel invisibly in the background for advanced formatting)
 *   **PDF:** PyMuPDF (reading and re-ordering label PDFs, drawing packing labels)
+*   **Address Book:** SQLite with FTS5 full-text search (built into Python, no server)
 *   **Frontend:** HTML5, CSS3, Vanilla JavaScript, Jinja2 Templating
 
 ---
