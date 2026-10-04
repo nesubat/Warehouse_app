@@ -15,8 +15,10 @@ from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
-from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError
+from packing_label_generator import parse_packing_data, generate_packing_labels, PackCheckError, _norm
 from address_book import AddressBook, AddressBookError
+from address_import import build_review, apply_review, all_label_maps, ImportProblem
+from address_match import suggestions as closest_addresses
 from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
                             source_destinations,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
@@ -762,6 +764,78 @@ def _apply_address_book(pack_groups, edits, offered):
     return edits, offered + new
 
 
+SUGGESTION_FIELDS = EDITABLE_FIELDS + ('authority_to_leave',)
+
+
+def _check_against_book(consignments, edits):
+    """Sets each consignment's 'book' status for the preview:
+      book       filled in from the address book (a spelling it learned)
+      matched    the book holds this address, under this receiver or another one (an address can have several
+                 receivers / Attn names). A receiver or Attn new to it gets 'book_note': it's added on Generate.
+      checked    not in the book, but the user has reviewed it in the edit form
+      unverified not in the book: listed first, with 'suggestions' (closest saved addresses, best first)"""
+    cache = {}
+    for c in consignments:
+        d = c['destination']
+        c['book'], c['book_note'], c['suggestions'] = 'unverified', '', []
+        if c['edit_source'] == 'book':
+            c['book'] = 'book'
+            continue
+        try:
+            here = ADDRESS_BOOK.at_address(d)
+            if here:
+                c['book'] = 'matched'
+                same_receiver = [e for e in here if _norm(e['receiver']) == _norm(d['receiver'])]
+                if not same_receiver:
+                    others = list(dict.fromkeys(e['receiver'] for e in here))
+                    c['book_note'] = (f"Address saved for {', '.join(others[:3])}{' …' if len(others) > 3 else ''}. "
+                                      f"This receiver will be added to the address book on Generate.")
+                elif d['contact'] and not any(_norm(e['contact']) == _norm(d['contact']) for e in same_receiver):
+                    saved = [e['contact'] for e in same_receiver if e['contact']]
+                    c['book_note'] = (f"New Attn for this address{' (saved: ' + ', '.join(saved[:3]) + ')' if saved else ''}. "
+                                      f"It will be added to the address book on Generate.")
+            elif c['edited'] or edits.get(c['id'], {}).get('checked'):
+                c['book'] = 'checked'
+            else:
+                c['suggestions'] = [{**s, 'json': json.dumps({k: s[k] for k in SUGGESTION_FIELDS})}
+                                    for s in closest_addresses(d, ADDRESS_BOOK.candidates(d, cache))]
+        except Exception as e:
+            print(f"[WARNING] Address book check failed: {e}")
+            c['book'] = 'checked'  # don't flag every row because the book couldn't be read
+    # Unverified first; otherwise keep consignment order
+    return sorted(consignments, key=lambda c: c['book'] != 'unverified')
+
+
+@app.route('/address-book/update', methods=['GET', 'POST'])
+def bulk_update_addresses():
+    """Update the address book in bulk from the courier portal's CSV of verified addresses.
+    Rows are matched against every project's label map and the address book (see address_import.py)."""
+    if request.method == 'POST' and 'apply' in request.form:
+        try:
+            proposals = json.loads(request.form.get('proposals') or '[]')
+        except ValueError:
+            proposals = []
+        applied, confirmed, added, problems = apply_review(proposals, set(request.form.getlist('choose')), ADDRESS_BOOK)
+        return render_template('address_verify.html', done=True, applied=applied, confirmed=confirmed, added=added, problems=problems)
+
+    if request.method == 'POST':
+        upload = request.files.get('file')
+        if not upload or not upload.filename:
+            return render_template('address_verify.html', error="Choose the file of verified addresses (CSV or Excel).")
+        if not upload.filename.lower().endswith(('.csv', '.xlsx', '.xlsm', '.xls')):
+            return render_template('address_verify.html', error="Use a CSV or Excel file (.csv, .xlsx or .xls).")
+        try:
+            proposals, columns = build_review(upload.read(), upload.filename, all_label_maps(PROJECTS_FOLDER), ADDRESS_BOOK)
+        except ImportProblem as e:
+            return render_template('address_verify.html', error=str(e))
+        if not proposals:
+            return render_template('address_verify.html', error="No addresses found in that file.")
+        return render_template('address_verify.html', proposals=proposals, proposals_json=json.dumps(proposals),
+                               filename=upload.filename, columns=sorted(columns))
+
+    return render_template('address_verify.html')
+
+
 @app.route('/address-book')
 def address_book_page():
     return render_template('address_book.html', total=ADDRESS_BOOK.count())
@@ -888,6 +962,7 @@ def create_packing_labels():
             fixed = {**DEFAULT_FIXED, 'service_code': most_used,
                      **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
             consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'])
+            consignments = _check_against_book(consignments, edits)
             series, all_series = detect_series(combined)
             if len(all_series) > 1:
                 courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
@@ -899,6 +974,7 @@ def create_packing_labels():
                                  for c in consignments],
                 'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
                 'carton_count': len(cartons),
+                'unverified': sum(c['book'] == 'unverified' for c in consignments),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
                 'edits_json': json.dumps({**edits, '__offered__': offered}),
@@ -912,7 +988,7 @@ def create_packing_labels():
         combined_pack_groups = {}
         
         # Grab the sorted layout order from the frontend, and filter out 'empty' slots
-        attribute_order_str = request.form.get('attribute_order', 'thumbnail,desc,dimension,job_no,qty')
+        attribute_order_str = request.form.get('attribute_order', 'thumbnail,desc,dimension,job_no,barcode,qty')
         attribute_order = [attr for attr in attribute_order_str.split(',') if attr and attr != 'empty']
         
         missing = [label for key, label in (('who_pays', 'Who Pays'), ('service_code', 'Service Code'), ('reference', 'Consignment Reference'))

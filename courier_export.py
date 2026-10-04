@@ -11,12 +11,15 @@ import re
 from collections import Counter
 from datetime import date
 
-from packing_label_generator import _address_key, _norm, assign_label_numbers
+from packing_label_generator import _address_key, _norm, assign_label_numbers, assign_barcodes, normalize_postcode
 
 AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
-# New Zealand regions (ISO 3166-2:NZ). TAS is also Tasmania, so on its own it means Australia.
+# New Zealand regions: the official ISO 3166-2:NZ codes, plus the codes Toll's portal uses
+# (AUC Auckland, CHR Christchurch, WEL Wellington, MOU Mount Maunganui). TAS is also Tasmania,
+# so on its own it means Australia.
 NZ_REGIONS = {'AUK', 'BOP', 'CAN', 'CIT', 'GIS', 'HKB', 'MBH', 'MWT', 'NSN', 'NTL', 'OTA', 'STL', 'TAS',
-              'TKI', 'WGN', 'WKO', 'WTC'}
+              'TKI', 'WGN', 'WKO', 'WTC',
+              'AUC', 'CHR', 'WEL', 'MOU'}
 STATES = AU_STATES | NZ_REGIONS
 _STATE_PATTERN = "|".join(sorted(STATES))
 COUNTRIES = {'australia': 'AU', 'au': 'AU', 'aus': 'AU', 'new zealand': 'NZ', 'nz': 'NZ', 'nzl': 'NZ'}
@@ -208,12 +211,13 @@ def resolve_destination(group):
     contact = ", ".join(x for x in (person if company else '', attn) if x)
 
     line1, line2 = _split_lines(", ".join(tokens))
-    postcode = re.sub(r'\.0$', '', str(postcode))  # 3149.0 from numeric cells
     state = _tidy(state).upper()
+    country = _country(country, state)
+    postcode = normalize_postcode(postcode, country)  # 3149.0 / 803 from numeric cells -> 3149 / 0803
     return {
         'receiver': receiver, 'contact': contact,
         'line1': line1, 'line2': line2,
-        'suburb': _tidy(suburb), 'state': state, 'postcode': postcode, 'country': _country(country, state),
+        'suburb': _tidy(suburb), 'state': state, 'postcode': postcode, 'country': country,
         'authority_to_leave': atl, 'raw': raw,
     }
 
@@ -268,6 +272,7 @@ def _apply_edit(dest, edit):
     dest['state'] = dest['state'].upper()
     if 'state' in edit and dest['country'] in ('AU', 'NZ'):
         dest['country'] = _country('', dest['state'])
+    dest['postcode'] = normalize_postcode(dest['postcode'], dest['country'])
     if 'authority_to_leave' in edit:
         dest['authority_to_leave'] = bool(edit['authority_to_leave'])
     return dest
@@ -291,6 +296,7 @@ def build_consignments(pack_groups, edits=None, default_service=''):
     grouping, so changing an address to match another consignment's merges them, as the courier would."""
     edits = edits or {}
     assign_label_numbers(pack_groups)
+    assign_barcodes(pack_groups)
     consignments, cartons, warnings = {}, [], []
     skipped, unsized = [], []
 
@@ -323,6 +329,7 @@ def build_consignments(pack_groups, edits=None, default_service=''):
             'item_reference': f"Label {g['label_no']} - {store}",
             'install': bool(g.get('install')), 'excel_rows': rows,
             'job_numbers': [i['job_no'] for i in g['items']],
+            'barcodes': [i['barcode'] for i in g['items']],
             'size_cm': size, 'weight_kg': package_weight(g['pack_spec_name']),
             'item_type': item_type(g['pack_spec_name']),
             'consignment': con['number'], 'first_in_consignment': not con['cartons'],
@@ -409,6 +416,7 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
             'csv_row': csv_row,
             'excel_rows': carton['excel_rows'],
             'job_numbers': carton['job_numbers'],
+            'barcodes': carton['barcodes'],
         })
     data = {
         'consignment_reference': reference,

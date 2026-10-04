@@ -237,6 +237,10 @@
                             </div>
                             {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
+                            <div class="sortable-item" draggable="true" data-id="barcode"><span class="badge-text">Barcode</span>
+                                <div class="cell-only-styling pl-cell-barcode"><div class="pl-cell-barcode-bars" aria-hidden="true"></div><div class="pl-cell-barcode-text">J000000-00 K1</div></div>
+                            </div>
+
                             {% if previews[0].found_headers.get('Quantity') %}
                             <div class="sortable-item" draggable="true" data-id="qty"><span class="badge-text">Quantity</span>
                                 <div class="cell-only-styling pl-cell-qty">
@@ -305,12 +309,16 @@
                     </table>
                     {% endif %}
 
+                    {% if courier.unverified %}
+                    <p class="pl-check-note" id="courier-check-note"><strong>{{ courier.unverified }} {{ 'address isn’t' if courier.unverified == 1 else 'addresses aren’t' }} in the address book yet.</strong>
+                        {{ 'It’s' if courier.unverified == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-check">Check address</span>. Open ✏️ to compare with the closest saved addresses, then Save.</p>
+                    {% endif %}
                     <table class="pl-courier-table">
                         <thead><tr><th>#</th><th>Receiver</th><th>Address</th><th>Service Code</th><th>Cartons</th></tr></thead>
                         <tbody>
                         {% for c in courier.consignments %}
                         {% set d = c.destination %}
-                        <tr class="pl-con-row" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% endif %}" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -320,6 +328,8 @@
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
                                 <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
+                                {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="This address isn't in the address book. Open ✏️ to compare with saved addresses.">Check address</span>{% endif %}
+                                {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
                             <td class="pl-show-address">{{ c.address }}</td>
                             <td>
@@ -346,6 +356,24 @@
                                     </label>
                                 </div>
                                 <ul class="pl-suggest" role="listbox" aria-label="Matching addresses from the address book" hidden></ul>
+                                {% if c.book == 'unverified' %}
+                                <div class="pl-closest">
+                                    {% if c.suggestions %}
+                                    <div class="pl-closest-title">Closest saved addresses <span class="issue-detail">— most likely first. Click one to fill the form.</span></div>
+                                    <ul class="pl-closest-list">
+                                        {% for s in c.suggestions %}
+                                        <li><button type="button" class="pl-closest-item" data-entry="{{ s.json }}">
+                                            <span class="pl-closest-why">{{ s.why }}</span>
+                                            <strong>{{ s.receiver }}{% if s.contact %} · Attn {{ s.contact }}{% endif %}</strong>
+                                            <span class="pl-closest-address">{{ s.address }}{% if s.verified_at %} · ✓ Verified{% endif %}</span>
+                                        </button></li>
+                                        {% endfor %}
+                                    </ul>
+                                    {% else %}
+                                    <p class="pl-closest-none">⚠ No similar address in the address book. Check this address against the job before generating — it will be saved to the address book as it is.</p>
+                                    {% endif %}
+                                </div>
+                                {% endif %}
                                 <div class="issue-detail">From Excel: {{ c.source_text }}</div>
                                 <div class="pl-edit-actions">
                                     <button type="button" class="pl-btn-small pl-edit-save">Save</button>

@@ -334,7 +334,7 @@ def build_divider_barcode_rows(tab_name, pack_summaries, column_jobs, job_kinds)
 
     pack_summaries must be in left-to-right pack order. The "Barcode" value is what the
     divider sheet's Code 128 barcode encodes: the job number, plus its kind when it has
-    more than one (e.g. "J476699-17 Kind 1"), so a scan tells kinds apart."""
+    more than one (e.g. "J476699-17 K1"), so a scan tells kinds apart."""
     rows = []
     for p_sum in pack_summaries:
         if not p_sum["is_selected"]:
@@ -347,7 +347,7 @@ def build_divider_barcode_rows(tab_name, pack_summaries, column_jobs, job_kinds)
                 if val == 0 or not job:
                     continue
                 kind = job_kinds.get((tab_name, col))
-                barcode = f"{job} Kind {kind}" if kind else job
+                barcode = f"{job} K{kind}" if kind else job
                 rows.append([tab_name, p_sum["name"], code, job, kind, format_quantity(val), barcode])
     return rows
 

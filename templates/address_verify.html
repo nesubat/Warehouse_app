@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+{% set LABELS = {'receiver': 'Receiver', 'contact': 'Contact', 'line1': 'Address Line 1', 'line2': 'Address Line 2', 'suburb': 'Suburb', 'state': 'State', 'postcode': 'Postcode', 'country': 'Country', 'authority_to_leave': 'Authority to leave'} %}
+{% macro address(a, changed=[]) %}{% set parts = [] %}
+    {%- for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country'] -%}
+        {%- if a.get(f) %}{% set _ = parts.append((f, ('Attn ' if f == 'contact' else '') ~ a[f], f in changed, false)) %}
+        {%- elif f in changed %}{% set _ = parts.append((f, '(' ~ LABELS[f] ~ ' removed)', true, true)) %}{% endif -%}
+    {%- endfor -%}
+    {%- if 'authority_to_leave' in a %}{% set _ = parts.append(('authority_to_leave', 'ATL ' ~ ('Y' if a.authority_to_leave else 'N'), 'authority_to_leave' in changed, false)) %}{% endif -%}
+    <span class="av-address">{% for f, text, is_changed, removed in parts %}<span class="av-part{% if is_changed %} av-changed{% endif %}{% if removed %} av-removed{% endif %}" title="{{ LABELS[f] }}">{{ text }}</span>{{ ', ' if not loop.last }}{% endfor %}</span>
+{%- endmacro %}
+{% macro review_table(items) %}
+<div class="ab-table-wrap">
+    <table class="ab-table av-table">
+        <thead>
+            <tr><th><span class="ab-sr">Apply</span></th><th>CSV row</th><th>Saved now</th><th>Courier portal</th><th>Matched by</th></tr>
+        </thead>
+        <tbody>
+        {% for p in items %}
+            <tr class="av-row av-{{ p.status }}">
+                <td>
+                    {% if p.status != 'same' %}
+                    <input type="checkbox" name="choose" value="{{ p.key }}"
+                           aria-label="Apply CSV row {{ p.rows|join(', ') }}"
+                           {% if p.status == 'update' or (p.status == 'new' and not p.ambiguous) %}checked{% endif %}
+                           {% if p.status == 'conflict' %}disabled{% endif %}>
+                    {% endif %}
+                </td>
+                <td class="ab-num">{{ p.rows|join(', ') }}</td>
+                <td>{% if p.entry %}{{ address(p.entry) }}{% else %}<span class="ab-detail">Not in the address book</span>{% endif %}</td>
+                <td>
+                    {% if p.status == 'conflict' %}
+                    {% for v in p.variants %}<div class="av-variant"><span class="av-variant-rows">Row {{ v.rows|join(', ') }}:</span> {{ address(v.new, p.variant_diff) }}</div>{% endfor %}
+                    {% else %}
+                    {{ address(p.new, p.changed if p.entry else []) }}
+                    {% endif %}
+                    {% if p.likely %}<div class="av-likely-note">Close match, not exact — check it's the same place before applying.</div>{% endif %}
+                    {% if p.status == 'conflict' %}<div class="av-conflict-note">These CSV rows give different addresses for the same entry. Fix the file and add it again.</div>{% endif %}
+                    {% if p.status == 'new' and p.ambiguous %}<div class="av-conflict-note">This receiver already has several saved addresses, so it wasn't matched. Tick to add it as another verified address.</div>
+                    {% elif p.status == 'new' %}<div class="ab-detail">Will be added as a new verified address — untick to skip</div>{% endif %}
+                </td>
+                <td class="ab-detail">{{ p.matched_by }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endmacro %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Update in Bulk</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    <div class="sticky-nav">
+        <a href="/#home">🏠 Home</a>
+        <span class="divider">|</span>
+        <a href="/#dashboard-section">📊 Dashboard</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('address_book_page') }}" class="active">📇 Address Book</a>
+    </div>
+
+    <div class="container ab-page av-page">
+        <h1>📇 Update in Bulk</h1>
+        <p class="ab-intro">After uploading a consignment CSV to the courier portal, download the verified addresses from the portal (CSV or Excel) and add them here. Each row is matched to the address it corrects — by its item reference across all your projects, or by receiver name — and you'll see every change before anything is saved.</p>
+
+        {% if error %}
+        <div class="blueprint-card blueprint-error av-error">
+            <h4>❌ Can't use that file</h4>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+
+        {% if done %}
+        <div class="success-box av-done">
+            <h2 class="success-title">✅ Address book updated</h2>
+            <p>{{ applied }} address{{ '' if applied == 1 else 'es' }} updated, {{ confirmed }} confirmed as already correct{% if added %}, {{ added }} new address{{ '' if added == 1 else 'es' }} added{% endif %} — all marked as verified.</p>
+            {% if problems %}
+            <ul class="av-problems">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+            {% endif %}
+            <div class="success-nav">
+                <a href="{{ url_for('address_book_page') }}" class="nav-bottom-link1">📇 Open the address book</a>
+                <span class="divider">|</span>
+                <a href="{{ url_for('bulk_update_addresses') }}" class="nav-bottom-link2">⬆ Update another file</a>
+            </div>
+        </div>
+
+        {% elif proposals %}
+        <form method="POST" class="av-review">
+            <input type="hidden" name="proposals" value="{{ proposals_json }}">
+            {% set counts = namespace(update=0, new=0, same=0, conflict=0) %}
+            {% for p in proposals %}{% if p.status == 'update' %}{% set counts.update = counts.update + 1 %}{% elif p.status == 'new' %}{% set counts.new = counts.new + 1 %}{% elif p.status == 'same' %}{% set counts.same = counts.same + 1 %}{% else %}{% set counts.conflict = counts.conflict + 1 %}{% endif %}{% endfor %}
+            <p class="av-summary">
+                From <strong>{{ filename }}</strong>:
+                <span class="av-pill av-update">{{ counts.update }} to update</span>
+                <span class="av-pill av-new">{{ counts.new }} new</span>
+                <span class="av-pill av-same">{{ counts.same }} already up to date</span>
+                {% if counts.conflict %}<span class="av-pill av-conflict">{{ counts.conflict }} conflicting</span>{% endif %}
+            </p>
+            <p class="av-hint">Columns read: {% for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave'] if f in columns %}{{ LABELS[f] }}{{ ', ' if not loop.last }}{% endfor %}. Changed parts are <mark>highlighted</mark>. Untick anything you don't want saved.</p>
+
+            {% set actionable = proposals|rejectattr('status', 'equalto', 'same')|list %}
+            {% set up_to_date = proposals|selectattr('status', 'equalto', 'same')|list %}
+
+            {% if actionable %}
+            {{ review_table(actionable) }}
+            {% else %}
+            <p class="av-nothing">Nothing to change: every address in this file already matches the address book. Mark them as verified below.</p>
+            {% endif %}
+
+            <div class="av-actions">
+                {% if actionable %}<button type="submit" name="apply" value="1" class="ab-btn">Apply ticked changes</button>
+                {% elif up_to_date %}<button type="submit" name="apply" value="1" class="ab-btn">Mark as verified</button>{% endif %}
+                <a href="{{ url_for('bulk_update_addresses') }}" class="ab-btn ab-btn-plain">Choose another file</a>
+            </div>
+
+            {% if up_to_date %}
+            <h3 class="av-section">Already up to date ({{ up_to_date|length }})</h3>
+            <p class="av-hint">The courier portal agrees with these. They're marked ✓ Verified when you apply — nothing to tick.</p>
+            {{ review_table(up_to_date) }}
+            {% endif %}
+        </form>
+
+        {% else %}
+        <form method="POST" enctype="multipart/form-data" class="av-upload">
+            <div class="dropzone">
+                <div class="dropzone-content">
+                    <div class="dropzone-icon">📄</div>
+                    <p class="dropzone-text">Drag & drop the verified-addresses file here</p>
+                    <p class="dropzone-subtext">or click to browse — CSV or Excel (.csv, .xlsx, .xls). Only the address columns are read; the layout can vary.</p>
+                    <p class="dropzone-filename"></p>
+                </div>
+                <input type="file" name="file" class="dropzone-input" accept=".csv, .xlsx, .xlsm, .xls" required>
+            </div>
+            <button type="submit" class="btn-generate av-submit">Review changes</button>
+        </form>
+        {% endif %}
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

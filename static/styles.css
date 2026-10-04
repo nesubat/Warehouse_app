@@ -1259,3 +1259,57 @@ button:hover {
 .ab-more { display: block; margin: 14px auto 0; }
 .ab-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .ab-page [hidden] { display: none !important; }
+
+/* Barcode block in the cell layout editor (a stand-in for the Code 128 printed on the label) */
+.pl-page .pl-cell-barcode { padding: 8px 10px; text-align: center; }
+.pl-page .pl-cell-barcode-bars { height: 30px; margin: 0 30px;
+    background: repeating-linear-gradient(90deg, #000 0 2px, #fff 2px 3px, #000 3px 4px, #fff 4px 7px, #000 7px 10px, #fff 10px 11px); }
+.pl-page .pl-cell-barcode-text { font-size: 11px; color: #2c3e50; margin-top: 3px; font-family: Helvetica, Arial, sans-serif; }
+
+/* Update in Bulk from the courier portal's verified CSV (address_verify.html) */
+.av-page .av-error { margin-bottom: 20px; }
+.av-page .av-submit { margin-top: 10px; }
+.av-summary { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 6px; }
+.av-pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid; }
+.av-pill.av-update { color: #2471a3; border-color: #2471a3; }
+.av-pill.av-new { color: #7f8c8d; border-color: #bdc3c7; }
+.av-pill.av-same { color: #16a085; border-color: #1abc9c; }
+.av-pill.av-conflict { color: #c0392b; border-color: #e74c3c; }
+.av-hint { color: #7f8c8d; font-size: 13px; margin: 0 0 12px; }
+.av-hint mark, .av-changed { background: #fdebd0; color: #7e5109; border-radius: 3px; padding: 0 3px; }
+.av-part { display: inline; }
+.av-variant { margin-bottom: 4px; }
+.av-variant-rows { font-weight: 600; color: #c0392b; margin-right: 4px; }
+.av-removed { font-style: italic; }
+.av-row.av-same td { color: #95a5a6; }
+.av-row.av-conflict td:first-child { border-left: 3px solid #e74c3c; }
+.av-row.av-update td:first-child { border-left: 3px solid #2471a3; }
+.av-conflict-note { color: #c0392b; font-size: 12px; margin-top: 3px; }
+.av-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+/* Buttons sit between the rows to apply and the rows already up to date */
+.av-page .av-actions { margin: 16px 0 6px; }
+.av-section { margin: 26px 0 10px; font-size: 15px; color: #7f8c8d; }
+.av-nothing { color: #16a085; font-weight: 600; margin: 8px 0 0; }
+a.ab-btn { display: inline-block; text-decoration: none; }
+.av-problems { color: #c0392b; text-align: left; }
+.av-done { text-align: left; }
+.ab-verified { display: inline-block; margin-left: 6px; padding: 0 6px; font-size: 11px; font-weight: 600; color: #16a085; border: 1px solid #1abc9c; border-radius: 3px; }
+.av-likely-note { color: #9a6700; font-size: 12px; margin-top: 3px; }
+
+/* Consignments whose address isn't in the address book: listed first, amber, with the closest saved addresses */
+.pl-page .pl-check-note { background: #fff8e1; border: 1px solid #f5d27a; border-radius: 6px; padding: 10px 12px; margin: 14px 0 0; font-size: 13px; color: #6d4c00; }
+.pl-page .pl-tag-check { border-color: #e0a100; color: #9a6700; background: #fff8e1; margin-left: 4px; }
+.pl-page .pl-con-row.pl-needs-check > td { background: #fffbef; }
+.pl-page .pl-con-row.pl-needs-check > td:first-child { box-shadow: inset 4px 0 0 #f0b400; }
+.pl-page .pl-also-for { margin-top: 3px; }
+.pl-page .pl-closest { margin: 6px 0 10px; max-width: 760px; }
+.pl-page .pl-closest-title { font-size: 13px; font-weight: 600; color: #2c3e50; margin-bottom: 6px; }
+.pl-page .pl-closest-title .issue-detail { font-weight: 400; display: inline; }
+.pl-page .pl-closest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pl-page .pl-closest-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; padding: 8px 12px;
+    background: #fff; border: 1px solid #d5dbdf; border-radius: 6px; font: inherit; font-size: 13px; color: #2c3e50; cursor: pointer; }
+.pl-page .pl-closest-item:hover, .pl-page .pl-closest-item:focus-visible { border-color: #3498db; background: #f4f9fd; outline: none; }
+.pl-page .pl-closest-item[aria-pressed="true"] { border-color: #3498db; box-shadow: 0 0 0 2px rgba(52,152,219,0.25); background: #f4f9fd; }
+.pl-page .pl-closest-why { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: #2471a3; }
+.pl-page .pl-closest-address { color: #5d6d7e; font-size: 12px; }
+.pl-page .pl-closest-none { margin: 0; padding: 8px 12px; background: #fff8e1; border: 1px solid #f5d27a; border-radius: 6px; font-size: 13px; color: #6d4c00; }

@@ -8,6 +8,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import pymupdf as fitz
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
+from pdf_engine import code128_modules, _draw_code128, BARCODE_QUIET_MODULES, BARCODE_MAX_MODULE
 
 def extract_rich_value_images(excel_path, sheet_name):
     ns = {
@@ -151,6 +152,17 @@ INSTALL_YES = {'y', 'yes', 'true'}
 
 def is_install_flag(value):
     return str(value or '').strip().lower() in INSTALL_YES
+
+
+def normalize_postcode(postcode, country=''):
+    """Australian and New Zealand postcodes are always 4 digits. Excel drops the leading zero
+    (0803 -> 803, or 803.0), and the courier portal rejects a 3-digit postcode, so pad it back."""
+    value = str(postcode if postcode is not None else '').strip()
+    if value.endswith('.0') and value[:-2].isdigit():
+        value = value[:-2]
+    if value.isdigit() and len(value) == 3 and str(country or 'AU').strip().upper() in ('AU', 'NZ', 'AUSTRALIA', 'NEW ZEALAND'):
+        value = value.zfill(4)
+    return value
 
 
 def _norm(text):
@@ -379,6 +391,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     pack_groups = {}
     pack_rows = {}
     rows_missing_job = []
+    rows_no_barcode = []
     rows_without_image = []
     address_keys = [k for k in ADDRESS_FIELDS if k in cols]
     col_ref = {k: f"{get_column_letter(c)} · {str(ws.cell(row=header_row, column=c).value or '').strip().title()}" for k, c in cols.items()}
@@ -470,6 +483,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
             'thumbnails': thumbnails
         }
 
+        if item['job_no'] and code128_modules(item['job_no']) is None:
+            rows_no_barcode.append(current_row)
         if not item['job_no']:
             rows_missing_job.append(current_row)
         pack_groups[pack_id]['items'].append(item)
@@ -497,6 +512,9 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     warnings = []
     if rows_without_image:
         warnings.append(_issue(_row_ranges(rows_without_image), col_ref['thumbnail'], "No image"))
+    if rows_no_barcode:
+        warnings.append(_issue(_row_ranges(rows_no_barcode), col_ref['job_no'],
+                               "No barcode: Job Number has a line break or a character a barcode can't hold"))
 
     pack_errors, pack_warnings = _check_pack_consistency(pack_groups, pack_rows, bool(address_keys), col_ref)
     errors += pack_errors
@@ -610,6 +628,22 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
                 _draw_lines(draw_page, lines, inner_x0, inner_x1, y + 3 * text_scale, "hebo", size, (1, 1, 1))
             y += h + gap
 
+        elif attr == 'barcode':
+            val = item.get('barcode') or _clean(item.get('job_no'))
+            modules = code128_modules(val, compact=True) if val else None
+            if not modules:
+                continue
+            # Code 128 needs 10 blank modules either side; the bars get as wide as the box allows
+            module_w = min(BARCODE_MAX_MODULE, inner_w / (len(modules) + 2 * BARCODE_QUIET_MODULES))
+            bar_h = 22 * text_scale
+            size = 6.5 * text_scale
+            h = bar_h + 2 + size * LINE
+            if draw_page:
+                bx = cell.x0 + (cell.width - len(modules) * module_w) / 2
+                _draw_code128(draw_page, bx, y, module_w, bar_h, modules)
+                _draw_lines(draw_page, [val], inner_x0, inner_x1, y + bar_h + 2, "helv", size, (0, 0, 0))
+            y += h + gap
+
         elif attr == 'qty':
             val = _clean(item.get('qty'))
             if not val:
@@ -683,6 +717,29 @@ def _counter_chip(page, x0, y0, text, size=11):
     return chip
 
 
+def barcode_text(job, kind):
+    """What an item's barcode encodes: 'J477161-26 K3', or just 'J477161-54' for a job number on one row."""
+    return f"{job} K{kind}" if kind else job
+
+
+def assign_barcodes(pack_groups):
+    """Gives every item its barcode text. Same idea as the Distribution Mapper's kinds, with rows in
+    place of columns: a job number on more than one row gets one kind per row, numbered K1, K2, K3...
+    in reading order (first tab to last, then top to bottom), so K1 is its first row in the first tab.
+    Call it with all selected tabs combined, in tab order."""
+    items = [item for g in pack_groups.values() for item in g['items']]
+    key = lambda item: str(item.get('job_no') or '').strip().upper()
+    totals = Counter(key(i) for i in items if key(i))
+    seen = Counter()
+    for item in items:
+        job = str(item.get('job_no') or '').strip()
+        if not job:
+            item['barcode'] = ''
+            continue
+        seen[key(item)] += 1
+        item['barcode'] = barcode_text(job, seen[key(item)] if totals[key(item)] > 1 else None)
+
+
 def assign_label_numbers(pack_groups):
     """'Label X of Y': each store's pack groups numbered in file order (store names compared loosely)."""
     totals = Counter(_norm(g['store_name']) for g in pack_groups.values())
@@ -716,9 +773,10 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     FIRST_PAGE_CELLS, NEXT_PAGE_CELLS = FIRST_COLS * ROWS, NEXT_COLS * ROWS
 
     if not attribute_order:
-        attribute_order = ['thumbnail', 'desc', 'dimension', 'job_no', 'qty']
+        attribute_order = ['thumbnail', 'desc', 'dimension', 'job_no', 'barcode', 'qty']
 
     assign_label_numbers(pack_groups)
+    assign_barcodes(pack_groups)
     page_map = {}
 
     for pack_key, group_data in pack_groups.items():

@@ -1,7 +1,8 @@
 """Local address book: clean delivery addresses, learned from every Generate and editable by the user.
 
 Stored in one SQLite file (data/address_book.db):
-  addresses      one row per receiver + address, with how often and how recently it was used
+  addresses      one row per receiver + Attn + address, with how often and how recently it was used. One address
+                 can have several receivers and Attn names; each combination sent in a Generate is kept
   addresses_fts  full-text index over the address fields (kept in sync by triggers) for instant search
   aliases        raw address spellings seen in Excel -> the address they were saved as, so the next file
                  with the same messy spelling gets the clean (possibly hand-corrected) address
@@ -10,12 +11,13 @@ SQLite was chosen because it needs no server, ships with Python, keeps memory lo
 loaded) and stays fast at hundreds of thousands of rows. Everything goes through the AddressBook class, so
 moving to a cloud database later means replacing this one file.
 """
+import heapq
 import os
 import sqlite3
 import threading
 import time
 
-from packing_label_generator import _address_key, _norm
+from packing_label_generator import _address_key, _norm, normalize_postcode
 
 FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave')
 TEXT_FIELDS = FIELDS[:-1]
@@ -35,13 +37,17 @@ CREATE TABLE IF NOT EXISTS addresses (
     authority_to_leave INTEGER NOT NULL DEFAULT 0,
     address_key        TEXT NOT NULL,
     receiver_key       TEXT NOT NULL,
+    contact_key        TEXT NOT NULL DEFAULT '',
     use_count          INTEGER NOT NULL DEFAULT 0,
     created_at         REAL NOT NULL,
     updated_at         REAL NOT NULL,
     last_used_at       REAL,
-    UNIQUE (address_key, receiver_key)
+    verified_at        REAL,
+    UNIQUE (address_key, receiver_key, contact_key)
 );
 CREATE INDEX IF NOT EXISTS addresses_recent ON addresses (last_used_at DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS addresses_receiver ON addresses (receiver_key);
+CREATE INDEX IF NOT EXISTS addresses_postcode ON addresses (postcode);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS addresses_fts USING fts5(
     receiver, contact, line1, line2, suburb, state, postcode,
@@ -85,12 +91,22 @@ def _clean(fields):
         v = " ".join(str(fields.get(k) or '').split())[:MAX_LENGTH]
         out[k] = v.upper() if k in ('state', 'country') else v
     out['country'] = out['country'] or 'AU'
+    out['postcode'] = normalize_postcode(out['postcode'], out['country'])
     out['authority_to_leave'] = 1 if fields.get('authority_to_leave') in (True, 1, '1', 'true', 'on', 'Y', 'y') else 0
     return out
 
 
 def _keys(a):
-    return _address_key(one_line(a)), _norm(a['receiver'])
+    """(address, receiver, Attn) comparison keys: together they identify an entry."""
+    return _address_key(one_line(a)), _norm(a['receiver']), _norm(a['contact'])
+
+
+def _who(a):
+    return a['receiver'] + (f" (Attn {a['contact']})" if a['contact'] else '')
+
+
+COLUMNS = ('id',) + FIELDS + ('address_key', 'receiver_key', 'contact_key', 'use_count', 'created_at', 'updated_at',
+                               'last_used_at', 'verified_at')
 
 
 def _match_query(text):
@@ -105,6 +121,7 @@ def _match_query(text):
 
 
 # Column weights for ranking: receiver and street lines count most, then suburb/postcode.
+CROWDED_SHORTLIST = 30  # in a postcode with more entries than near()'s limit, how many to score in full
 RANK = "bm25(addresses_fts, 4.0, 1.0, 3.0, 1.0, 2.0, 0.5, 2.0)"
 
 
@@ -115,6 +132,12 @@ class AddressBook:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         with self._connect() as db:
             db.executescript(SCHEMA)
+            # Added after the first release: when an address was confirmed by the courier portal
+            if 'verified_at' not in {c[1] for c in db.execute("PRAGMA table_info(addresses)")}:
+                db.execute("ALTER TABLE addresses ADD COLUMN verified_at REAL")
+        self._add_contact_key()
+        with self._connect() as db:
+            self._pad_short_postcodes(db)
 
     # One connection per thread: Flask serves requests on several threads, and WAL mode lets
     # searches run while a Generate is writing.
@@ -129,9 +152,52 @@ class AddressBook:
             self._local.db = db
         return db
 
+    def _add_contact_key(self):
+        """One-off upgrade of books made before the Attn was part of an entry's identity (an address could hold
+        only one Attn per receiver). SQLite can't change a UNIQUE rule in place, so the table is rebuilt with the
+        same ids (aliases and the search index stay valid). A copy of the file is kept first."""
+        db = self._connect()
+        if 'contact_key' in {c[1] for c in db.execute("PRAGMA table_info(addresses)")}:
+            return
+        backup = sqlite3.connect(f"{os.path.splitext(self.path)[0]}.before-attn-upgrade.db")
+        db.backup(backup)
+        backup.close()
+        db.create_function('norm_key', 1, _norm)
+        old = [c for c in COLUMNS if c != 'contact_key']
+        create = SCHEMA.split(';')[0].replace('CREATE TABLE IF NOT EXISTS addresses', 'CREATE TABLE addresses_new')
+        db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with db:
+                db.execute(create)
+                db.execute(f"INSERT OR IGNORE INTO addresses_new ({', '.join(old)}, contact_key) "
+                           f"SELECT {', '.join(old)}, norm_key(contact) FROM addresses")
+                for trigger in ('addresses_ai', 'addresses_ad', 'addresses_au'):
+                    db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                db.execute("DROP TABLE addresses")
+                db.execute("ALTER TABLE addresses_new RENAME TO addresses")
+            db.executescript(SCHEMA)  # indexes and triggers for the new table
+            with db:
+                db.execute("INSERT INTO addresses_fts(addresses_fts) VALUES ('rebuild')")
+        finally:
+            db.execute("PRAGMA foreign_keys=ON")
+
+    @staticmethod
+    def _pad_short_postcodes(db):
+        """One-off fix for entries saved before postcodes were padded (803 -> 0803)."""
+        rows = db.execute("SELECT * FROM addresses WHERE length(postcode) = 3 AND postcode GLOB '[0-9][0-9][0-9]' "
+                          "AND country IN ('AU', 'NZ')").fetchall()
+        for r in rows:
+            fixed = {k: r[k] for k in TEXT_FIELDS}
+            fixed['postcode'] = normalize_postcode(r['postcode'], r['country'])
+            try:
+                db.execute("UPDATE addresses SET postcode = ?, address_key = ? WHERE id = ?",
+                           (fixed['postcode'], _address_key(one_line(fixed)), r['id']))
+            except sqlite3.IntegrityError:
+                pass  # the padded address is already saved separately; leave this one for the user to tidy
+
     @staticmethod
     def _row(r):
-        d = {k: r[k] for k in ('id',) + TEXT_FIELDS + ('use_count', 'last_used_at', 'updated_at')}
+        d = {k: r[k] for k in ('id',) + TEXT_FIELDS + ('use_count', 'last_used_at', 'updated_at', 'verified_at')}
         d['authority_to_leave'] = bool(r['authority_to_leave'])
         d['address'] = one_line(d)
         return d
@@ -185,17 +251,17 @@ class AddressBook:
         a = _clean(fields)
         if not (a['receiver'] and a['line1'] and a['postcode']):
             raise AddressBookError("Receiver, Address Line 1 and Postcode are required.")
-        address_key, receiver_key = _keys(a)
+        keys = _keys(a)
         now = time.time()
         db = self._connect()
         try:
             with db:
                 cur = db.execute(
-                    f"INSERT INTO addresses ({', '.join(FIELDS)}, address_key, receiver_key, created_at, updated_at) "
-                    f"VALUES ({', '.join('?' * (len(FIELDS) + 4))})",
-                    [a[k] for k in FIELDS] + [address_key, receiver_key, now, now])
+                    f"INSERT INTO addresses ({', '.join(FIELDS)}, address_key, receiver_key, contact_key, created_at, updated_at) "
+                    f"VALUES ({', '.join('?' * (len(FIELDS) + 5))})",
+                    [a[k] for k in FIELDS] + list(keys) + [now, now])
         except sqlite3.IntegrityError:
-            raise AddressBookError(f"{a['receiver']} at {one_line(a)} is already in the address book.")
+            raise AddressBookError(f"{_who(a)} at {one_line(a)} is already in the address book.")
         return self.get(cur.lastrowid)
 
     def update(self, address_id, fields):
@@ -205,17 +271,109 @@ class AddressBook:
         a = _clean({**current, **fields})
         if not (a['receiver'] and a['line1'] and a['postcode']):
             raise AddressBookError("Receiver, Address Line 1 and Postcode are required.")
-        address_key, receiver_key = _keys(a)
+        keys = _keys(a)
         db = self._connect()
         try:
             with db:
                 db.execute(
                     f"UPDATE addresses SET {', '.join(f'{k} = ?' for k in FIELDS)}, address_key = ?, receiver_key = ?, "
-                    f"updated_at = ? WHERE id = ?",
-                    [a[k] for k in FIELDS] + [address_key, receiver_key, time.time(), address_id])
+                    f"contact_key = ?, updated_at = ? WHERE id = ?",
+                    [a[k] for k in FIELDS] + list(keys) + [time.time(), address_id])
         except sqlite3.IntegrityError:
-            raise AddressBookError(f"{a['receiver']} at {one_line(a)} is already in the address book.")
+            raise AddressBookError(f"{_who(a)} at {one_line(a)} is already in the address book.")
         return self.get(address_id)
+
+    def find(self, address):
+        """The saved entry for this receiver + address (the one with the same Attn if there is one), or None."""
+        address_key, receiver_key, contact_key = _keys(_clean(address))
+        r = self._connect().execute("SELECT * FROM addresses WHERE address_key = ? AND receiver_key = ? "
+                                    "ORDER BY contact_key = ? DESC, use_count DESC LIMIT 1",
+                                    (address_key, receiver_key, contact_key)).fetchone()
+        return self._row(r) if r else None
+
+    def find_by_receiver(self, receiver):
+        """Entries whose receiver name matches (ignoring capitals and punctuation), most used first."""
+        rows = self._connect().execute("SELECT * FROM addresses WHERE receiver_key = ? ORDER BY use_count DESC LIMIT 50",
+                                       (_norm(receiver),)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def mark_verified(self, address_id):
+        """The courier portal confirmed this entry exactly as saved."""
+        db = self._connect()
+        with db:
+            return db.execute("UPDATE addresses SET verified_at = ? WHERE id = ?", (time.time(), address_id)).rowcount > 0
+
+    def at_address(self, address):
+        """Every entry saved at exactly this address, whatever the receiver (an address can have several
+        receivers / Attn names). Uses the (address_key, receiver_key) index."""
+        rows = self._connect().execute("SELECT * FROM addresses WHERE address_key = ? ORDER BY use_count DESC LIMIT 20",
+                                       (_keys(_clean(address))[0],)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def candidates(self, address, cache=None):
+        """Entries worth comparing with an address the book doesn't hold: same postcode, same receiver name,
+        and full-text matches for the receiver (in case the postcode itself is wrong)."""
+        found = {e['id']: e for e in self.near(address, cache=cache)}
+        receiver = address.get('receiver')
+        if receiver:
+            for e in self.find_by_receiver(receiver) + self.search(receiver, 10)[0]:
+                found.setdefault(e['id'], e)
+        return list(found.values())
+
+    def near(self, address, limit=100, cache=None):
+        """Short-list for fuzzy matching: entries with the same postcode (indexed). A crowded postcode
+        (a CBD with hundreds of stores) is narrowed to the entries sharing the most receiver/street words,
+        so the right one is never cut off by the limit. No postcode: full-text matches for the receiver.
+        Pass the same `cache` dict for every row of one import so a crowded postcode is only read once."""
+        db = self._connect()
+        postcode = normalize_postcode(address.get('postcode'), address.get('country'))
+        if not postcode:
+            return self.search(address.get('receiver') or '', 20)[0] if address.get('receiver') else []
+        cache = {} if cache is None else cache
+        if postcode not in cache:
+            rows = db.execute("SELECT * FROM addresses WHERE postcode = ? LIMIT ?", (postcode, limit + 1)).fetchall()
+            if len(rows) <= limit:
+                cache[postcode] = [self._row(r) for r in rows]
+            else:
+                # Crowded: keep just the words of each entry's name and street (indexed read, cheap)
+                cache[postcode] = [(r[0], frozenset(_norm(f"{r[1]} {r[2]} {r[3]}").split())) for r in db.execute(
+                    "SELECT id, receiver, line1, line2 FROM addresses WHERE postcode = ?", (postcode,))]
+        entries = cache[postcode]
+        if not entries or isinstance(entries[0], dict):
+            return entries
+        # Load in full only the entries sharing the most words with this address
+        words = {w for k in ('receiver', 'line1', 'line2') for w in _norm(address.get(k)).split()}
+        ids = [i for _, i in heapq.nlargest(CROWDED_SHORTLIST, ((len(words & ws), i) for i, ws in entries))]
+        rows = db.execute(f"SELECT * FROM addresses WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        return [self._row(r) for r in rows]
+
+    def apply_verified(self, address_id, fields):
+        """Replaces an entry with the address the courier portal confirmed, and marks it verified.
+
+        If the confirmed address is one the book already holds under another entry, the two are merged:
+        the other entry is kept (with the confirmed details), it takes over this entry's use count and
+        learned Excel spellings, and this entry is removed. Returns the entry that now holds the address."""
+        current = self.get(address_id)
+        if not current:
+            raise AddressBookError("That address no longer exists.")
+        a = _clean({**current, **fields})
+        if not (a['receiver'] and a['postcode']):
+            raise AddressBookError("A verified address needs at least a receiver and a postcode.")
+        keys = _keys(a)
+        now = time.time()
+        db = self._connect()
+        with db:
+            other = db.execute("SELECT id, use_count FROM addresses WHERE address_key = ? AND receiver_key = ? "
+                               "AND contact_key = ? AND id != ?", (*keys, address_id)).fetchone()
+            target = other['id'] if other else address_id
+            if other:
+                db.execute("UPDATE aliases SET address_id = ? WHERE address_id = ?", (target, address_id))
+                db.execute("UPDATE addresses SET use_count = use_count + ? WHERE id = ?", (current['use_count'], target))
+                db.execute("DELETE FROM addresses WHERE id = ?", (address_id,))
+            db.execute(f"UPDATE addresses SET {', '.join(f'{k} = ?' for k in FIELDS)}, address_key = ?, receiver_key = ?, "
+                       f"contact_key = ?, updated_at = ?, verified_at = ? WHERE id = ?",
+                       [a[k] for k in FIELDS] + list(keys) + [now, now, target])
+        return self.get(target)
 
     def delete(self, address_id):
         db = self._connect()
@@ -225,8 +383,10 @@ class AddressBook:
     def record_used(self, entries):
         """After a Generate: save or refresh each delivery address and remember the raw spellings that led to it.
 
-        entries: [(destination dict, [raw source keys]), ...]. All in one transaction, so a Generate of
-        hundreds of consignments is a single fast write."""
+        A receiver or Attn not yet saved at that address is added as its own entry (one address can have several);
+        no Attn means the receiver's existing entry there. A new entry at an address the courier portal has
+        verified is verified too. entries: [(destination dict, [raw source keys]), ...]. All in one transaction,
+        so a Generate of hundreds of consignments is a single fast write."""
         now = time.time()
         db = self._connect()
         with db:
@@ -234,20 +394,26 @@ class AddressBook:
                 a = _clean(dest)
                 if not (a['receiver'] and a['postcode']):
                     continue
-                address_key, receiver_key = _keys(a)
-                row = db.execute("SELECT id FROM addresses WHERE address_key = ? AND receiver_key = ?",
-                                 (address_key, receiver_key)).fetchone()
+                address_key, receiver_key, contact_key = _keys(a)
+                row = db.execute("SELECT id, contact FROM addresses WHERE address_key = ? AND receiver_key = ? AND contact_key = ?",
+                                 (address_key, receiver_key, contact_key)).fetchone()
+                if row is None and not contact_key:
+                    row = db.execute("SELECT id, contact FROM addresses WHERE address_key = ? AND receiver_key = ? "
+                                     "ORDER BY use_count DESC LIMIT 1", (address_key, receiver_key)).fetchone()
                 if row:
                     address_id = row['id']
-                    # Refresh to the latest spelling/contact/ATL actually sent
+                    # Refresh to the latest spelling/ATL actually sent (a blank Attn leaves the saved one)
+                    fields = {**a, 'contact': a['contact'] or row['contact']}
                     db.execute(f"UPDATE addresses SET {', '.join(f'{k} = ?' for k in FIELDS)}, use_count = use_count + 1, "
                                f"last_used_at = ?, updated_at = ? WHERE id = ?",
-                               [a[k] for k in FIELDS] + [now, now, address_id])
+                               [fields[k] for k in FIELDS] + [now, now, address_id])
                 else:
+                    verified = db.execute("SELECT MAX(verified_at) FROM addresses WHERE address_key = ?",
+                                          (address_key,)).fetchone()[0]
                     address_id = db.execute(
-                        f"INSERT INTO addresses ({', '.join(FIELDS)}, address_key, receiver_key, use_count, created_at, "
-                        f"updated_at, last_used_at) VALUES ({', '.join('?' * (len(FIELDS) + 6))})",
-                        [a[k] for k in FIELDS] + [address_key, receiver_key, 1, now, now, now]).lastrowid
+                        f"INSERT INTO addresses ({', '.join(FIELDS)}, address_key, receiver_key, contact_key, use_count, "
+                        f"created_at, updated_at, last_used_at, verified_at) VALUES ({', '.join('?' * (len(FIELDS) + 8))})",
+                        [a[k] for k in FIELDS] + [address_key, receiver_key, contact_key, 1, now, now, now, verified]).lastrowid
                 for key in dict.fromkeys(source_keys):
                     if key:
                         db.execute("INSERT INTO aliases (source_key, address_id) VALUES (?, ?) "

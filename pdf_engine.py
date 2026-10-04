@@ -308,18 +308,58 @@ BARCODE_MIN_MODULE = 0.75   # pt (~0.26mm) - narrowest bar width that still scan
 BARCODE_MAX_MODULE = 0.96   # pt (~0.34mm) - keeps barcodes compact; exactly 4 dots at 300dpi / 8 at 600dpi
 BARCODE_MIN_BAR_H = 25      # pt (~9mm)
 BARCODE_MAX_BAR_H = 55      # pt (~19mm)
-BARCODE_CAPTION_H = 18      # pt reserved under each barcode for its "J476699-09 Kind 1 x 1" caption
+BARCODE_CAPTION_H = 18      # pt reserved under each barcode for its "J476699-09 K1 x 1" caption
 BARCODE_GAP_X = 10
 BARCODE_GAP_Y = 10
 
 
-def code128_modules(text):
-    """Encodes text as a Code 128 (code set B) symbol and returns it as a string of
-    '1' (bar) and '0' (space) modules from start to stop, quiet zones not included.
+_CODE128_START_C = 105
+_CODE128_TO_C = 99   # in code set B: switch to C
+_CODE128_TO_B = 100  # in code set C: switch to B
+
+
+def _code128_values_compact(text):
+    """Symbol values using code set C (two digits per symbol) for long digit runs and B for the rest.
+    'J477161-26 K7' needs 14 symbols instead of 15 in B alone; it decodes to the same text."""
+    values, i, current, n = [], 0, None, len(text)
+
+    def switch_to(code_set):
+        nonlocal current
+        if current != code_set:
+            if current is None:
+                values.append(_CODE128_START_C if code_set == 'C' else _CODE128_START_B)
+            else:
+                values.append(_CODE128_TO_C if code_set == 'C' else _CODE128_TO_B)
+            current = code_set
+
+    while i < n:
+        run = 0
+        while i + run < n and text[i + run].isdigit():
+            run += 1
+        # C pays off for 4+ digits at the start or end, or 6+ in the middle (switching costs a symbol each way)
+        if run >= 4 and (run >= 6 or i == 0 or i + run == n):
+            if run % 2:  # an odd digit out goes in B first
+                switch_to('B')
+                values.append(ord(text[i]) - 32)
+                i, run = i + 1, run - 1
+            switch_to('C')
+            values.extend(int(text[i + k:i + k + 2]) for k in range(0, run, 2))
+            i += run
+        else:
+            switch_to('B')
+            values.append(ord(text[i]) - 32)
+            i += 1
+    return values
+
+
+def code128_modules(text, compact=False):
+    """Encodes text as a Code 128 symbol and returns it as a string of '1' (bar) and '0' (space)
+    modules from start to stop, quiet zones not included. Uses code set B, or with compact=True
+    switches to code set C for long digit runs to make the symbol narrower.
     Returns None when the text is empty or holds a character code set B can't carry."""
     if not text or any(not (32 <= ord(ch) <= 126) for ch in text):
         return None
-    values = [_CODE128_START_B] + [ord(ch) - 32 for ch in text]
+    values = _code128_values_compact(text) if compact else [_CODE128_START_B] + [ord(ch) - 32 for ch in text]
     checksum = (values[0] + sum(pos * v for pos, v in enumerate(values[1:], start=1))) % 103
     modules = []
     for widths in [_CODE128_PATTERNS[v] for v in values + [checksum]] + [_CODE128_STOP]:
@@ -344,9 +384,10 @@ def _draw_code128(page, x, y, module_w, bar_h, modules):
 
 
 def barcode_caption(entry):
-    """'J476699-09 Kind 1 x 1', or just 'J476699-02 x 1' when that job number only has one kind."""
-    kind = f" Kind {entry['kind']}" if entry.get("kind") else ""
-    return f"{entry['job']}{kind} x {entry['qty']}"
+    """'J476699-09 K1 x 1', or just 'J476699-02 x 1' when that job number only has one kind.
+    Built from the barcode's own text, so the caption always reads exactly what the bars encode
+    (Signature Links files made before the K1 format still say 'Kind 1' in both)."""
+    return f"{entry.get('barcode') or entry['job']} x {entry['qty']}"
 
 
 def _plan_barcode_grid(count, area_w, area_h, symbol_modules, min_caption_w):

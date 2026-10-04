@@ -663,15 +663,29 @@ document.addEventListener('DOMContentLoaded', function () {
             const changed = ADDRESS.some((k) => (d[k] || '') !== (original[k] || '')) ||
                             d.authority_to_leave !== !!original.authority_to_leave;
             const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
-            edits[id] = changed ? { ...keep, ...d } : keep;
+            // Saving counts as checked, so a row that isn't in the address book stops being flagged
+            // (kept through Update Previews; the address is saved to the book on Generate)
+            const checked = row.classList.contains('pl-needs-check') || (edits[id] && edits[id].checked) ? { checked: true } : {};
+            edits[id] = changed ? { ...keep, ...checked, ...d } : { ...keep, ...checked };
             tidy(id);
             show(row, changed ? d : original);
             row.querySelector('.pl-tag-edited').hidden = !changed;
             row.querySelector('.pl-tag-book').hidden = true;
+            markChecked(row);
             close();
             applyFilters();
         });
         editRow.querySelector('.pl-edit-cancel').addEventListener('click', close);
+
+        // Closest saved addresses (rows not in the address book): clicking one fills the form
+        const closest = [...editRow.querySelectorAll('.pl-closest-item')];
+        closest.forEach((button) => {
+            button.setAttribute('aria-pressed', 'false');
+            button.addEventListener('click', () => {
+                fill(editRow, JSON.parse(button.dataset.entry));
+                closest.forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
+            });
+        });
         editRow.querySelector('.pl-edit-reset').addEventListener('click', () => {
             fill(editRow, original);
         });
@@ -708,6 +722,21 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         save();
     });
+
+    // A flagged row the user has saved: drop the amber theme and update the count above the table
+    const checkNote = document.getElementById('courier-check-note');
+    function markChecked(row) {
+        if (!row.classList.contains('pl-needs-check')) return;
+        row.classList.remove('pl-needs-check');
+        const tag = row.querySelector('.pl-tag-check');
+        if (tag) tag.remove();
+        const left = rows.filter((r) => r.classList.contains('pl-needs-check')).length;
+        if (checkNote) {
+            if (!left) checkNote.hidden = true;
+            else checkNote.querySelector('strong').textContent =
+                `${left} ${left === 1 ? 'address isn’t' : 'addresses aren’t'} in the address book yet.`;
+        }
+    }
 
     function applyFilters() {
         const state = stateFilter.value;
@@ -839,6 +868,13 @@ document.addEventListener('DOMContentLoaded', function () {
         del.addEventListener('click', () => remove(tr, entry));
         actions.append(edit, del);
         const who = cell(entry.receiver);
+        if (entry.verified_at) {
+            const v = document.createElement('span');
+            v.className = 'ab-verified';
+            v.textContent = '✓ Verified';
+            v.title = `Confirmed by the courier portal on ${when(entry.verified_at)}`;
+            who.append(v);
+        }
         if (entry.contact) { const c = document.createElement('div'); c.className = 'ab-detail'; c.textContent = `Attn ${entry.contact}`; who.append(c); }
         tr.append(actions, who, cell([entry.line1, entry.line2].filter(Boolean).join(', ')), cell(entry.suburb),
                   cell(entry.state), cell(entry.postcode), cell(entry.country), cell(entry.authority_to_leave ? 'Y' : ''),
@@ -957,4 +993,3 @@ document.addEventListener('DOMContentLoaded', function () {
     more.addEventListener('click', () => load(false));
     load(true);
 });
-

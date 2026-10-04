@@ -29,6 +29,7 @@
         <div class="ab-toolbar">
             <input type="search" id="ab-search" class="ab-search" placeholder="Search receiver, contact, street, suburb or postcode…" aria-label="Search the address book" autocomplete="off" autofocus>
             <button type="button" id="ab-add" class="ab-btn">+ Add address</button>
+            <a href="{{ url_for('bulk_update_addresses') }}" class="ab-btn ab-btn-plain" title="Add the courier portal's CSV of verified addresses">⬆ Update in bulk</a>
         </div>
         <div class="ab-meta">
             <span id="ab-summary"></span>

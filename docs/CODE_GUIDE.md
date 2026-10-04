@@ -136,7 +136,7 @@ Only `app.py` talks to Flask/the browser. The engines never render a web page th
 ```
 Warehouse_app/
 ├── app.py, core_math.py, matrix_engine.py, pdf_engine.py, subgroup_engine.py
-├── packing_label_generator.py, courier_export.py, address_book.py
+├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py
 ├── templates/            → the 5 HTML pages Flask renders
 ├── static/               → script.js + styles.css (shared by all pages)
 ├── docs/CODE_GUIDE.md    → this guide
@@ -419,6 +419,7 @@ record_service_usage()"]
 | `POST /api/addresses` | Add an address (JSON body) |
 | `PUT /api/addresses/<id>` | Edit an address |
 | `DELETE /api/addresses/<id>` | Delete an address and the spellings learned for it |
+| `GET/POST /address-book/update` | **Update in bulk**: update the book from the courier portal's CSV of verified addresses — upload → review → apply ([10.11](#1011-updating-the-book-from-the-courier-portal)) |
 
 Problems the user can fix (missing fields, a duplicate) come back as `400 {"error": "..."}` and are shown in the edit row.
 
@@ -621,7 +622,7 @@ Writing to Excel cell-by-cell through `xlwings` is slow (each write is a round-t
 
 **The "Job numbers" tab.** While each tab's `raw_values` is read (before File 2's rows/columns are touched), every pack's columns are scanned along the **Job ID row**, and the job numbers found are kept in first-seen order with repeats inside that same pack dropped. Each pack becomes one entry in `master_job_data` (`{"header": "Tab | Pack X", "jobs": [...]}`). After all tabs are done, `write_job_numbers_sheet()` writes one block per pack (bold header, then the job numbers centered underneath), with a thin black divider row between blocks, the same idea as Packaging Stocks. Inside each block, job numbers are grouped by **series**: a job number is `series-index` (e.g. `J476523-01` → series `J476523`, index `01`), split on the first `-` by `split_job_number()`. A job number with no `-` is series-only. `group_jobs_by_series()` keeps the series in the order they first appear and sorts each series' jobs by index: series-only first, then numeric indexes in number order. Each series gets a grey, italic `Series J476523` sub-heading. The full job number stays in its own cell on each row so that cell can carry a link later. It also builds `job_to_groups` (`{job_number: [every pack header it appears in]}`). Any job number that appears in **more than one** pack group, whether in the same tab or a different one, is filled light red, and column B next to it lists the other group(s): `⚠ Shared with: Other Tab | Pack 2`. The same check, `find_shared_job_numbers()`, is also returned as the 4th value of `generate_all_outputs()` so `/generate` can list those job numbers in a warning on the results page. Generation still goes ahead.
 
-**Installer tabs and the "Divider Barcodes" tab (File 3).** A tab ticked as "sent to an installer" (`user_inputs[tab]["installer"]`, set in `/generate`, which also selects every pack in that tab) gets one row per job number per code in an extra `Divider Barcodes` tab of the Signature Links file: `Tab | Pack | Code | Job Number | Kind | Qty | Barcode`. `tab_column_jobs` records which job number sits in each pack column. `assign_job_kinds()` numbers the kinds: a job number found in more than one column (same pack, another pack or another tab) gets Kind 1, 2, 3... in reading order, first tab to last and left to right within each tab. A job number in only one column has no kind. Kinds are counted across every selected tab, installer or not. `build_divider_barcode_rows()` then walks each code's signature: every column with a quantity and a job number becomes a row, and `Qty` is that store's quantity. `Barcode` is the exact text the divider's barcode encodes: the job number, plus ` Kind N` when it has more than one kind (e.g. `J476699-17 Kind 1`), so a scan tells kinds apart. The tab is only written when at least one tab is an installer tab, so File 3 is otherwise unchanged.
+**Installer tabs and the "Divider Barcodes" tab (File 3).** A tab ticked as "sent to an installer" (`user_inputs[tab]["installer"]`, set in `/generate`, which also selects every pack in that tab) gets one row per job number per code in an extra `Divider Barcodes` tab of the Signature Links file: `Tab | Pack | Code | Job Number | Kind | Qty | Barcode`. `tab_column_jobs` records which job number sits in each pack column. `assign_job_kinds()` numbers the kinds: a job number found in more than one column (same pack, another pack or another tab) gets Kind 1, 2, 3... in reading order, first tab to last and left to right within each tab. A job number in only one column has no kind. Kinds are counted across every selected tab, installer or not. `build_divider_barcode_rows()` then walks each code's signature: every column with a quantity and a job number becomes a row, and `Qty` is that store's quantity. `Barcode` is the exact text the divider's barcode encodes: the job number, plus ` Kind N` when it has more than one kind (e.g. `J476699-17 K1`), so a scan tells kinds apart. The tab is only written when at least one tab is an installer tab, so File 3 is otherwise unchanged.
 
 **File 2's "delete rows below the data" step** (`sheet2.range(f"{start_del}:1048576").api.EntireRow.Delete()`) clears out anything left below the actual store list (old totals, stray notes) before the new Count/Code summary columns get written — otherwise leftover junk rows could visually collide with the new summary block.
 
@@ -791,7 +792,7 @@ A handful of small "report generator" functions that draw brand-new PDF pages fr
 - **Green border** — `matched_count == expected_count` and `collision_note` is falsy. One line, no fraction: `"Matched Labels: {matched_count}"`.
 - **Red border** — counts don't match (adds `"matched/expected"` to the same line, plus a "Short by N store(s)" / "N extra store(s)" disclaimer), **or** `collision_note` is `True` (generic "Possible mismatch - please verify" disclaimer, no names) — even if the count happens to check out, because the "extra" label absorbed into this bucket might be hiding behind an otherwise-correct-looking number. No missing-store names or collision reasoning are ever drawn on a divider — that detail lives only on the audit report (or, for the same-store-twice case in standard layout, isn't shown as text anywhere at all — see [8.2](#82-process_standard_layout)).
 
-**Installer barcodes.** When `/pdf` Step 2 finds a `Divider Barcodes` tab in the Signature Links file (read by `core_math.read_divider_barcodes()`), it passes that pack's `{code: [entries]}` to `process_and_shuffle_pdf(divider_barcodes=...)`. `build_divider_sheet(..., barcode_entries=...)` then hands off to `_build_barcode_divider_sheet()`: same border, code and matched count, with a Code 128 barcode per job number underneath, captioned `J476699-09 Kind 1 x 1` (`barcode_caption()`). `code128_modules()` is a small built-in Code 128 (code set B) encoder, so no extra package is needed, and `_draw_code128()` draws the bars as vector rectangles. `_plan_barcode_grid()` picks the column count that keeps the bars widest, and `_paginate_barcodes()` moves barcodes onto extra divider pages rather than shrinking them below a scannable size (`BARCODE_MIN_MODULE`). The split layout adds one half per divider page. With no barcode entries, `build_divider_sheet()` is exactly as before.
+**Installer barcodes.** When `/pdf` Step 2 finds a `Divider Barcodes` tab in the Signature Links file (read by `core_math.read_divider_barcodes()`), it passes that pack's `{code: [entries]}` to `process_and_shuffle_pdf(divider_barcodes=...)`. `build_divider_sheet(..., barcode_entries=...)` then hands off to `_build_barcode_divider_sheet()`: same border, code and matched count, with a Code 128 barcode per job number underneath, captioned `J476699-09 K1 x 1` (`barcode_caption()`). `code128_modules()` is a small built-in Code 128 (code set B) encoder, so no extra package is needed, and `_draw_code128()` draws the bars as vector rectangles. `_plan_barcode_grid()` picks the column count that keeps the bars widest, and `_paginate_barcodes()` moves barcodes onto extra divider pages rather than shrinking them below a scannable size (`BARCODE_MIN_MODULE`). The split layout adds one half per divider page. With no barcode entries, `build_divider_sheet()` is exactly as before.
 
 A sibling function, `build_unmatched_divider_sheet(page_width, page_height, count)`, draws the same style of separator (always red) right before the unmatched-pages group, headed `"UNMATCHED PAGES / Total Pages: {count}"`.
 
@@ -1010,6 +1011,7 @@ pages = 1 + ceil((items − 12) / 18)    otherwise        e.g. 32 items → 1 + 
 | Install | bold red `INSTALLER` on installer packs | lines × 9s × 1.2 |
 | Job Number | bold white text on a black rounded bar | lines × 14s × 1.2 + 6s |
 | Quantity | large bold number in a heavy box, no unit | lines × 20s × 1.2 + 6s |
+| Barcode | Code 128 of the item's barcode text, as wide as the box allows, with that text printed small underneath | 22s + 2 + 6.5s × 1.2 |
 | between blocks | | 3s |
 
 The `× 1.2` is line spacing (120% of the font size). Blocks with no value are skipped, which is how a missing column frees its space.
@@ -1025,6 +1027,21 @@ thumb_scale = 1        if s ≥ 0.65
 ```
 
 Every block's height grows with `s`, so the total height only gets smaller as `s` falls — the first `s` that fits is the largest that fits. Nothing is ever drawn outside the box. PyMuPDF silently draws *nothing* when text doesn't fit a text box, which is why everything is measured first (the same lesson as `_fit_textbox()` in the Label Shuffler).
+
+**Barcodes.** Every item box can carry a Code 128 barcode (the **Barcode** block in the layout editor, placed after Job Number by default). `assign_barcodes()` follows the Distribution Mapper's kinds, with rows in place of columns:
+
+- A job number on **more than one row** gets one kind per row, **K1, K2, K3…** in reading order — first tab to last, then top to bottom — so K1 is its first row in the first tab. The barcode encodes `J477161-26 K3`.
+- A job number on **only one row** has no kind; the barcode encodes just `J477161-54`.
+- Kinds are counted across every selected tab together, so the same job number on two tabs continues K1, K2 → K3.
+
+The Job Number bar always prints the cell's exact text (line breaks kept, long lines wrapped). A job number with a line break or other character Code 128 can't hold gets **no barcode** and a preview warning ("No barcode: Job Number has a line break…"); the rest of the box prints as normal.
+
+**Fitting a barcode in a 43 mm box.** Code 128 needs 10 blank modules either side, and the bars are made as wide as the box allows (`module = inner width ÷ (symbol modules + 20)`, capped at the Label Shuffler's 0.96 pt). To keep them as wide as possible:
+
+- the **K1** format (instead of "Kind 1") shortens the text by 3 characters;
+- `code128_modules(text, compact=True)` switches to **code set C** (two digits per symbol) for runs of 4+ digits at either end or 6+ in the middle, e.g. the `477161` in `J477161-26`. It decodes to exactly the same text.
+
+`J477161-54 K1` comes out at **0.61 pt (0.21 mm)** per bar. Every encodable barcode on the 44-page Lux test 18 labels (105 of 105) decoded correctly at both 300 and 600 dpi with a standard decoder, with no wrong reads.
 
 `generate_packing_labels()` returns which PDF pages each pack used, plus the page size and courier region in mm, for the label map ([10.9](#109-the-label-map-json)).
 
@@ -1108,7 +1125,7 @@ head = "Sign Online"      text = "117 Firebrace St, HORSHAM, VIC, 3400"
 | Last token is… | Becomes |
 |---|---|
 | exactly 4 digits | postcode |
-| then an Australian state (`VIC NSW QLD SA WA TAS NT ACT`) or a New Zealand region code (`AUK BOP CAN CIT GIS HKB MBH MWT NSN NTL OTA STL TAS TKI WGN WKO WTC`, ISO 3166-2:NZ) | state |
+| then an Australian state (`VIC NSW QLD SA WA TAS NT ACT`) or a New Zealand region code — the official ISO 3166-2:NZ codes (`AUK BOP CAN CIT GIS HKB MBH MWT NSN NTL OTA STL TAS TKI WGN WKO WTC`) or Toll's own (`AUC CHR WEL MOU`) | state |
 | then anything, if more than one token remains | suburb |
 
 A second pattern handles the case without commas between them: `Mount Waverley VIC 3149` as one token → `(suburb)? (STATE) (dddd)`. If the tail doesn't look like this (a normal store address), the Suburb/State/Postcode **columns** from Step 0 are used instead.
@@ -1147,7 +1164,7 @@ receiver = "Sign Online"   contact = "Adam"
 → line1 = "Shop T11-14 The Strand Melbourne"     line2 = "250 Elizabeth St"
 ```
 
-**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state is upper-cased; `\.0$` is removed from the postcode (Excel's `3149.0`).
+**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state is upper-cased. The postcode goes through `normalize_postcode()`: Excel's `3149.0` becomes `3149`, and a 3-digit Australian or New Zealand postcode gets its lost leading zero back (`803` → `0803`), because the courier portal rejects 3-digit postcodes. The same padding is applied in the address book, to edits, and when importing verified addresses; entries saved before it are fixed once when the book opens.
 
 **Country** comes from the Country column (or a trailing `New Zealand` / `Australia` in a one-cell address) when there is one; otherwise it's `NZ` for a New Zealand region code and `AU` for everything else. `TAS` is both Tasmania and the Tasman region, so on its own it means Australia — give such addresses a Country of New Zealand. Changing the state in the ✏️ edit form re-applies this rule.
 
@@ -1262,6 +1279,29 @@ Sorting by a tuple compares the first value, and only on a tie the second — so
 
 All courier checks (required fields, known service codes) run **before** the project folder is created or the Excel file moved. If anything still fails afterwards, the Excel file is moved back and the half-made folder removed, so Generate can simply be retried. (Same "validate first, write last" idea as the Sub-Group Engine in [Section 7.2](#72-the-three-stages).)
 
+### 10.9 The label map JSON
+
+`<reference> - <project>.labelmap.json`, saved in the project folder for the future **Stitch Labels** tool and never shown in the app:
+
+```json
+{
+  "consignment_reference": "J477161",
+  "courier_label_region_mm": {"x": 4.0, "y": 4.0, "width": 107.0, "height": 150.0},
+  "consignments": [{"number": 2, "destination": {...}, "service_code": "STEROAD", "cartons": ["Label 1 - Provision Clayton", "..."]}],
+  "stores": {
+    "Provision Clayton": [{
+      "item_reference": "Label 1 - Provision Clayton", "label": 1, "of": 1,
+      "pdf_pages": [2], "courier_label_page": 2, "consignment": 2,
+      "headed_to": {"receiver": "Wilson Storage", "address": "68 Ricketts Road, ...", "installer": true},
+      "csv_row": 3, "excel_rows": [5, 6], "job_numbers": ["J477161-03", "J477161-04"],
+      "barcodes": ["J477161-03", "J477161-04 K1"]
+    }]
+  }
+}
+```
+
+The **item reference** is the join key: it's printed on the courier label (the CSV's last column) and it's the key here, which leads to the PDF page and the courier region's position on it (x, y, width, height in mm from the top-left).
+
 ### 10.10 The address book
 
 [address_book.py](../address_book.py) keeps every clean delivery address in a local SQLite file, `data/address_book.db`. SQLite needs no server, comes with Python, and only loads the rows a query asks for, so memory stays flat however big the book gets. Everything goes through the `AddressBook` class, so moving to a cloud database later means replacing this one file.
@@ -1270,17 +1310,30 @@ All courier checks (required fields, known service codes) run **before** the pro
 
 | Table | Holds |
 |---|---|
-| `addresses` | one row per receiver + address (unique on the address key + receiver key), with `use_count`, `last_used_at`, `created_at`, `updated_at` |
+| `addresses` | one row per receiver + Attn + address (unique on address key + receiver key + contact key), with `use_count`, `last_used_at`, `created_at`, `updated_at`, `verified_at`. One address can have several receivers and Attn names, so each combination is its own entry |
 | `addresses_fts` | an FTS5 full-text index over receiver, contact, address lines, suburb, state and postcode, kept in sync by triggers |
 | `aliases` | raw Excel spelling (the consignment's source id) → the address it was saved as. Deleting an address deletes its aliases |
 
 **How it learns**
 
-1. **Generate** calls `record_used()` with every consignment's final address (after any ✏️ edits) and the source ids of all its packs, in one transaction. A new address is added; a known one gets its details refreshed and `use_count` + 1; every raw spelling is pointed at it.
+1. **Generate** calls `record_used()` with every consignment's final address (after any ✏️ edits) and the source ids of all its packs, in one transaction. A known receiver + Attn + address gets its details refreshed and `use_count` + 1. A receiver or Attn not yet saved at that address is added as its **own entry** next to the others (nothing is overwritten); a blank Attn just counts as a use of the receiver's existing entry. A new entry at an address the courier portal already verified is marked verified too. Every raw spelling is pointed at the entry.
 2. **Preview** calls `_apply_address_book()`: for each Excel address not yet asked about, `lookup_aliases()` finds what the book learned for that spelling. If it differs from what was read from Excel, it's applied as an edit marked `'source': 'book'`, and the row shows a blue **Address book** tag.
 3. Each spelling is offered **once per scan** (listed in `__offered__`), so **Reset to Excel** sticks. Saving your own edit replaces the book's.
 
 So correcting an address once — in the ✏️ form before Generate, or on the Address Book page — fixes it for every future file that spells it the same way.
+
+**Checking every consignment against the book** (`_check_against_book()` in app.py, on each preview). Each consignment gets a status:
+
+| Status | When | Shown |
+|---|---|---|
+| book | filled in from a learned spelling (step 2) | blue **Address book** tag |
+| matched | the book holds this exact address, under **any** receiver or Attn (`at_address()`) | nothing; if the receiver or Attn is new to that address, a note says it will be added on Generate |
+| checked | not in the book, but you've edited it or pressed **Save** in its ✏️ form (`"checked": true` in the edits, so it survives Update Previews) | **Edited** tag if changed |
+| unverified | not in the book | listed **first**, amber, **Check address** tag, with a count above the table |
+
+For an unverified row, the ✏️ form lists the **closest saved addresses**, most likely first (`address_match.suggestions()`, top 5). Candidates are the same postcode (`near()`), the same receiver name, and full-text matches for the receiver in case the postcode itself is wrong. The ranking leans on the address (60 %) over the name (40 %), because one address often has several receivers; another postcode counts for less. Each card says why ("Same address, another receiver", "Same receiver, different address", "Similar address"…), and clicking it fills the form. If nothing is close, the form shows a disclaimer instead: check the address against the job before generating, since it will be saved to the book as it is. Saving the form clears the flag. Nothing blocks Generate.
+
+The upgrade to receiver + Attn entries ran once on books made before it (`_add_contact_key()`): the table is rebuilt with the same ids, so learned spellings and the search index stay valid, and a copy is kept first as `data/address_book.before-attn-upgrade.db`.
 
 **Searching**
 
@@ -1306,29 +1359,53 @@ On the page, the first 50 rows appear ~20 ms after load, "Load more" and saving 
 **The pages**
 
 - **Address Book page** ([address_book.html](../templates/address_book.html), `script.js` section 12): search box (waits 120 ms after the last keystroke and cancels stale requests), 50 rows at a time with **Load more**, ✏️ edit and 🗑️ delete per row, **+ Add address**. Edits happen in a row under the entry (Enter saves, Esc cancels); errors appear in that row. The column headings stay pinned just under the nav bar while you scroll: script.js measures the nav's height into `--nav-height`, and the table's wrapper deliberately has no `overflow` (a scrolling or clipping box would pin the headings to the box instead of the page). Below 1100 px wide, Country, Used and Last used are hidden so the table still fits.
-- **Consignment ✏️ form:** typing 2+ characters in Receiver Name or Address Line 1 shows up to 6 matches from the book (`attachAddressSuggestions`); ↑/↓ and Enter, or a click, fills the whole form.
+- **Consignment ✏️ form:** typing 2+ characters in Receiver Name or Address Line 1 shows up to 6 matches from the book (`attachAddressSuggestions`); ↑/↓ and Enter, or a click, fills the whole form. A row that isn't in the book also lists its closest saved addresses (above).
 
-### 10.9 The label map JSON
+### 10.11 Updating the book from the courier portal
 
-`<reference> - <project>.labelmap.json`, saved in the project folder for the future **Stitch Labels** tool and never shown in the app:
+Addresses can only be verified once the consignment CSV is uploaded to the courier portal (Toll), which then offers a CSV of the verified addresses **with the same headers as the CSV this app generates**. The **⬆ Update in bulk** button on the Address Book page opens `/address-book/update` ([address_verify.html](../templates/address_verify.html)). It isn't tied to one project: each row is checked against every project's label map and the address book itself.
 
-```json
-{
-  "consignment_reference": "J477161",
-  "courier_label_region_mm": {"x": 4.0, "y": 4.0, "width": 107.0, "height": 150.0},
-  "consignments": [{"number": 2, "destination": {...}, "service_code": "STEROAD", "cartons": ["Label 1 - Provision Clayton", "..."]}],
-  "stores": {
-    "Provision Clayton": [{
-      "item_reference": "Label 1 - Provision Clayton", "label": 1, "of": 1,
-      "pdf_pages": [2], "courier_label_page": 2, "consignment": 2,
-      "headed_to": {"receiver": "Wilson Storage", "address": "68 Ricketts Road, ...", "installer": true},
-      "csv_row": 3, "excel_rows": [5, 6], "job_numbers": ["J477161-03", "J477161-04"]
-    }]
-  }
-}
-```
+**1. Read the file** ([address_import.py](../address_import.py)). CSV **or Excel** (`.xlsx`, or `.xls` converted through Excel), in any layout: other sources won't match the Toll headers, so only the columns the address book needs are read and everything else is ignored.
 
-The **item reference** is the join key: it's printed on the courier label (the CSV's last column) and it's the key here, which leads to the PDF page and the courier region's position on it (x, y, width, height in mm from the top-left).
+- `read_sheets()` turns the upload into rows of text (CSV: handles Excel's BOM, older Windows encodings and the delimiter; Excel: every sheet, numbers like `3186.0` read as `3186`).
+- `map_columns()` looks for the header row in the first 15 rows (so title rows above it are fine) and scores every header against each field by **keywords** (`FIELD_KEYWORDS`): an exact name scores 3, containing a keyword 2, plus 1 if it says it's the receiver's (receiver, delivery, ship to, consignee). So `Receiver Name`, `Company`, `Customer Name` and `Ship To Name` all work for the receiver; `Street`/`Address` for line 1; `Town/Suburb`/`City` for suburb; `Post Code`/`Zip` for postcode.
+- Headers about someone else (`Sender`, `From`, `Pickup`, `Return`) or about phone, email, references, dates, weights… never count, so `Sender Name` or `Contact Phone` are never mistaken for the receiver or contact.
+- `pick_sheet()` uses the sheet whose headers fit best. At least a receiver or address column plus a postcode column are needed.
+- Columns the file doesn't have are simply not compared, so the entry keeps its existing contact, ATL, country, etc.
+
+**2. Match each row to the entry it corrects** (`build_review()`). The **receiver name** comes first: the same address can serve many jobs, and the receiver is what identifies an entry. Toll's Open360 export, for one, has no item reference at all (its "Shipment Ref" is just the J number).
+
+| Situation | Result |
+|---|---|
+| one saved entry with this receiver (several Attn entries at one address count as the same place: `find()` prefers the one with the row's Attn) | matched (**receiver name**) |
+| several entries with this receiver, one at exactly this address | matched (**receiver name + address**) |
+| several, and the row's item reference / J number leads to one of them via a project label map | matched (**receiver name + job**) |
+| several, and one of their addresses is obviously this one | likely match (**receiver name + similar address**) |
+| several, and nothing tells them apart | not matched, left **unticked** ("several saved addresses for this receiver") — never guessed |
+| no receiver column, but an item reference leads to one entry | matched (**item reference**) |
+| no entry with exactly this receiver, but one with the same postcode obviously is it | likely match (**likely match: name NN%, address NN%**) |
+| none of the above | **new**, ticked by default (untick to skip) |
+
+The portal's text is saved exactly as it comes — including lines Toll has shortened (it cuts long address lines, e.g. `…Westfield Shoppingtown 4-10 Jamie`).
+
+**Likely matches** ([address_match.py](../address_match.py)). The portal often spells the receiver a little differently (`YD DFO HORNBY` for the saved `YD Hornby DFO`, `Rebel Mt Gravatt` for `Rebel Mt Gravatt (Garden City)`). A likely match is ticked like any update, with the note *"Close match, not exact — check it's the same place before applying."* It is only proposed when the match is obvious:
+
+- **Short-list** (`AddressBook.near()`): only entries with the same postcode (indexed). In a crowded postcode (more than 100 entries, e.g. a CBD), the name and street words of all its entries are read once per import (`cache`) and the 30 sharing the most words with the row are scored.
+- **Name score** (`name_score()`, 0–1): shared words (ignoring *Pty Ltd, The, Store, Shop…*), one name containing the other (a single shared word like *Rebel* is weak evidence), and character similarity for typos (only worked out when the cheap upper bound could pass).
+- **Address score** (`address_score()`, 0–1): the **numbers** must agree (shop/unit/street numbers like `S240`, `4-10`). If each side has a number the other lacks (`Shop 1040` vs `Shop 2210` at the same centre), the score is 0, because that's a different shop. The **street words** must overlap, with Street = St etc., and a word cut short by the portal still counts (`Jamie` ≈ `Jamieson`). The **suburb** must be the same.
+- **Accepted** (`best_match()`) only if name ≥ 45 %, address ≥ 55 %, the average ≥ 70 %, **and** it beats the runner-up by 10 points. Otherwise the row is new, never a guess. So another brand in the same centre, or the same brand at another shop number, is not matched.
+- **Speed**: under 1.5 ms a row at 50,000 entries, about 3–4 ms in a postcode with 2,000 entries, so a 1,000-row file takes 1–4 s.
+
+**3. Review.** Several CSV rows for one entry (one per carton) become one proposal. The rows you can act on (conflicting, to update, not matched) come first, then the **Apply ticked changes** / **Choose another file** buttons, then a separate **Already up to date** table, so you can apply without scrolling past rows that need nothing. Each proposal is:
+
+| Status | Meaning | Ticked |
+|---|---|---|
+| to update | the portal's address differs; changed parts highlighted | yes |
+| new | not in the book; added as a new verified address unless you untick it | yes (unless the receiver is ambiguous) |
+| already up to date | the portal agrees with the book; marked ✓ Verified automatically on apply | no tick box |
+| conflicting | rows for the same entry give different addresses (both shown, differences highlighted); fix the file and add it again | can't tick |
+
+**4. Apply** (`apply_review()`): every **already up to date** entry is marked verified (`mark_verified()`), no tick needed. Each ticked update goes through `AddressBook.apply_verified()`: the entry takes the portal's address and gets `verified_at` set, shown as **✓ Verified** on the Address Book page. Its learned Excel spellings stay linked, so the next file with the same spelling gets the verified address. If the verified address is one the book already holds under another entry, the two are **merged**: the existing entry keeps the address, takes over the use count and spellings, and the duplicate is removed. One bad row doesn't stop the others; problems are listed on the result screen. When nothing needs changing, the button reads **Mark as verified**.
 
 ---
 
@@ -1693,7 +1770,7 @@ sequenceDiagram
 | Change how a PDF page is matched to a store (the text region it reads) | `pdf_engine.py` → the `fitz.Rect(...)` clip rectangles in `process_standard_layout` / `process_split_layout` |
 | Change whether/how divider sheets look, or the green/red match logic | `pdf_engine.py` → `build_divider_sheet()` |
 | Change the "Unmatched Pages" divider sheet | `pdf_engine.py` → `build_unmatched_divider_sheet()` |
-| Change what an installer divider's barcode encodes (currently the job number, plus " Kind N" for multi-kind jobs) | `matrix_engine.py` → `build_divider_barcode_rows()` (the last value of each row is the `Barcode` column) |
+| Change what an installer divider's barcode encodes (currently the job number, plus " KN" (e.g. " K1") for multi-kind jobs) | `matrix_engine.py` → `build_divider_barcode_rows()` (the last value of each row is the `Barcode` column) |
 | Change how kinds are numbered | `matrix_engine.py` → `assign_job_kinds()` |
 | Change barcode size limits, caption text, or the barcode divider layout | `pdf_engine.py` → the `BARCODE_*` constants, `barcode_caption()` and `_build_barcode_divider_sheet()` |
 | Change the audit report's colors/text, or the Missing Stores column layout | `pdf_engine.py` → `build_audit_report()` and `group_missing_stores_by_code()` |
@@ -1714,9 +1791,12 @@ sequenceDiagram
 | Change the packing-label checks (errors vs warnings) | `packing_label_generator.py` → `_check_pack_consistency()` and the end of `parse_packing_data()` |
 | Change the packing-label header keywords | `packing_label_generator.py` → the header loop in `parse_packing_data()` |
 | Change packing-label margins, gaps or the courier region size | `packing_label_generator.py` → constants at the top of `generate_packing_labels()` |
+| Change what a packing-label barcode encodes, or how kinds are numbered | `packing_label_generator.py` → `barcode_text()` and `assign_barcodes()` |
+| Change the size of packing-label barcodes | `packing_label_generator.py` → the `'barcode'` branch of `_layout_cell()` |
 | Change how blocks look inside a packing-label box | `packing_label_generator.py` → `TEXT_STYLES` and `_layout_cell()` (and the matching preview in `packing_labels.html`) |
 | Change how old abandoned uploads must be before cleanup | `app.py` → `clean_old_projects()` (`24 * 60 * 60`) |
 | Change what counts as an abandoned Label Shuffler folder | `app.py` → `is_abandoned_project()` |
+| Change how the courier portal's verified CSV is read or matched | `address_import.py` → `HEADER_NAMES`, `map_columns()`, `build_review()`; how close a "likely match" must be: `address_match.py` → `MIN_NAME`, `MIN_ADDRESS`, `MIN_TOTAL`, `MIN_LEAD` |
 | Change how the address book searches or ranks | `address_book.py` → `_match_query()`, `RANK`, `search()` |
 | Change what the address book saves after Generate, or when it fills addresses in | `address_book.py` → `record_used()`; `app.py` → `_apply_address_book()` |
 | Move the address book somewhere else (e.g. a cloud database) | replace `address_book.py`, keeping the `AddressBook` methods; the file path is set in `app.py` (`ADDRESS_BOOK`) |
