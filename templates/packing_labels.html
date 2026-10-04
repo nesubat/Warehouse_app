@@ -57,11 +57,16 @@
         <!-- STEP 1: FILE UPLOAD -->
         {% if not tabs and not generation_complete %}
         <div class="instructions-box pl-instructions">
-            <h4 class="instructions-title">⚠️ Label Auto-Mapper Requirements</h4>
+            <h4 class="instructions-title">⚠️ Requirements</h4>
             <ul class="instructions-list">
-                <li><strong>Header Row:</strong> Tell the engine which row contains your headers (e.g. 1 or 2). It will scan it automatically.</li>
-                <li><strong>Standard Column Names Supported:</strong> "Store Name", "Thumbnail", "Job Number", "Quantity", "Description", "Width" & "Height" (or "Dimension"), "Address Line 1", "Suburb", "State", "Postcode", "Country", "Material", "Install", and "Notes".</li>
-                <li><strong>Required Column:</strong> Your data <strong>MUST</strong> have a column named exactly "Packing Spec".</li>
+                <li><strong>Header Row:</strong> Tell the tool which row holds your headers (e.g. 1 or 2). It finds the columns automatically.</li>
+                <li><strong>Required Columns:</strong> "Packing Spec", "Job Number" and "Install" <strong>must</strong> be present.</li>
+                <li><strong>Packing Spec:</strong> Merge the Packing Spec cells across all rows that go in the same box. Every row needs a Packing Spec.</li>
+                <li><strong>Job Number:</strong> Every row needs one.</li>
+                <li><strong>Install:</strong> <strong>Y</strong> for a box going to an installer; <strong>N</strong> or blank for a box going to the store. All rows of one box must agree.</li>
+                <li><strong>Address:</strong> All rows of one box must have the same address (merged cells are fine). A store's own boxes must share one address; installer boxes may differ.</li>
+                <li><strong>Thumbnail:</strong> Put each row's image inside its own Thumbnail cell. Several images in one cell, or a merged Thumbnail cell, are all used.</li>
+                <li><strong>Other Columns Supported:</strong> "Store Name", "Quantity", "Description", "Width" &amp; "Height" (or "Dimension"), "Address Line 1", "Address Line 2", "Suburb", "State", "Postcode", "Country", "Material" and "Notes".</li>
             </ul>
         </div>
 

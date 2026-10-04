@@ -366,6 +366,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         raise ValueError(f"Could not find a 'Packing Spec' column in Row {header_row}.")
     if 'job_no' not in cols:
         raise ValueError(f"Could not find a 'Job Number' column in Row {header_row}.")
+    if 'install' not in cols:
+        raise ValueError(f"Could not find an 'Install' column in Row {header_row}. Add one: Y for packs going to an installer, N or blank for the store.")
 
     def get_cell_info(row, col):
         for merged_range in ws.merged_cells.ranges:

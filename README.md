@@ -25,7 +25,7 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **Safe Duplicate Handling:** If the Signature Links file has duplicate store names, nothing is deleted — open the file, fix it, and click "Recheck File" to continue instantly, without re-uploading.
 *   **Audit Report:** Every shuffled PDF starts with a report page listing any missing/unmatched stores (grouped by code, auto-laid-out into columns) and flagging any code group where a store name repeated unexpectedly, so a mis-sorted batch is never silently trusted.
 
-### 4. 🏷️ Packing Labels & Courier CSV
+### 4. 🏷️ Packing Labels & Courier CSV (Label Maker for Vertical Distribution)
 *   **One Label per Box:** Each merged **Packing Spec** cell becomes one A4-landscape packing label: a 107 × 150 mm space for the courier label, the Packing Spec in a bold black panel, the store and address, `LABEL X OF Y` / `PAGE X OF Y` counters, and one rounded box per item.
 *   **Drag-and-Drop Cell Layout:** Choose the order of image, description, dimensions, job number, quantity, material, install and notes inside each box. Each block keeps its own style wherever it's placed, and text wraps and shrinks so nothing ever spills outside the box.
 *   **Thorough Checks Before Printing:** Missing job numbers or packing specs, a pack with mixed addresses, store names or Install flags, a store with conflicting addresses, missing images — each reported with its Excel row and column. Errors lock Generate until fixed; warnings don't. Spelling differences such as capitals, punctuation and Street/St are ignored.
@@ -87,7 +87,7 @@ flowchart TD
 * **Data Hygiene:** The application is built to automatically detect true sheet boundaries. However, keeping input files trimmed of unused rows/columns is recommended for maximum processing speed.
 * **Save before generating:** When you click Generate (on any tool) or Recheck, the app closes every copy of that spreadsheet open in Excel — in any Excel window, including Protected View — **without saving**, so it always works from the saved file. Make sure you've saved your changes first.
 * **Save before leaving:** The same applies when you leave a page without generating — the upload is closed in Excel without saving and deleted. Fix the file, save it, then scan it again.
-* **Packing Labels spreadsheets:** Merge the **Packing Spec** cells across all rows that go in the same box — that merge is what defines a box. Every row needs a **Job Number**.
+* **Packing Labels spreadsheets:** **Packing Spec**, **Job Number** and **Install** columns are required. Merge the Packing Spec cells across all rows that go in the same box — that merge is what defines a box. Every row needs a Job Number. Install is `Y` for a box going to an installer; `N` or blank means it goes to the store.
 
 ---
 

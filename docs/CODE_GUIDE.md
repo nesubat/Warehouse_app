@@ -790,6 +790,8 @@ The only function `app.py` actually calls. It measures the page, decides which o
 
 ## 9. `packing_label_generator.py` — Packing Labels
 
+Shown in the app as **📦 Packing Labels** — the *Label Maker for Vertical Distribution*.
+
 **Purpose:** read a packing-spec spreadsheet, check it thoroughly, and draw one A4-landscape packing label per box. Each label has a space for the courier label, the box's Packing Spec, the store and address, and one rounded box per item (image, description, job number, quantity…).
 
 ### 9.1 What the user does
@@ -815,7 +817,7 @@ Header cells in the chosen row are lower-cased and tested against keywords **in 
 | Address info | `address` / `address line 1` / `street address`, `address line 2`, `suburb`, `state`, `postcode`, `country` | No |
 | Material | `material` | No |
 | Notes | `note` | No |
-| Install | `install` | No |
+| Install | `install` (so `Installer` works too) | **Yes** — `Y`/`Yes`/`True` = installer; `N`, blank or anything else = store |
 
 Dimensions: a `Dimension` column wins; otherwise `Width x Height`; otherwise whichever exists.
 
@@ -884,7 +886,7 @@ Checks collect **all** problems before reporting, then raise one `PackCheckError
 
 | # | Situation |
 |---|---|
-| — | No Packing Spec column, or no Job Number column |
+| — | No Packing Spec, Job Number or Install column |
 | — | A row has a Job Number but no Packing Spec (rows after the first blank Packing Spec would otherwise be skipped silently) |
 | — | A row has no Job Number |
 | 2 | Rows in one pack have different addresses |
