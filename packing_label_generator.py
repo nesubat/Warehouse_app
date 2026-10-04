@@ -170,6 +170,38 @@ def _norm(text):
     return " ".join(re.sub(r"[^0-9a-z]+", " ", str(text or '').lower()).split())
 
 
+NOT_A_PLACE = ('email', 'e-mail', 'phone', 'mobile', 'contact', 'attn', 'attention', 'fax')
+RECEIVER_WORDS = ('store', 'retailer', 'receiver', 'consignee', 'ship to', 'deliver to', 'delivery name')
+
+
+def _header_field(header):
+    """Which column a header is: 'Store Name', 'Retailer', 'Receiver Name' or 'Consignee' are all the store
+    (receiver); 'Address Line 1', 'Receiver Address Line 1' or 'Store Address' the street. Address parts
+    are checked before the store/receiver words, so 'Receiver Suburb' is the suburb, not the receiver."""
+    h = " ".join(str(header).strip().lower().replace('_', ' ').split())
+    words = set(re.findall(r'[a-z]+', h))
+    place_ok = not any(w in h for w in NOT_A_PLACE)
+    if 'packing spec' in h: return 'packing_spec'
+    if 'job' in h: return 'job_no'
+    if 'qty' in h or 'quantity' in h: return 'qty'
+    if 'desc' in h: return 'desc'
+    if 'thumb' in h or 'image' in h or 'picture' in h or 'art' in words or 'artwork' in words: return 'thumbnail'
+    if 'dimension' in h: return 'dim_combined'
+    if 'width' in h or h == 'w': return 'dim_w'
+    if 'height' in h or h == 'h': return 'dim_h'
+    if place_ok and ('address' in h or 'street' in h):
+        return 'address_2' if re.search(r'(line|address|addr)\s*2\b', h) else 'address_1'
+    if place_ok and ('suburb' in h or 'town' in words or 'city' in words or 'locality' in words): return 'suburb'
+    if place_ok and 'state' in words: return 'state'
+    if place_ok and ('postcode' in h or 'post code' in h or 'postal code' in h or 'zip' in words): return 'postcode'
+    if place_ok and 'country' in h: return 'country'
+    if 'material' in h: return 'material'
+    if 'note' in h: return 'notes'
+    if 'install' in h: return 'install'
+    if place_ok and any(w in h for w in RECEIVER_WORDS): return 'store_name'
+    return None
+
+
 class PackCheckError(ValueError):
     """Blocking problems found in the sheet; carries the structured issues for the preview table."""
     def __init__(self, issues, warnings):
@@ -292,11 +324,13 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
                     else:
                         errors.append(_issue(rows_text, col['address'], f"{name}: store address differs between packs", _variants(group, 'address_key', 'address')))
 
-    # Neighbouring packs with the same spec and store usually mean the Packing Spec cells weren't merged
+    # Neighbouring packs with the same spec and store usually mean the Packing Spec cells weren't merged.
+    # No store column: the address (which then names the receiver) stands in for the store.
     ids = list(pack_rows)
+    who = lambda pid: _norm(pack_groups[pid]['store_name']) or pack_rows[pid][0]['address_key']
     for prev_id, next_id in zip(ids, ids[1:]):
         prev, nxt = pack_groups[prev_id], pack_groups[next_id]
-        if _norm(prev['pack_spec_name']) == _norm(nxt['pack_spec_name']) and _norm(prev['store_name']) == _norm(nxt['store_name']):
+        if _norm(prev['pack_spec_name']) == _norm(nxt['pack_spec_name']) and who(prev_id) == who(next_id):
             span = _row_ranges(list(range(pack_rows[prev_id][0]['row'], pack_rows[next_id][-1]['row'] + 1)))
             warnings.append(_issue(span, col['packing_spec'], f"Same spec {nxt['pack_spec_name']} split into separate packs — merge if one box"))
 
@@ -339,26 +373,17 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     for col_idx in range(1, ws.max_column + 1):
         val = ws.cell(row=header_row, column=col_idx).value
         if not val: continue
-        val_str = str(val).strip().lower()
-        
-        if 'packing spec' in val_str: cols['packing_spec'] = col_idx
-        elif 'store' in val_str or 'retailer' in val_str: cols['store_name'] = col_idx
-        elif 'job' in val_str: cols['job_no'] = col_idx
-        elif 'qty' in val_str or 'quantity' in val_str: cols['qty'] = col_idx
-        elif 'desc' in val_str: cols['desc'] = col_idx
-        elif 'thumb' in val_str or 'image' in val_str or 'picture' in val_str or 'art' in val_str: cols['thumbnail'] = col_idx
-        elif 'dimension' in val_str: cols['dim_combined'] = col_idx
-        elif 'width' in val_str or val_str == 'w': cols['dim_w'] = col_idx
-        elif 'height' in val_str or val_str == 'h': cols['dim_h'] = col_idx
-        elif 'address line 1' in val_str or 'street address' in val_str or val_str == 'address': cols['address_1'] = col_idx
-        elif 'address line 2' in val_str: cols['address_2'] = col_idx
-        elif 'suburb' in val_str: cols['suburb'] = col_idx
-        elif 'state' in val_str: cols['state'] = col_idx
-        elif 'postcode' in val_str or 'post code' in val_str: cols['postcode'] = col_idx
-        elif 'country' in val_str: cols['country'] = col_idx
-        elif 'material' in val_str: cols['material'] = col_idx
-        elif 'note' in val_str: cols['notes'] = col_idx
-        elif 'install' in val_str: cols['install'] = col_idx
+        field = _header_field(str(val))
+        if not field:
+            continue
+        # As before, a later matching column wins; but a 'Store'/'Retailer' column beats a 'Receiver'-type one
+        is_store = field == 'store_name' and ('store' in str(val).lower() or 'retailer' in str(val).lower())
+        if field == 'store_name' and not is_store and cols.get('_store_is_named'):
+            continue
+        cols[field] = col_idx
+        if is_store:
+            cols['_store_is_named'] = True
+    cols.pop('_store_is_named', None)
 
     found_headers = {
         'Packing Spec': 'packing_spec' in cols,
@@ -368,7 +393,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         'Description': 'desc' in cols,
         'Thumbnail': 'thumbnail' in cols,
         'Dimensions': 'dim_combined' in cols or 'dim_w' in cols or 'dim_h' in cols,
-        'Address Info': 'address_1' in cols or 'suburb' in cols or 'state' in cols,
+        'Address Info': any(k in cols for k in ADDRESS_FIELDS),
         'Material': 'material' in cols,
         'Notes': 'notes' in cols,
         'Install': 'install' in cols
@@ -750,8 +775,12 @@ def assign_label_numbers(pack_groups):
         g['label_no'], g['label_total'] = seen[key], totals[key]
 
 
-def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None):
-    """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}."""
+def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None):
+    """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
+
+    addresses: {pack_key: address text} as finalised in the consignment preview (address book, edits).
+    A pack without one (no usable address for the courier) shows its Excel address."""
+    addresses = addresses or {}
     doc = fitz.open()
     MM2PT = 2.83465
     MARGIN = 4 * MM2PT
@@ -808,8 +837,10 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         page.insert_text((zone_b.x0, y + 12), line, fontname="hebo", fontsize=13)
                         y += 13 * LINE
 
-                addr_parts = [_clean(group_data.get(k)) for k in ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')]
-                address = ", ".join(p for p in addr_parts if p)
+                address = addresses.get(pack_key)
+                if not address:
+                    addr_parts = [_clean(group_data.get(k)) for k in ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')]
+                    address = ", ".join(p for p in addr_parts if p)
                 if address:
                     address_lines = _wrap(address, "helv", 9, zone_b.width)
                     room = int((zone_b.y1 - CHIP_H - 4 - y) // (9 * LINE))

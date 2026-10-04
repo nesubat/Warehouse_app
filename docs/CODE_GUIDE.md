@@ -818,21 +818,24 @@ Shown in the app as **📦 Packing Labels** — the *Label Maker for Vertical Di
 
 ### 9.2 Columns it recognises
 
-Header cells in the chosen row are lower-cased and tested against keywords **in this order**; the first match wins:
+`_header_field()` lower-cases each header cell in the chosen row and tests it against keywords **in this order**; the first match decides the column:
 
 | Data | Header contains | Required |
 |---|---|---|
 | Packing Spec | `packing spec` | **Yes**, on every row |
-| Store Name | `store` or `retailer` | No |
 | Job Number | `job` | **Yes**, on every row |
 | Quantity | `qty` or `quantity` | No (defaults to 1) |
 | Description | `desc` | No |
-| Thumbnail | `thumb`, `image`, `picture` or `art` | No |
+| Thumbnail | `thumb`, `image`, `picture`, or the word `art` / `artwork` (not "Start Date", "Department") | No |
 | Dimensions | `dimension`, or `width` / `height` (`w` / `h`) | No |
-| Address info | `address` / `address line 1` / `street address`, `address line 2`, `suburb`, `state`, `postcode`, `country` | No |
+| Address line 1 / 2 | `address` or `street`; line 2 when it says `line 2` / `address 2` | No |
+| Suburb, State, Postcode, Country | `suburb` / `town` / `city`, the word `state`, `postcode` / `post code` / `zip`, `country` | No |
 | Material | `material` | No |
 | Notes | `note` | No |
 | Install | `install` (so `Installer` works too) | **Yes** — `Y`/`Yes`/`True` = installer; `N`, blank or anything else = store |
+| Store Name (the receiver) | `store`, `retailer`, `receiver`, `consignee`, `ship to`, `deliver to` | No |
+
+The address parts come **before** the store/receiver words, so `Receiver Address Line 1`, `Store Address`, `Receiver Suburb` or `Store State` are address columns and `Receiver Name` / `Store Name` / `Retailer` / `Consignee` is the store. A header about phone, email, contact or Attn is never taken as the receiver or an address. When two columns match the same field the later one wins, except that a `Store` / `Retailer` column beats a `Receiver`-type one.
 
 Dimensions: a `Dimension` column wins; otherwise `Width x Height`; otherwise whichever exists.
 
@@ -995,7 +998,7 @@ pages = 1 + ceil((items − 12) / 18)    otherwise        e.g. 32 items → 1 + 
 
 **What's on each page.**
 
-- **First page of a label:** the courier label region (dashed placeholder), and under it the **Packing Spec** in a black rounded panel with large white text (starts at 22 pt and shrinks 1 pt at a time until it fits on two lines, minimum 11 pt), the store name and address, and `LABEL X OF Y` / `PAGE X OF Y` chips at the bottom-left.
+- **First page of a label:** the courier label region (dashed placeholder), and under it the **Packing Spec** in a black rounded panel with large white text (starts at 22 pt and shrinks 1 pt at a time until it fits on two lines, minimum 11 pt), the store name and address, and `LABEL X OF Y` / `PAGE X OF Y` chips at the bottom-left. The address is the one its consignment is sent to, exactly as finalised in the consignment preview (address-book fills and ✏️ edits included): Generate passes `{pack key: address}` to `generate_packing_labels(..., addresses)`. A pack left out of the courier CSV (no postcode) shows its Excel address.
 - **Later pages:** no Packing Spec; the store name and the two chips sit in the bottom-left, and the boxes start at the top margin.
 - **Label X of Y** (`assign_label_numbers`): a `Counter` of `_norm(store_name)` gives each store's total; a second counter increments as packs are visited in file order. Using `_norm` means `Spectacle Hub Curlewis` and `Spectacle Hub Curlewis ` are one store. When several tabs are generated together, a store is counted across all of them. The PDF and the CSV both call this one function, so their numbers always agree. **Page X of Y** counts pages within one label.
 - **Rounded corners:** PyMuPDF takes radius as a fraction of the shorter side, so `radius = r ÷ min(width, height)`, capped at 0.5.
@@ -1069,6 +1072,7 @@ There's no machine learning here. The method is: **peel off the parts you can re
 | Misspelt "Attn" | `Sign Online - 117 Firebrace St, HORSHAM, VIC, 3400 - Atnn Adam ATL` |
 | Two-part street | `Shop T11-14 The Strand Melbourne, 250 Elizabeth St ` |
 | Numeric postcode cell | `3149.0` (Excel stored it as a number) |
+| Everything in one column, any separator | `Andrew, 27 sirius road, lan cove NSW, 2067` · `Andrew \| 27 Sirius Rd \| Lane Cove NSW 2067` · `Andrew 27 Sirius Road Lane Cove New South Wales 2067` |
 
 The installer shape is the general one:
 
@@ -1080,7 +1084,7 @@ The installer shape is the general one:
 
 **Step 0 — gather the raw text.** Address Line 1 and Line 2 are joined; Suburb, State and Postcode columns are kept aside as a fallback.
 
-**Step 1 — collapse whitespace** (`re.sub(r'\s+', ' ', ...)`). Double spaces, tabs and line breaks inside a cell become one space, so later patterns can assume single spaces.
+**Step 1 — collapse spaces.** Double spaces and tabs become one space. **Line breaks are kept**: inside a cell (Alt+Enter) they separate parts of the address like commas do (step 6).
 
 **Step 2 — Authority To Leave.** `\bATL\b` (case-insensitive) is searched for anywhere. `\b` is a *word boundary*, so it matches `ATL` as a whole word but not inside `ATLANTIC`. If found: `authority_to_leave = True`, and the word is removed.
 
@@ -1118,7 +1122,7 @@ after: Sign Online - 117 Firebrace St, HORSHAM, VIC, 3400
 head = "Sign Online"      text = "117 Firebrace St, HORSHAM, VIC, 3400"
 ```
 
-**Step 6 — split on commas into tokens:** `["117 Firebrace St", "HORSHAM", "VIC", "3400"]`
+**Step 6 — split into parts** (`_segments()`): `["117 Firebrace St", "HORSHAM", "VIC", "3400"]`. Commas, semicolons, `|`, line breaks, tabs, ` - ` and ` / ` all separate. A dash between two numbers (`Shop 1 - 3`, `4-10`) and a slash without spaces (`3/27`) don't. Phone numbers (`0412 345 678`, `+61 …`) are dropped first, and a part starting `Attn` becomes the attention name wherever it is.
 
 **Step 7 — read the tail from right to left.** Australian addresses end in a predictable order — *suburb, state, postcode* — so the code pops tokens off the end while they match:
 
@@ -1128,13 +1132,13 @@ head = "Sign Online"      text = "117 Firebrace St, HORSHAM, VIC, 3400"
 | then an Australian state (`VIC NSW QLD SA WA TAS NT ACT`) or a New Zealand region code — the official ISO 3166-2:NZ codes (`AUK BOP CAN CIT GIS HKB MBH MWT NSN NTL OTA STL TAS TKI WGN WKO WTC`) or Toll's own (`AUC CHR WEL MOU`) | state |
 | then anything, if more than one token remains | suburb |
 
-A second pattern handles the case without commas between them: `Mount Waverley VIC 3149` as one token → `(suburb)? (STATE) (dddd)`. If the tail doesn't look like this (a normal store address), the Suburb/State/Postcode **columns** from Step 0 are used instead.
+`parse_address_text()` reads the tail. The postcode can be a part of its own or end the last part (`Lane Cove NSW 2067`). The state can be a code or a full name (`New South Wales` → `NSW`, `Victoria` → `VIC`…). The suburb is what's left of that part. When the street and suburb share one part with no separator (`27 Sirius Road Lane Cove`), the suburb starts after the **last street word** (`Road`, `St`, `Hwy`… `STREET_WORDS`) that follows a name word. So `Lane Cove` and `St Kilda Road St Kilda` come out right: `Lane` after `Road` and `St` after a number aren't street ends. What the address cell spells out wins over the Suburb / State / Postcode columns, as before. A second pattern handles the case without commas between them: `Mount Waverley VIC 3149` as one token → `(suburb)? (STATE) (dddd)`. If the tail doesn't look like this (a normal store address), the Suburb/State/Postcode **columns** from Step 0 are used instead.
 
 ```
 postcode = 3400   state = VIC   suburb = HORSHAM   tokens left = ["117 Firebrace St"]
 ```
 
-**Step 8 — a company hiding at the front of the street.** If there was a head, more than one token remains, and the first token has **no digits**, that token is a company:
+**Step 8 — names at the front.** When the file has **no store / receiver column**, every leading part that names someone (`_is_name()`: no digits, no address word such as `Shop`, `Westfield`, `Centre`, `PO Box`, `Level`, not ending in a street word) is a name: `Andrew, 27 Sirius Rd…` → `Andrew`; `Andrew Smith, Acme Signs Pty Ltd, 27 Sirius Rd…` → person + company. A name run straight into the street (`Andrew 27 Sirius Road`) is the words before the street number. With a store column only the old rule applies: if there was a head, more than one token remains, and the first token has **no digits**, that token is a company:
 
 ```
 Steven Priestley - Wilson Storage, 68 Ricketts Road, ...
@@ -1187,6 +1191,13 @@ Final result:
 | 9 | `Steven Priestley` → person |
 | 10 | receiver `Wilson Storage`, contact `Steven Priestley` |
 
+**Files with only one combined address column** (`fill_store_names()`, run right after the file is read, `_read_tab()` in app.py):
+
+- A pack with **no store name** takes the receiver named in its address cell as its store name, so labels are headed with it and numbered per receiver (`LABEL 1 OF 2` for Andrew's two boxes). `store_from_address` remembers this, so the name isn't also left in the street.
+- An address with **no name** in it (`27 Sirius Road, Lane Cove NSW 2067`) is named after its street for now. In the preview, the address book supplies the receiver (and Attn) saved at that exact address (`_apply_address_book()` → `at_address()`), and the label and item reference then carry that name. If the book doesn't know it, the preview warns "No receiver name … add it with ✏️".
+- A **store / receiver column holding whole addresses** (a `Ship To` column, with no address column) is read as the address.
+- With no store column, the "same spec split into separate packs" check compares the addresses of neighbouring packs instead.
+
 **Why rules and not guessing.** Every rule is either **anchored** (to the start, the end, or a word boundary) or **gated by a fact that is almost always true** (streets have digits; names don't; postcodes are 4 digits). That keeps false matches rare, and when a rule doesn't fire, the value falls back to the column it came from rather than being invented. Anything still odd shows up in the consignment table, where the ✏️ button lets a person correct it ([10.6](#106-the-consignment-table-service-codes-and-edits)).
 
 ### 10.2 Grouping packs into consignments (`build_consignments`)
@@ -1200,7 +1211,15 @@ for each pack:
     consignments[key].cartons.append(pack)                # first pack at this key creates it
 ```
 
-Because the key is the address alone, packs for **different stores going to the same installer** fall into one consignment automatically, and a retailer with a shop pack and an installer pack gets two. Consignments are numbered in order of first appearance. `one_line()` joins `line1, line2, suburb, state, postcode` with `", "`. Packs with no postcode (e.g. Sample rows) are left out, with a warning.
+Because the key is the address alone, packs for **different stores going to the same installer** fall into one consignment automatically, and a retailer with a shop pack and an installer pack gets two. Consignments are numbered in order of first appearance. `one_line()` joins `line1, line2, suburb, state, postcode` with `", "`.
+
+**Packs with a receiver name but no address** (a file with only a Store/Receiver column, or rows with no postcode) aren't dropped. `pack_destination()` gives each one a consignment of its own receiver, with the id `name:<receiver>|<whatever address there is>`, so the address book and the ✏️ form can fill it in:
+
+1. **Learned before:** Generate saved that id as a spelling (alias), so the next file fills the address in like any other learned spelling.
+2. **First time:** `_apply_address_book()` looks the receiver up (`find_by_receiver()`). When every saved entry for that receiver is at one address, it's filled in (blue **Address book** tag).
+3. **Several saved addresses, or none:** the row is listed first in red, marked **No address**, with a note above the table. Its ✏️ form lists the receiver's saved addresses to click ("Saved for this receiver"), or says there are none and the address should be typed in.
+
+A consignment still without an address when you Generate is left out of the courier CSV, the label map and the address book (`sendable()`). Its label shows just the store name. Packs with neither a name nor an address are left out with a warning, as before.
 
 ### 10.3 Carton facts from the Packing Spec
 

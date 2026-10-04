@@ -21,7 +21,7 @@ from address_import import build_review, apply_review, all_label_maps, ImportPro
 from address_match import suggestions as closest_addresses
 from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
 from courier_export import (build_consignments, detect_series, write_courier_csv, write_label_map, one_line, DEFAULT_FIXED,
-                            source_destinations,
+                            source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
 
@@ -740,6 +740,12 @@ def _consignment_edits(form):
     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
 
 
+def _read_tab(filepath, header_row, tab):
+    """parse_packing_data(), plus store names for files whose only address info is one combined cell."""
+    pack_groups, last_row, found_headers, warnings = parse_packing_data(filepath, header_row, sheet_name=tab)
+    return fill_store_names(pack_groups), last_row, found_headers, warnings
+
+
 def _carton_weights(form):
     """Carton weights typed in the preview's consignment table: {pack key: kg}, from a hidden JSON field."""
     try:
@@ -761,11 +767,31 @@ def _same_address(a, b):
 
 
 def _apply_address_book(pack_groups, edits, offered):
-    """Fills in addresses the book has learned for these Excel spellings (each spelling is offered once)."""
+    """Fills in addresses the book has learned for these Excel spellings (each spelling is offered once).
+
+    A pack with a receiver name but no address (a file with only receiver names) that the book hasn't learned
+    yet is looked up by receiver: when every saved entry for that receiver is at one address, it's filled in.
+    Several different addresses are left for the user to choose from in the preview."""
     sources = source_destinations(pack_groups)
     new = [sid for sid in sources if sid not in edits and sid not in offered]
     try:
         learned = ADDRESS_BOOK.lookup_aliases(new)
+        for sid in new:
+            dest = sources[sid]
+            if sid in learned:
+                continue
+            if dest['postcode']:
+                if not dest['receiver']:
+                    # Address with no name in it: the book knows who's at that address
+                    here = ADDRESS_BOOK.at_address(dest)
+                    if here:
+                        learned[sid] = {**dest, **{k: here[0][k] for k in ('receiver', 'contact')},
+                                        'authority_to_leave': dest['authority_to_leave']}
+                continue
+            saved = ADDRESS_BOOK.find_by_receiver(dest['receiver'])
+            places = {(e['line1'], e['line2'], e['suburb'], e['state'], e['postcode']) for e in saved}
+            if len(places) == 1:
+                learned[sid] = saved[0]  # most used first
     except Exception as e:
         print(f"[WARNING] Address book lookup failed: {e}")
         learned = {}
@@ -784,11 +810,21 @@ def _check_against_book(consignments, edits):
       matched    the book holds this address, under this receiver or another one (an address can have several
                  receivers / Attn names). A receiver or Attn new to it gets 'book_note': it's added on Generate.
       checked    not in the book, but the user has reviewed it in the edit form
-      unverified not in the book: listed first, with 'suggestions' (closest saved addresses, best first)"""
+      unverified not in the book: listed first, with 'suggestions' (closest saved addresses, best first)
+      missing    no address at all (only a receiver name): listed first of all, with the receiver's saved
+                 addresses as suggestions. Left out of the courier CSV until it has one."""
     cache = {}
     for c in consignments:
         d = c['destination']
         c['book'], c['book_note'], c['suggestions'] = 'unverified', '', []
+        if c.get('no_address'):
+            c['book'] = 'missing'
+            try:
+                c['suggestions'] = [{**s, 'json': json.dumps({k: s[k] for k in SUGGESTION_FIELDS})}
+                                    for s in closest_addresses(d, ADDRESS_BOOK.candidates(d, cache))]
+            except Exception as e:
+                print(f"[WARNING] Address book check failed: {e}")
+            continue
         if c['edit_source'] == 'book':
             c['book'] = 'book'
             continue
@@ -813,8 +849,8 @@ def _check_against_book(consignments, edits):
         except Exception as e:
             print(f"[WARNING] Address book check failed: {e}")
             c['book'] = 'checked'  # don't flag every row because the book couldn't be read
-    # Unverified first; otherwise keep consignment order
-    return sorted(consignments, key=lambda c: c['book'] != 'unverified')
+    # No address first, then not in the book; otherwise keep consignment order
+    return sorted(consignments, key=lambda c: {'missing': 0, 'unverified': 1}.get(c['book'], 2))
 
 
 @app.route('/address-book/update', methods=['GET', 'POST'])
@@ -978,7 +1014,7 @@ def create_packing_labels():
             try:
                 header_row = int(user_inputs[tab]['header_row'])
                 # Unpack all 3 variables!
-                pack_groups, last_row, found_headers, warnings = parse_packing_data(filepath, header_row, sheet_name=tab)
+                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab)
                 
                 total_packs = len(pack_groups)
                 total_stores = len(set(g['store_name'] for g in pack_groups.values()))
@@ -1001,7 +1037,7 @@ def create_packing_labels():
         if previews and not any(p['error'] for p in previews):
             combined = {}
             for tab in selected_tabs:
-                groups, _, _, _ = parse_packing_data(filepath, int(user_inputs[tab]['header_row']), sheet_name=tab)
+                groups, _, _, _ = _read_tab(filepath, int(user_inputs[tab]['header_row']), tab)
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
             edits, offered = _apply_address_book(combined, _consignment_edits(request.form), _book_offered(request.form))
             options = service_options(load_service_usage(SERVICE_USAGE_FILE))
@@ -1022,8 +1058,9 @@ def create_packing_labels():
                 courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
             courier = {
                 'consignments': [{**c, 'address': one_line(c['destination']),
-                                  'source_text': c['original']['raw'] if c['original']['postcode'] in c['original']['raw']
-                                                 else ", ".join(x for x in (c['original']['raw'], c['original']['suburb'], c['original']['state'], c['original']['postcode']) if x),
+                                  'source_text': (c['original']['raw'] if c['original']['postcode'] in c['original']['raw']
+                                                  else ", ".join(x for x in (c['original']['raw'], c['original']['suburb'], c['original']['state'], c['original']['postcode']) if x))
+                                                 or f"{c['original']['receiver']} (no address in the file)",
                                   'original_json': json.dumps({k: c['original'][k] for k in EDITABLE_FIELDS + ('authority_to_leave',)})}
                                  for c in consignments],
                 'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
@@ -1031,6 +1068,7 @@ def create_packing_labels():
                 'weights_json': json.dumps(weights),
                 'spec_gaps': any(x['spec_kind'] in ('unknown', 'incomplete') for x in cartons),
                 'unverified': sum(c['book'] == 'unverified' for c in consignments),
+                'missing': sum(c['book'] == 'missing' for c in consignments),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
                 'edits_json': json.dumps({**edits, '__offered__': offered}),
@@ -1062,7 +1100,7 @@ def create_packing_labels():
             # 1. Parse Data
             for tab in selected_tabs:
                 header_row = int(user_inputs[tab]['header_row'])
-                pack_groups, _, _, _ = parse_packing_data(filepath, header_row, sheet_name=tab)
+                pack_groups, _, _, _ = _read_tab(filepath, header_row, tab)
                 for key, val in pack_groups.items():
                     combined_pack_groups[f"{tab} - {key}"] = val
 
@@ -1071,6 +1109,7 @@ def create_packing_labels():
             reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
             consignments, cartons, _ = build_consignments(combined_pack_groups, _consignment_edits(request.form), fixed['service_code'],
                                                           SPEC_STORE.resolver(), _carton_weights(request.form))
+            consignments, cartons = sendable(consignments, cartons)  # still no address: left out of the CSV
             unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
             if unknown:
                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
@@ -1090,7 +1129,11 @@ def create_packing_labels():
             # 5. Generate the PDF with Custom Layout
             output_pdf_name = f"Labels_{filename.split('.')[0]}.pdf"
             output_pdf = os.path.join(project_dir, output_pdf_name)
-            page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order)
+            # Each label shows the address its consignment is sent to (after address-book fills and ✏️ edits),
+            # exactly as in the preview, not the raw Excel text
+            by_number = {c['number']: c['destination'] for c in consignments}
+            label_addresses = {x['pack_key']: one_line(by_number[x['consignment']]) for x in cartons}
+            page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses)
 
             # 6. Courier consignment CSV and the label map used to match courier labels to pages
             base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name

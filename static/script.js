@@ -672,6 +672,7 @@ document.addEventListener('DOMContentLoaded', function () {
             row.querySelector('.pl-tag-edited').hidden = !changed;
             row.querySelector('.pl-tag-book').hidden = true;
             markChecked(row);
+            if (d.postcode) markAddressed(row);
             close();
             applyFilters();
         });
@@ -736,6 +737,19 @@ document.addEventListener('DOMContentLoaded', function () {
             else checkNote.querySelector('strong').textContent =
                 `${left} ${left === 1 ? 'address isn’t' : 'addresses aren’t'} in the address book yet.`;
         }
+    }
+
+    // A row that had no address and now has one: drop the red theme (the server regroups it on refresh)
+    const missingNote = document.getElementById('courier-missing-note');
+    function markAddressed(row) {
+        if (!row.classList.contains('pl-no-address')) return;
+        row.classList.remove('pl-no-address');
+        const tag = row.querySelector('.pl-tag-missing');
+        if (tag) tag.remove();
+        const left = rows.filter((r) => r.classList.contains('pl-no-address')).length;
+        if (missingNote && !left) missingNote.hidden = true;
+        else if (missingNote) missingNote.querySelector('strong').textContent =
+            `${left} consignment${left === 1 ? ' has' : 's have'} no address`;
     }
 
     function applyFilters() {

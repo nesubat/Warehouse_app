@@ -125,7 +125,9 @@ def best_match(address, candidates):
 MIN_SUGGEST = 0.35   # weakest saved address still worth showing as a suggestion
 
 
-def _why(n, s, same_postcode):
+def _why(n, s, same_postcode, has_address=True):
+    if not has_address:
+        return "Saved for this receiver" if n >= 0.9 else "Similar receiver"
     if s >= 0.9 and same_postcode:
         return "Same receiver and address" if n >= 0.9 else "Same address, another receiver"
     if n >= 0.9:
@@ -140,6 +142,7 @@ def suggestions(address, candidates, limit=5):
     Nothing is applied automatically, so this is looser than best_match(). Weighted towards the address,
     because one address is often saved under several receivers / Attn names."""
     postcode = _norm(address.get('postcode'))
+    has_address = bool(postcode or address.get('line1') or address.get('suburb'))
     seen, ranked = set(), []
     for e in candidates:
         if e['id'] in seen:
@@ -152,7 +155,7 @@ def suggestions(address, candidates, limit=5):
         if total >= MIN_SUGGEST and (n >= MIN_NAME or s >= MIN_ADDRESS):
             ranked.append((total, n, s, same_postcode, e))
     ranked.sort(key=lambda x: (x[0], x[4].get('use_count') or 0), reverse=True)
-    return [{**e, 'score': round(total, 2), 'why': _why(n, s, same)} for total, n, s, same, e in ranked[:limit]]
+    return [{**e, 'score': round(total, 2), 'why': _why(n, s, same, has_address)} for total, n, s, same, e in ranked[:limit]]
 
 
 def best_by_address(address, candidates):

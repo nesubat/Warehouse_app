@@ -1359,3 +1359,10 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .av-merge-note { color: #6c3483; font-size: 12px; margin-top: 4px; }
 .av-merge-old { color: #7f8c8d; text-decoration: line-through; text-decoration-color: rgba(127,140,141,0.6); margin-top: 1px; }
 .av-sibling-note { margin-top: 4px; }
+
+/* Consignments with no address (receiver name only): listed first, red */
+.pl-page .pl-missing-note { background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; padding: 10px 12px; margin: 14px 0 0; font-size: 13px; color: #922b21; }
+.pl-page .pl-tag-missing { border-color: #e74c3c; color: #c0392b; background: #fdedec; margin-left: 4px; }
+.pl-page .pl-con-row.pl-no-address > td { background: #fef5f4; }
+.pl-page .pl-con-row.pl-no-address > td:first-child { box-shadow: inset 4px 0 0 #e74c3c; }
+.pl-page .pl-no-address-text { color: #c0392b; font-style: italic; }

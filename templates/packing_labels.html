@@ -69,8 +69,11 @@
                 <li><strong>Job Number:</strong> Every row needs one.</li>
                 <li><strong>Install:</strong> <strong>Y</strong> for a box going to an installer; <strong>N</strong> or blank for a box going to the store. All rows of one box must agree.</li>
                 <li><strong>Address:</strong> All rows of one box must have the same address (merged cells are fine). A store's own boxes must share one address; installer boxes may differ.</li>
+                <li><strong>Store / Receiver:</strong> The store column can be headed "Store Name", "Retailer", "Receiver Name", "Receiver" or "Consignee". Address columns can be headed with or without "Receiver" / "Store" in front (e.g. "Receiver Address Line 1", "Store Suburb").</li>
+                <li><strong>Whole address in one column:</strong> One "Address" column holding everything also works, e.g. <em>Andrew, 27 Sirius Road, Lane Cove NSW, 2067</em>. The parts can be separated by commas, semicolons, |, line breaks, " - " or " / ", or just spaces. The name at the front becomes the receiver (and the label's store name when there's no store column); a person and a company both given become contact and receiver. Phone numbers are ignored.</li>
+                <li><strong>Receiver name only:</strong> A file with no address columns still works. Each receiver's address is filled in from the address book when it holds one address for that receiver; otherwise the consignment preview lists its saved addresses to pick from, or you type it in. Boxes still without an address are left out of the courier CSV.</li>
                 <li><strong>Thumbnail:</strong> Put each row's image inside its own Thumbnail cell. Several images in one cell, or a merged Thumbnail cell, are all used.</li>
-                <li><strong>Other Columns Supported:</strong> "Store Name", "Quantity", "Description", "Width" &amp; "Height" (or "Dimension"), "Address Line 1", "Address Line 2", "Suburb", "State", "Postcode", "Country", "Material" and "Notes".</li>
+                <li><strong>Other Columns Supported:</strong> "Store Name" (or "Receiver Name"), "Quantity", "Description", "Width" &amp; "Height" (or "Dimension"), "Address Line 1", "Address Line 2", "Suburb", "State", "Postcode", "Country", "Material" and "Notes".</li>
             </ul>
         </div>
 
@@ -313,6 +316,10 @@
                     {% if courier.spec_gaps %}<p class="pl-spec-link"><a href="{{ url_for('packing_specs_page') }}" target="_blank" rel="noopener">📐 Open Packing Specs</a> in a new tab, fill in the sizes, then press "Auto-Map &amp; Update Previews" here.</p>{% endif %}
                     {% endif %}
 
+                    {% if courier.missing %}
+                    <p class="pl-missing-note" id="courier-missing-note"><strong>{{ courier.missing }} consignment{{ ' has' if courier.missing == 1 else 's have' }} no address</strong> (the file only gives the receiver name).
+                        {{ 'It’s' if courier.missing == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-missing">No address</span>. Open ✏️ to pick one of the receiver's saved addresses or type it in, then Save. Without an address a consignment is left out of the courier CSV.</p>
+                    {% endif %}
                     {% if courier.unverified %}
                     <p class="pl-check-note" id="courier-check-note"><strong>{{ courier.unverified }} {{ 'address isn’t' if courier.unverified == 1 else 'addresses aren’t' }} in the address book yet.</strong>
                         {{ 'It’s' if courier.unverified == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-check">Check address</span>. Open ✏️ to compare with the closest saved addresses, then Save.</p>
@@ -322,7 +329,7 @@
                         <tbody>
                         {% for c in courier.consignments %}
                         {% set d = c.destination %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% endif %}" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -333,9 +340,10 @@
                                 <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
                                 {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="This address isn't in the address book. Open ✏️ to compare with saved addresses.">Check address</span>{% endif %}
+                                {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
-                            <td class="pl-show-address">{{ c.address }}</td>
+                            <td class="pl-show-address">{% if c.address %}{{ c.address }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</td>
                             <td>
                                 <select class="pl-service-input" id="service-{{ c.number }}" aria-label="Service code for consignment {{ c.number }}">
                                     <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
@@ -371,10 +379,10 @@
                                     </label>
                                 </div>
                                 <ul class="pl-suggest" role="listbox" aria-label="Matching addresses from the address book" hidden></ul>
-                                {% if c.book == 'unverified' %}
+                                {% if c.book in ('unverified', 'missing') %}
                                 <div class="pl-closest">
                                     {% if c.suggestions %}
-                                    <div class="pl-closest-title">Closest saved addresses <span class="issue-detail">— most likely first. Click one to fill the form.</span></div>
+                                    <div class="pl-closest-title">{{ 'Saved addresses for this receiver' if c.book == 'missing' else 'Closest saved addresses' }} <span class="issue-detail">— most likely first. Click one to fill the form.</span></div>
                                     <ul class="pl-closest-list">
                                         {% for s in c.suggestions %}
                                         <li><button type="button" class="pl-closest-item" data-entry="{{ s.json }}">
@@ -384,6 +392,8 @@
                                         </button></li>
                                         {% endfor %}
                                     </ul>
+                                    {% elif c.book == 'missing' %}
+                                    <p class="pl-closest-none">⚠ No saved address for this receiver in the address book. Type the address in above; it will be saved to the address book when you generate.</p>
                                     {% else %}
                                     <p class="pl-closest-none">⚠ No similar address in the address book. Check this address against the job before generating — it will be saved to the address book as it is.</p>
                                     {% endif %}
