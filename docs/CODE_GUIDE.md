@@ -95,7 +95,7 @@ These words appear everywhere in the code. If you're ever confused reading a fun
 | **Installer pack** | A pack whose **Install** cell says `Y`/`Yes`/`True`: it goes to an installer, not to the store. |
 | **Label X of Y** | Each store's pack groups numbered in file order. Printed on the packing label and used in the courier item reference. |
 | **Consignment** | All packs going to the **same delivery address**, whichever store they belong to. The courier treats them as one shipment. |
-| **Consignment reference** | The job series (e.g. `J477161`, from job numbers like `J477161-54`), written on the first CSV row of each consignment. |
+| **Consignment reference** | Pre-filled from the distribution file's Job Number column (`job_series()` / `detect_series()`): strictly **J + 6 digits** at the start (`J477161-54` → `J477161`). Job numbers in any other format are ignored; if none match, the field starts empty and must be typed. When the file has several jobs, the most common one, with a warning. Editable in the preview; it is also the Open360 **Shipment Reference** on every row. |
 | **Item reference** | `Label <X> - <Store>`, the last CSV column. Printed on the courier label; it's the key that links a courier label to its packing label. |
 | **Label map** | `….labelmap.json`, saved next to the PDF: which PDF page each label is on, where it's headed, and which CSV row is its courier carton. For a future "stitch labels" tool. |
 | **Comparison key** | A simplified copy of a text value (lower-case, no punctuation, Street = St…) used to decide whether two spellings mean the same thing. |
@@ -136,7 +136,7 @@ Only `app.py` talks to Flask/the browser. The engines never render a web page th
 ```
 Warehouse_app/
 ├── app.py, core_math.py, matrix_engine.py, pdf_engine.py, subgroup_engine.py
-├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py, packing_specs.py
+├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py, packing_specs.py, label_stitcher.py
 ├── templates/            → the 5 HTML pages Flask renders
 ├── static/               → script.js + styles.css (shared by all pages)
 ├── docs/CODE_GUIDE.md    → this guide
@@ -400,7 +400,7 @@ consignment table + service codes"]
 build consignments FIRST"]
     K --> L[Create project folder, move Excel]
     L --> M["generate_packing_labels() → PDF"]
-    M --> N["write_courier_csv() + write_label_map()
+    M --> N["write_open360_csv() + write_label_map()
 record_service_usage()"]
     N --> O[Success page: PDF + CSV downloads]
 ```
@@ -998,7 +998,9 @@ pages = 1 + ceil((items − 12) / 18)    otherwise        e.g. 32 items → 1 + 
 
 **What's on each page.**
 
-- **First page of a label:** the courier label region (dashed placeholder), and under it the **Packing Spec** in a black rounded panel with large white text (starts at 22 pt and shrinks 1 pt at a time until it fits on two lines, minimum 11 pt), the store name and address, and `LABEL X OF Y` / `PAGE X OF Y` chips at the bottom-left. The address is the one its consignment is sent to, exactly as finalised in the consignment preview (address-book fills and ✏️ edits included): Generate passes `{pack key: address}` to `generate_packing_labels(..., addresses)`. A pack left out of the courier CSV (no postcode) shows its Excel address.
+- **First page of a label:** the courier label region (dashed placeholder), and under it the **Packing Spec** in a black rounded panel with large white text (starts at 22 pt and shrinks 1 pt at a time until it fits on two lines, minimum 11 pt), the store name and address, and `LABEL X OF Y` / `PAGE X OF Y` chips at the bottom-left. The address is the one its consignment is sent to, exactly as finalised in the consignment preview (address-book fills and ✏️ edits included): Generate passes `{pack key: {address, receiver, contact, sent}}` to `generate_packing_labels(..., addresses)` for **every** pack.
+  - **Installer packs** (Install = Y) get a red line under the store name: **Installer: <receiver> · Attn <contact>** (e.g. `Installer: Wilson Storage · Attn Steven Priestley`). Any other pack whose receiver isn't the store, or that has an Attn, gets **Deliver to: …**.
+  - **A pack left out of the courier CSV** (no complete address) still gets its label. The courier label region then reads **NOT IN COURIER CSV — Address incomplete: no courier label for this box**, and the address shown is what the file gives.
 - **Later pages:** no Packing Spec; the store name and the two chips sit in the bottom-left, and the boxes start at the top margin.
 - **Label X of Y** (`assign_label_numbers`): a `Counter` of `_norm(store_name)` gives each store's total; a second counter increments as packs are visited in file order. Using `_norm` means `Spectacle Hub Curlewis` and `Spectacle Hub Curlewis ` are one store. When several tabs are generated together, a store is counted across all of them. The PDF and the CSV both call this one function, so their numbers always agree. **Page X of Y** counts pages within one label.
 - **Rounded corners:** PyMuPDF takes radius as a fraction of the shorter side, so `radius = r ÷ min(width, height)`, capped at 0.5.
@@ -1168,7 +1170,7 @@ receiver = "Sign Online"   contact = "Adam"
 → line1 = "Shop T11-14 The Strand Melbourne"     line2 = "250 Elizabeth St"
 ```
 
-**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state is upper-cased. The postcode goes through `normalize_postcode()`: Excel's `3149.0` becomes `3149`, and a 3-digit Australian or New Zealand postcode gets its lost leading zero back (`803` → `0803`), because the courier portal rejects 3-digit postcodes. The same padding is applied in the address book, to edits, and when importing verified addresses; entries saved before it are fixed once when the book opens.
+**Step 12 — tidy each field.** `_tidy()` trims spaces and stray `, ; . -` from both ends; state and **suburb are upper-cased** (`Lane Cove` → `LANE COVE`). Suburbs are kept in capitals everywhere: preview edits, the courier CSV, the label, the sender, bulk-update files and the address book (`_clean()`; entries saved before that are upper-cased once when the book opens). Matching ignores capitals, so this changes no keys or learned spellings. The postcode goes through `normalize_postcode()`: Excel's `3149.0` becomes `3149`, and a 3-digit Australian or New Zealand postcode gets its lost leading zero back (`803` → `0803`), because the courier portal rejects 3-digit postcodes. The same padding is applied in the address book, to edits, and when importing verified addresses; entries saved before it are fixed once when the book opens.
 
 **Country** comes from the Country column (or a trailing `New Zealand` / `Australia` in a one-cell address) when there is one; otherwise it's `NZ` for a New Zealand region code and `AU` for everything else. `TAS` is both Tasmania and the Tasman region, so on its own it means Australia — give such addresses a Country of New Zealand. Changing the state in the ✏️ edit form re-applies this rule.
 
@@ -1268,6 +1270,7 @@ One CSV row per pack, 44 columns matching the courier's import format (UTF-8 wit
 | Who Pays, Charge Account | from the page (Who Pays defaults to `S`) |
 | Service Code | the consignment's own pick, or the main Service Code |
 | Weight, Cubic, Item Type, L/W/H | from 10.3 |
+| Sender Name … Sender Email | blank: the portal uses the account's sender |
 | Reference (last column) | the **item reference**, `Label <X> - <Store>` |
 
 The **consignment reference** comes from matching `^J\d+` in every job number and taking the most common (`J477161-54` → `J477161`); it's pre-filled and editable. The files are named `<reference> - <project>.csv` and `.labelmap.json`.
@@ -1285,6 +1288,10 @@ After a clean preview, "3. Courier Consignments" lists each consignment's receiv
 
 - **Service codes per consignment.** Each row has its own dropdown; "Same as main (CODE)" uses the main Service Code. Filter the table by **State** or by text (receiver, suburb, postcode, store), then **Apply to shown** copies the main code into every visible row.
 - **Editing an address.** The ✏️ next to a consignment number opens its receiver, contact, address lines, suburb, state, postcode and Authority to Leave for editing, with the original Excel text underneath. **Save** marks the row "Edited"; **Reset to Excel** puts the original values back. Enter saves, Escape closes.
+- **No sender section.** The portal uses the account's sender and the Open360 CSV leaves the sender columns empty, so the preview has no sender box (it, `senders.py` and `/api/senders` were removed).
+- **Update Previews reads what's in Excel.** The upload may be open in Excel (the Open button). Changes not saved yet are saved first (`save_if_open_elsewhere()` in core_math.py, through Excel itself), and the preview says which saved version it read ("Read … as saved at 23:00:23"). If Excel is in the middle of editing a cell it can't save: the note says to press Enter or Esc in Excel and update again. Generate does the same before closing the file in Excel, so edits shown in the preview are never thrown away. Editing your own copy elsewhere doesn't reach the upload: the note says so.
+- **The browser's own form check is off** (`novalidate` on the form). It used to stop Update Previews too, because Project Name (needed only for Generate) is empty until the end: the browser scrolled down to that box with a bubble that was easy to miss, and nothing was sent, so the file was never re-read. Now Update Previews always goes through (header rows must be numbers), and Generate is checked by `script.js` section 14: every required box filled in, else a red message above the button names them ("Fill in Name this Project / Job before generating."), the box is outlined and the cursor put in it, and nothing is sent. The server checks the same boxes, Project Name included.
+- **Enter in the form.** Enter in a box would submit with the form's first button, Update Previews (the page reloads and scrolls, nothing is generated). `script.js` section 14 makes Enter in **Project Name** press Generate, Enter in a **Header Row** press Update Previews, and Enter anywhere else do nothing.
 - Edits change only the courier CSV and label map, never the Excel file. They're kept while you refresh the preview, and lost if you scan the file again.
 
 **How edits travel.** The browser keeps them in a hidden JSON field, `consignment_edits`, sent with Preview and Generate:
@@ -1320,6 +1327,7 @@ All courier checks (required fields, known service codes) run **before** the pro
   "consignment_reference": "J477161",
   "courier_label_region_mm": {"x": 4.0, "y": 4.0, "width": 107.0, "height": 150.0},
   "consignments": [{"number": 2, "destination": {...}, "service_code": "STEROAD", "cartons": ["Label 1 - Provision Clayton", "..."]}],
+  "not_in_courier_csv": [{"item_reference": "Label 1 - Eyedentity (Elsternwick)", "pdf_pages": [4], "reason": "no complete delivery address", "...": "..."}],
   "stores": {
     "Provision Clayton": [{
       "item_reference": "Label 1 - Provision Clayton", "label": 1, "of": 1,
@@ -1363,7 +1371,7 @@ So correcting an address once — in the ✏️ form before Generate, or on the 
 | checked | not in the book, but you've edited it or pressed **Save** in its ✏️ form (`"checked": true` in the edits, so it survives Update Previews) | **Edited** tag if changed |
 | unverified | not in the book | listed **first**, amber, **Check address** tag, with a count above the table |
 
-For an unverified row, the ✏️ form lists the **closest saved addresses**, most likely first (`address_match.suggestions()`, top 5). Candidates are the same postcode (`near()`), the same receiver name, and full-text matches for the receiver in case the postcode itself is wrong. The ranking leans on the address (60 %) over the name (40 %), because one address often has several receivers; another postcode counts for less. Each card says why ("Same address, another receiver", "Same receiver, different address", "Similar address"…), and clicking it fills the form. If nothing is close, the form shows a disclaimer instead: check the address against the job before generating, since it will be saved to the book as it is. Saving the form clears the flag. Nothing blocks Generate.
+**Every** row's ✏️ form lists the **closest saved addresses**, most likely first (`address_match.suggestions()`, top 5). For a row filled from the book, that entry comes first, so after **Reset to Excel** the saved address is still one click away. The list **re-ranks as you type in any field**: `attachClosest()` in script.js sends what's typed so far to `/api/addresses/suggest` 200 ms after the last keystroke, cancelling a stale request. Half-typed text counts: `Eyed` finds `Eyedentity (Elsternwick)` (`_typed_name_score()`), `604 Glenh` finds the street, and a postcode alone lists what's saved there. Before a name is typed, the ranking uses the address alone. Candidates are the same postcode (`near()`), the same receiver name, and full-text matches for the receiver in case the postcode itself is wrong. The ranking leans on the address (60 %) over the name (40 %), because one address often has several receivers; another postcode counts for less. Each card says why ("Same address, another receiver", "Same receiver, different address", "Similar address"…), and clicking it fills the form. If nothing is close, the form shows a disclaimer instead: check the address against the job before generating, since it will be saved to the book as it is. Saving the form clears the flag. Nothing blocks Generate.
 
 The upgrade to receiver + Attn entries ran once on books made before it (`_add_contact_key()`): the table is rebuilt with the same ids, so learned spellings and the search index stay valid, and a copy is kept first as `data/address_book.before-attn-upgrade.db`.
 
@@ -1391,7 +1399,7 @@ On the page, the first 50 rows appear ~20 ms after load, "Load more" and saving 
 **The pages**
 
 - **Address Book page** ([address_book.html](../templates/address_book.html), `script.js` section 12): search box (waits 120 ms after the last keystroke and cancels stale requests), 50 rows at a time with **Load more**, ✏️ edit and 🗑️ delete per row, **+ Add address**. Edits happen in a row under the entry (Enter saves, Esc cancels); errors appear in that row. The column headings stay pinned just under the nav bar while you scroll: script.js measures the nav's height into `--nav-height`, and the table's wrapper deliberately has no `overflow` (a scrolling or clipping box would pin the headings to the box instead of the page). Below 1100 px wide, Country, Used and Last used are hidden so the table still fits.
-- **Consignment ✏️ form:** typing 2+ characters in Receiver Name or Address Line 1 shows up to 6 matches from the book (`attachAddressSuggestions`); ↑/↓ and Enter, or a click, fills the whole form. A row that isn't in the book also lists its closest saved addresses (above).
+- **Consignment ✏️ form:** the closest saved addresses (above), re-ranked live as any field is typed in; a click fills the whole form. A row that isn't in the book also lists its closest saved addresses (above).
 
 ### 10.11 Updating the book from the courier portal
 
@@ -1429,14 +1437,16 @@ The portal's text is saved exactly as it comes — including lines Toll has shor
 - **Accepted** (`best_match()`) only if name ≥ 45 %, address ≥ 55 %, the average ≥ 70 %, **and** it beats the best candidate at another address by 10 points. Otherwise the row is new, never a guess. So another brand in the same centre, or the same brand at another shop number, is not matched.
 - **Speed**: under 1.5 ms a row at 50,000 entries, about 3–4 ms in a postcode with 2,000 entries, so a 1,000-row file takes 1–4 s.
 
-**3. Review.** Several CSV rows for one entry (one per carton) become one proposal. The rows you can act on (conflicting, to update, not matched) come first, then the **Apply ticked changes** / **Choose another file** buttons, then a separate **Already up to date** table, so you can apply without scrolling past rows that need nothing. Each proposal is:
+**3. Review.** Several CSV rows for one entry (one per carton) become one proposal. Every row you can act on is a **card** with the portal's address (changed parts highlighted) and a choice of what to do, the suggested one already selected. Tabs (**All · To update · Not in the book · Conflicting**) filter the cards. The buttons **Suggested choice**, **Merge into best match**, **Add all as new** and **Skip all** set every card shown at once. The bar by **Apply N changes** says what will be saved (`3 updates · 5 new · 2 merges · 1 skipped`), and each card says what will happen to it.
 
-| Status | Meaning | Ticked |
-|---|---|---|
-| to update | the portal's address differs; changed parts highlighted | yes |
-| new | not in the book; added as a new verified address unless you untick it | yes (unless the receiver is ambiguous) |
-| already up to date | the portal agrees with the book; marked ✓ Verified automatically on apply | no tick box |
-| conflicting | rows for the same entry give different addresses (both shown, differences highlighted); fix the file and add it again | can't tick |
+| Card | Choices (suggested first) |
+|---|---|
+| to update | **Update the saved address** (shows what's saved now, the parts that change highlighted, plus any older copies folded in and other receivers corrected) · Merge into another saved address (only for close, not exact, matches) · Add as a new address instead · Skip |
+| not in the book | **Add as a new address** (Skip instead when the receiver has several saved addresses) · **Merge into this saved address**, for up to 4 of the closest saved addresses (`suggestions()`, each labelled e.g. "Same address, another receiver", with the parts that would change highlighted) · Skip |
+| conflicting | Use row N's address, for each disagreeing row · **Skip** (fix the file) |
+| already up to date | no choice: marked ✓ Verified on apply; listed in a separate table below the buttons |
+
+Merging a row into a saved address works like an update of that entry: it takes the portal's address details, keeps its own receiver and Attn, and is marked verified. The form sends one `action_<row>` per card (`update`, `new`, `merge:<entry id>`, `use:<row>`, `skip`) to `apply_review()`.
 
 **What a verified address changes.** Only the address details: lines, suburb, state, postcode, country (`PLACE_FIELDS`) and ATL. The saved **receiver name and Attn are never changed**. They identify the entry, and one address is often saved for several receivers or Attn names. So a portal row reading `TEST OPTICAL PTY LTD`, Attn `Samantha` updates the entry `Test Optical`, Attn `Sam` without renaming it.
 
@@ -1452,6 +1462,97 @@ So after a portal file confirms an address, the book holds one copy of it per re
 **4. Apply** (`apply_review()`): every **already up to date** entry is marked verified (`mark_verified()`), no tick needed. Each ticked update goes through `AddressBook.apply_verified()` with the address details only: the entry takes the portal's address and gets `verified_at` set, shown as **✓ Verified** on the Address Book page. Then its `merges` are folded in and its `siblings` corrected, as above. Its learned Excel spellings stay linked, so the next file with the same spelling gets the verified address. If the verified address is one the book already holds under another entry, the two are **merged**: the existing entry keeps the address, takes over the use count and spellings, and the duplicate is removed. One bad row doesn't stop the others; problems are listed on the result screen. When nothing needs changing, the button reads **Mark as verified**.
 
 ---
+
+### 10.12 TIG Open360 bulk-upload CSV
+
+TIG's Open360 portal has its own 46-column bulk-upload template (`OPEN360_HEADER` in courier_export.py, copied exactly, including the spaces in front of some names). **Generate writes only `<reference> - <project> - Open360.csv`** as the courier file (the older 44-column courier CSV is no longer written; `write_courier_csv()` stays for older projects). It holds the finalised consignments (`open360_items()` → `write_open360_csv()`). Its **Shipment Reference** is the preview's **Consignment Reference** (one field; there is no separate Shipment Reference field). The label map records the file (`files.open360_csv`), the reference (`open360_shipment_reference`) and each label's `open360_item_reference`. For a project generated before this, `project_open360_items(project_dir)` rebuilds the rows from its courier CSV as last saved plus its label map.
+
+The format is locked to the file the portal accepted:
+
+- **One row per packing label, in the distribution file's order.** The portal joins a receiver's rows into one consignment itself: a test upload gave Wilson Storage's 6 cartons as items 1–6 of one consignment.
+- **Shipment Reference** = the reference, on every row.
+- **Item Reference** = `01-QWXK-L-1-Provision Clayton` (`open360_item_references()`):
+  - the row number, zero-padded to the number of rows so sorting the text keeps the file's order (`001` with 100+ rows; `numbering='shipment'` gives `01.1, 01.2 … 02.1` instead)
+  - a **unique code** of capital letters (`unique_codes()`): 4 letters, more once a file has so many rows that a repeat gets likely
+  - `L`, the label number and the store
+  It's printed as "Item Ref" on the courier label. Stitch Labels reads the code back, and the label map stores each label's `open360_item_reference` and `open360_code`.
+- **Internal Reference** is kept but empty.
+- **Printing order in the portal:** its sort options sort *shipments*, and it prints a shipment's labels together, last carton first, placing the shipment by its last carton's Item Reference. So labels follow the file's order exactly only when a receiver's cartons are next to each other in the file. Stitch Labels doesn't depend on the order.
+- **Item Quantity** and **Total Items** = the number of boxes on that row: 2 for a Packing Spec `2 X OB170170170` (`split_count()` in packing_specs.py; size and weight are those of one OB170170170), else 1. **Total Weight / Total Volume** = the whole consignment's, counting every box.
+- **Item columns:** Item Weight (kg), L / W / H (cm), Item Type, Item Description = Packing Spec.
+- **Service** = our service code. **Despatch Date** `d/m/yyyy` (as Excel saves it). **Authority To Leave** `Y` / `N`; **Is Receiver Residential** and **Is Dangerous Goods** `N`.
+- **Sender columns kept but empty**, Is Sender Residential included: the portal fills in the account's sender. So are Internal Reference's neighbours Cost Centre, Special Instructions, receiver email / phone and the DG fields.
+- **File format:** UTF-8 without a BOM, CRLF line endings.
+
+### 10.13 Stitch Labels
+
+**🧵 Stitch Labels** on a courier project in the dashboard opens `/stitch/<project>` ([stitch.html](../templates/stitch.html), [label_stitcher.py](../label_stitcher.py)). Upload the courier portal's label PDFs: any number, picked or dropped all at once or a few at a time (the upload box adds to what's already chosen, and **✕ Clear** empties it). Or tick ones already in the project. Uploads are kept in the project folder, and the matching page's **➕ Add courier label PDFs** stitches PDFs downloaded later in with the ones already used (`/stitch/<project>/add`, in the background). Every courier label lands on its packing label, in whatever order the portal printed them.
+
+**Matching** (`find_code()`):
+- The label's text is read. The value after **Item Ref:** or **Item Reference:** (any capitals, with or without the colon; a label may carry both) is taken, and the unique code in it (`01-QWXK-L-…` → `QWXK`) is looked up in the label map. The longer word is matched whole, so "Item Reference" is never read as "Item Ref" + "erence". A code in the same `-QWXK-L-` shape elsewhere on the label also counts.
+- **A project with codes matches by code only**, so a label from another job can't land on the wrong packing label: it's listed as not placed.
+- **A project generated before codes existed** falls back to the Item Ref text (`10 Label 2 - Q Eyewear`, the row number dropped) against the label map's item references.
+- **Reported, not placed:** pages with no text (a scan), no Item Ref, or an unknown code, plus the same label twice (the first is used). Packing labels left without a courier label are listed.
+- **A code from another project** (`codes_elsewhere()` reads the other projects' label maps, only when needed) is named: "code of project Lux test 33 (booked from its Open360 CSV)". Every Generate makes new codes, so courier labels booked from one project's CSV don't match another project's packing labels; the report's page 1 sums it up ("42 labels of project Lux test 33: book this job from this project's own Open360 CSV, or match them by hand").
+
+**Placing** (`render_label()`, `place_label()`):
+- The courier label page is rendered as a **lossless 600 dpi grayscale PNG**: a 0.25 mm bar is 6 pixels wide, so Code 128 and QR codes stay scannable. The blank margin is cropped off, so a label in the corner of an A4 sheet isn't shrunk.
+- It's **turned so its text reads upright**, judged from the text's own direction plus the page's rotation flag. So a 4 × 6 label printed sideways on a landscape page comes back the right way up. A genuinely landscape label is then turned a quarter to fit the portrait courier region, instead of shrinking to its width.
+- It's **scaled to fit** the courier region from the label map (107 × 150 mm), aspect kept, centred and top-aligned, covering the dashed placeholder. A 4 × 6 portal label comes out at about 105–113 % once its margin is cropped.
+- **Measured** on the real portal PDF: all 42 labels placed in about 20 s, and every Code 128 decoded at 300 dpi identical to the portal's own label. The QR code on those portal labels is cut off at the page edge in the portal's own PDF, so it can't be read there either.
+
+**The Complete Labels PDF, in order:**
+1. **The job report** (page 1, `draw_report_pages()` in packing_label_generator.py), kept **compact**: the job number in a black panel with the project name beside it (no caption) and when it was stitched; one row of chips (courier labels placed *of all packing labels*, **without a courier label** in red when any, not-matched and duplicates when any, the pages of the labels and of the 4-up, and labels per courier PDF); then each finding as a coloured heading with its items run together on one paragraph. The findings: packing labels without a courier label (**including packs left out of the courier CSV**, marked "not in the courier CSV", so they're never missed), courier labels that matched nothing (added 4-up with the cut-and-stack order, or left out), duplicates, and what Generate found. Generate's "Not in the courier CSV" section isn't repeated, and an older project's installer list is shortened to "Installer x6" (`_compact()`). It replaces Generate's own report page.
+2. **Every packing label, in the packing labels' own order**, with its courier label where one was found. Matched and unmatched labels aren't grouped, so the pages follow the Packing Labels Only PDF one for one, after the report.
+3. **Courier labels that matched no packing label** (no Item Ref / Item Reference, or a code from another job), if chosen. They're printed 4-up on pages the size of the packing labels, with the same 4 mm margin round each quarter and dashed cut guides, in **cut-and-stack order** (`four_up_order()`). With P pages, the top-left quarters hold labels 1…P, top-right P+1…2P, then bottom-left and bottom-right. Cut the printed stack into quarters and put the piles together top-left, top-right, bottom-left, bottom-right, and the labels are back in file order.
+
+**Courier labels that still match nothing: added or left out?** The Stitch form asks ("Add them 4-up at the end" / "Leave them out"), and so does the matching page when you save with labels still unmatched. The report says which was chosen.
+
+**Matching by hand** (`/stitch/<project>/match`, [stitch_match.html](../templates/stitch_match.html), `script.js` section 16). After a stitch, **🔗 Match the rest by hand** opens:
+- **Pairs** (top): each courier label sits **side by side** with its packing label (courier thumbnail on the left, click to zoom; packing label on the right), grouped by receiver and address ("N courier labels ↔ M packing labels · K to check"). The images are rendered on demand from the uploaded PDF (`/stitch/<project>/label/<n>.png`), so nothing extra is saved.
+- **Suggested pairs start already paired, to check** (`suggest_pairs()`). Each courier label's text is scored against the waiting consignments' addresses (`address_score()`: postcode, suburb, street numbers and receiver name). The clearly best address wins, and its packing labels are taken in order (Label 1, then Label 2). So an address with as many courier labels as packing labels is paired in order with no clicks. A pair to check has dashed amber boxes, a "suggested %" tag, a **✓** and a **✕**; in a test, all 12 were right.
+- **Courier cards** show the address printed on the label in **bold** and its **Item Ref in bold red** (the file and page are in the thumbnail's tooltip), with a short reason underneath.
+- **✓ confirms a pair**, where it is: the gap closes and the two boxes join into one green box (a CSS transition, the row changed in place, not re-drawn). The page then scrolls by exactly the distance from the clicked ✓ to the next ✓ to check, so it lands **under the pointer**: click, click, click in one spot. Focus goes to the next ✓ too, so Enter, Enter, … works from the keyboard. (The site sets `scroll-behavior: smooth`, so scrolls meant to be instant say `behavior: 'instant'`.) Hovering over a matched pair shows **↶ Undo**, which puts it back to check (or, for a pair made by hand, sends both labels back to Still to match). Motion is skipped for people who've asked their system for reduced motion.
+- **✓ Match all 100% (N)** (green, in the toolbar and beside the Pairs heading) confirms every suggestion that scored 100% at once, leaving the amber ones that need a look. At (0) it's greyed out, with a tooltip saying why.
+- **Still to match** (below): every courier label with no pair sits beside its **closest packing label still free** ("closest 60%"), with a **✓** to match them and **Other…** to pick a different packing label (closest addresses first, then all the others). `suggest_pairs()` gives each courier label up to 8 `candidates` ([item reference, score], every packing label of a place in label order); two courier labels never show the same packing label. After a ✓ there, the next row's ✓ is kept under the pointer. Packing labels that are nobody's closest are listed under **Other packing labels waiting** (store, "Label X of Y", Packing Spec, receiver and Attn, full address, Installer / Not-in-courier-CSV tags). All packing-label details come from the label map JSON, not from the packing labels PDF.
+- **Pairing by hand:** drag a courier label (from either area) onto any packing label, or click one and then the other; the new pair is matched straight away. A packing label holds one courier label, so dropping onto a paired one swaps it, and the old courier label returns to Still to match. **↺ Suggested pairs** puts back the suggestions whose labels are free; **Clear all pairs** splits everything.
+- **Search** narrows both areas. When the unpaired courier labels and packing labels shown are the same number, **Match these N in order** pairs them all at once (for a receiver the suggestions couldn't place).
+- **Save** sends every pair, matched or still to check, as `{courier page key: item reference}`, keeps it in `stitch_matches.json` and stitches again in a background thread into the next numbered Complete Labels file. A full-page overlay covers the page until it's done (a second click does nothing). The page asks `/stitch/<project>/status?wait=1`, which **waits** (up to 25 s, on a `threading.Event` set when the stitch finishes) before answering, so it's one request per stitch rather than one a second; those requests and the label pictures are also kept out of the terminal log (a filter on the `werkzeug` logger). Then it shows the result with a Download link. Adding courier label PDFs uses the same overlay.
+- **Matches are remembered.** A courier page is known by `page_key()`, a hash of its text (or of a small render, for a scanned page), so the same label in a re-downloaded PDF is matched again on the next stitch. What's left after each stitch is kept in `stitch_session.json`.
+
+**File names.**
+- Generate writes **`Packing Labels Only <n> - <job number> - <project> - <yymmdd_HHMM>.pdf`**.
+- Stitching writes **`Complete Labels <n> - <job number> - <project> - <yymmdd_HHMM>.pdf`** (`numbered_name()`), where *n* counts the files of that kind already in the folder, so every stitch keeps the earlier copies. The job number is the Consignment Reference.
+- The dashboard and the Stitch page list files **newest first**.
+
+**The packing labels' own report** (page 1 of Packing Labels Only, `_generation_report()` in app.py) shows:
+- the job number, project and when it was generated
+- counts as chips: packing labels, courier labels to come, **not in courier CSV** (red, when any), consignments, installer packs, service
+- what needs a look while preparing labels, each a heading with its items run together:
+  - packs left out of the courier CSV
+  - specs with no size
+  - addresses new to the address book
+  - courier checks
+  - spreadsheet checks
+  - the installer packs, as "Installer (Attn) x2" each
+
+The label map stores it (`project.report`, `project.report_pages`) and counts its pages in every page number.
+
+### 10.14 The log: what happened, step by step (`app_log.py`)
+
+Every step of Packing Labels, the address book, Packing Specs and Stitch Labels writes a line to the log, so a run that went wrong can be traced.
+
+- **Terminal:** INFO and up, one line per step, with counts and timings, e.g.
+  ```
+  22:13:25 INFO    wh.packing|   tab VIC (header row 2): 43 packs, 35 stores, last row 109, 2 warning(s)
+  22:13:25 INFO    wh.book   | Address book: 31 Excel addresses, 31 new to ask about, 22 filled from the book
+  22:13:26 INFO    wh.packing|   Open360 CSV J477161 - ZZ_Match - Open360.csv done in 0.04s
+  22:13:51 INFO    wh.stitch | Stitch done in 23.80s -> Complete Labels 1 - ...: 30 placed, 12 courier label(s) unmatched, ...
+  ```
+  Set `WAREHOUSE_LOG_LEVEL=DEBUG` before starting the app to see everything in the terminal too.
+- **`logs/warehouse.log`:** everything, DEBUG included: each courier label page (`p31: Label 2 - … (matched code QWXK) -> packing label page 32 (111%)` or why it wasn't placed), each address filled from the book, each Open360 Item Reference, each pair saved on the matching page. 2 MB a file, the last 3 kept; not tracked by git.
+- **Loggers:** `wh.packing` (upload, preview: which saved version of the file was read and whether it was open in Excel, per tab consignments and address-book status, Generate: left-out packs, PDF pages, CSV rows, label map), `wh.book` (lookups, fills, bulk update read/apply with problems, add/edit/delete), `wh.specs`, `wh.stitch` (each PDF and page, the summary, unmatched labels with the reason, packing labels without a courier label, duplicates, matching-page saves and added PDFs).
+- **Failures** are logged with the full traceback (`log.exception`), including Generate (whose half-made project is undone), a stitch in the background thread, and a courier label image that couldn't be drawn. `app_log.step(log, "what")` times a step and logs its failure.
 
 ## 11. `templates/*.html` — The Web Pages
 
@@ -1789,7 +1890,7 @@ sequenceDiagram
         App->>CE: validate + build consignments
         App->>FS: create project folder, move Excel
         App->>PL: generate_packing_labels() → PDF + page map
-        App->>CE: write_courier_csv(), write_label_map()
+        App->>CE: write_open360_csv(), write_label_map()
         App->>FS: PDF, CSV, labelmap.json; usage counts in data/
         App-->>U: PDF + CSV download buttons
     end
@@ -1831,7 +1932,7 @@ sequenceDiagram
 | Change sizes, weights or Item Type of packing specs | the **📐 Packing Specs** page; defaults for a fresh install: `packing_specs.py` → `DEFAULT_FORMULA`, `DEFAULT_NAMED` |
 | Change how OB / CS / Pallet / FP codes are read | `packing_specs.py` → `parse_formula()`, `split_dimensions()` |
 | Add or rename a courier service code | `courier_export.py` → `SERVICE_CODES` |
-| Change the courier CSV columns | `courier_export.py` → `CSV_HEADER` and `write_courier_csv()` |
+| Change the courier CSV columns | `courier_export.py` → `OPEN360_HEADER`, `open360_items()` and `write_open360_csv()` (format locked to the file the portal accepted) |
 | Change the packing-label checks (errors vs warnings) | `packing_label_generator.py` → `_check_pack_consistency()` and the end of `parse_packing_data()` |
 | Change the packing-label header keywords | `packing_label_generator.py` → the header loop in `parse_packing_data()` |
 | Change packing-label margins, gaps or the courier region size | `packing_label_generator.py` → constants at the top of `generate_packing_labels()` |

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Match Courier Labels</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    <div class="sticky-nav">
+        <a href="/#home">🏠 Home</a>
+        <span class="divider">|</span>
+        <a href="/#dashboard-section" class="active">📊 Dashboard</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
+        <span class="divider">|</span>
+        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
+    </div>
+
+    <div id="loading-overlay" role="alert" aria-live="assertive">
+        <div class="spinner"></div>
+        <div id="loading-text">Saving matches and stitching again…</div>
+        <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;" id="loading-sub">Rendering each courier label sharp enough to scan - a large job can take a minute.</p>
+    </div>
+
+    <div class="container ab-page sm-page" id="stitch-match"
+         data-session="{{ session_json }}"
+         data-save-url="{{ url_for('stitch_match_save', project_name=project) }}"
+         data-status-url="{{ url_for('stitch_match_status', project_name=project) }}"
+         data-image-url="{{ url_for('stitch_label_image', project_name=project, index=0) }}"
+         data-download-url="{{ url_for('download_file', folder_name=project, filename='__FILE__') }}"
+         data-add-url="{{ url_for('stitch_add_pdfs', project_name=project) }}">
+        <h1>🔗 Match Courier Labels</h1>
+        <p class="ab-intro"><strong>{{ job }}</strong> · {{ project_label }}. These courier labels didn't match a packing label by their code. Each is paired with a packing label from the address printed on it, side by side; an address with as many courier labels as packing labels is paired in order. Check each pair: <strong>✓</strong> if it's right (the page moves on to the next one), <strong>✕</strong> if not, or <strong>Match all 100%</strong> for the sure ones. Drag a courier label onto a packing label (or click one, then the other) to pair it yourself. <strong>Save</strong> stitches again in the background into a new Complete Labels file, and remembers these matches for next time.</p>
+
+        <div class="sm-toolbar">
+            <input type="search" id="sm-search" class="ab-search" placeholder="Search receiver, suburb, postcode, store, label…" aria-label="Search labels" autocomplete="off">
+            <button type="button" class="ab-btn sm-sure-btn" id="sm-sure">✓ Match all 100%</button>
+            <button type="button" class="ab-btn ab-btn-plain" id="sm-restore" title="Put back every suggested pair">↺ Suggested pairs</button>
+            <button type="button" class="ab-btn ab-btn-plain" id="sm-clear" title="Split every pair">Clear all pairs</button>
+            <button type="button" class="ab-btn" id="sm-save" disabled>Save matches</button>
+            <label class="ab-btn ab-btn-plain sm-add" title="Courier label PDFs downloaded later: stitched in with the ones already used">
+                ➕ Add courier label PDFs<input type="file" id="sm-add-files" accept=".pdf" multiple hidden>
+            </label>
+        </div>
+        <p class="ps-hint sm-files">Courier label PDFs used: {{ session.files|join(', ') }}</p>
+        <div class="sm-hintbar" id="sm-hintbar" hidden>
+            <span id="sm-hint-text"></span>
+            <button type="button" class="ab-btn" id="sm-match-shown">Match these in order</button>
+        </div>
+        <p class="sm-status" id="sm-status" role="status" aria-live="polite"></p>
+
+        <section class="sm-paired" aria-labelledby="sm-paired-title">
+            <div class="sm-section-head">
+                <h2 class="ps-heading" id="sm-paired-title">Pairs <span class="sm-count" id="sm-paired-count"></span></h2>
+                <button type="button" class="ab-btn sm-sure-btn" id="sm-sure-2">✓ Match all 100%</button>
+            </div>
+            <p class="ps-hint sm-legend"><span class="sm-key sm-key-check"></span> suggested, to check: ✓ if right, ✕ if wrong &nbsp; <span class="sm-key sm-key-done"></span> matched (hover for ↶ Undo)</p>
+            <div class="sm-pair-head" aria-hidden="true"><span>Courier label</span><span></span><span>Packing label</span></div>
+            <div class="sm-list" id="sm-pairs"></div>
+        </section>
+
+        <section id="sm-rest" aria-labelledby="sm-rest-title">
+            <h2 class="ps-heading sm-rest-title" id="sm-rest-title">Still to match <span class="sm-count" id="sm-left-count"></span></h2>
+            <p class="ps-hint sm-legend">Each courier label is shown with its closest packing label still free: <strong>✓</strong> to match them, or <strong>Other…</strong> to pick a different one. Dragging works too.</p>
+            <div class="sm-pair-head" aria-hidden="true"><span>Courier label</span><span></span><span>Closest packing label</span></div>
+            <div class="sm-list" id="sm-free"></div>
+            <div id="sm-others">
+                <h3 class="av-section" id="sm-right-title">Other packing labels waiting <span class="sm-count" id="sm-right-count"></span></h3>
+                <div class="sm-list sm-others-list" id="sm-packs"></div>
+            </div>
+        </section>
+        <p class="st-back"><a href="{{ url_for('stitch_page', project_name=project) }}">← Back to Stitch Labels</a></p>
+    </div>
+
+    <dialog class="sm-ask" id="sm-ask" aria-labelledby="sm-ask-title">
+        <h2 class="ps-heading" id="sm-ask-title">Some courier labels still have no packing label</h2>
+        <p id="sm-ask-text"></p>
+        <p class="ps-hint">Page 1 of the new Complete Labels file will say which you chose.</p>
+        <div class="sm-ask-actions">
+            <button type="button" class="ab-btn" data-answer="add">Add them 4-up at the end</button>
+            <button type="button" class="ab-btn ab-btn-plain" data-answer="leave">Leave them out</button>
+            <button type="button" class="ab-btn ab-btn-plain" data-answer="cancel">Keep matching</button>
+        </div>
+    </dialog>
+
+    <dialog class="sm-zoom" id="sm-zoom">
+        <button type="button" class="ab-btn ab-btn-plain sm-zoom-close" aria-label="Close">✕</button>
+        <img alt="Courier label, larger">
+    </dialog>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

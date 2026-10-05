@@ -1,13 +1,66 @@
 <!DOCTYPE html>
 {% set LABELS = {'receiver': 'Receiver', 'contact': 'Contact', 'line1': 'Address Line 1', 'line2': 'Address Line 2', 'suburb': 'Suburb', 'state': 'State', 'postcode': 'Postcode', 'country': 'Country', 'authority_to_leave': 'Authority to leave'} %}
-{% macro address(a, changed=[]) %}{% set parts = [] %}
+{% macro address(a, changed=[], show_removed=true) %}{% set parts = [] %}
     {%- for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country'] -%}
         {%- if a.get(f) %}{% set _ = parts.append((f, ('Attn ' if f == 'contact' else '') ~ a[f], f in changed, false)) %}
-        {%- elif f in changed %}{% set _ = parts.append((f, '(' ~ LABELS[f] ~ ' removed)', true, true)) %}{% endif -%}
+        {%- elif f in changed and show_removed %}{% set _ = parts.append((f, '(' ~ LABELS[f] ~ ' removed)', true, true)) %}{% endif -%}
     {%- endfor -%}
     {%- if 'authority_to_leave' in a %}{% set _ = parts.append(('authority_to_leave', 'ATL ' ~ ('Y' if a.authority_to_leave else 'N'), 'authority_to_leave' in changed, false)) %}{% endif -%}
     <span class="av-address">{% for f, text, is_changed, removed in parts %}<span class="av-part{% if is_changed %} av-changed{% endif %}{% if removed %} av-removed{% endif %}" title="{{ LABELS[f] }}">{{ text }}</span>{{ ', ' if not loop.last }}{% endfor %}</span>
 {%- endmacro %}
+{% macro choice(p, value, checked, kind) %}<label class="av-choice av-choice-{{ kind }}">
+    <input type="radio" name="action_{{ p.idx }}" value="{{ value }}" data-kind="{{ kind }}"{% if checked %} checked{% endif %}>
+    <span class="av-choice-body">{{ caller() }}</span>
+</label>{% endmacro %}
+{% macro choice_card(p) %}
+<article class="av-card av-card-{{ p.status }}" data-status="{{ p.status }}" data-idx="{{ p.idx }}">
+    <header class="av-card-head">
+        <span class="av-pill av-{{ p.status }}">{{ {'update': 'To update', 'new': 'Not in the book', 'conflict': 'Conflicting'}[p.status] }}</span>
+        <span class="av-card-rows">CSV row {{ p.rows|join(', ') }}</span>
+        <span class="ab-detail av-card-match">{{ p.matched_by }}</span>
+        <span class="av-card-outcome" aria-live="polite"></span>
+    </header>
+    {% if p.status != 'conflict' %}
+    <div class="av-card-portal"><span class="av-card-label">Courier portal</span>{{ address(p.new, p.changed if p.entry else []) }}</div>
+    {% endif %}
+    {% if p.likely %}<div class="av-likely-note">Close match, not exact — check it's the same place, or pick another option below.</div>{% endif %}
+    <fieldset class="av-choices">
+        <legend class="ab-sr">What to do with CSV row {{ p.rows|join(', ') }}</legend>
+        {% if p.status == 'update' %}
+            {% call choice(p, 'update', true, 'update') %}<strong>Update the saved address</strong>
+                <span class="av-choice-detail">Saved now: {{ address(p.entry, p.changed, false) }}</span>
+                {% if p.merges %}<span class="av-merge-note">Also folds in {{ 'an older copy' if p.merges|length == 1 else p.merges|length ~ ' older copies' }} for this receiver, so the book keeps one:
+                    {% for m in p.merges %}<span class="av-merge-old">{{ address(m, m.differs) }}</span>{% endfor %}</span>{% endif %}
+                {% if p.siblings %}<span class="ab-detail av-sibling-note">Also corrects the same address saved for {% for s in p.siblings %}{{ s.receiver }}{% if s.contact %} (Attn {{ s.contact }}){% endif %}{{ ', ' if not loop.last }}{% endfor %}.</span>{% endif %}
+            {% endcall %}
+        {% elif p.status == 'new' %}
+            {% call choice(p, 'new', not p.ambiguous, 'new') %}<strong>Add as a new address</strong>
+                <span class="av-choice-detail">{% if p.ambiguous %}This receiver already has several saved addresses, so it wasn't matched to one of them.{% else %}Saved as a new verified address.{% endif %}</span>
+            {% endcall %}
+        {% else %}
+            {% for v in p.variants %}
+            {% call choice(p, 'use:' ~ loop.index0, false, 'update' if p.entry else 'new') %}<strong>Use row {{ v.rows|join(', ') }}'s address</strong>
+                <span class="av-choice-detail">{{ address(v.new, p.variant_diff) }}</span>
+            {% endcall %}
+            {% endfor %}
+        {% endif %}
+        {% for c in p.candidates %}
+            {% call choice(p, 'merge:' ~ c.id, false, 'merge') %}<strong>Merge into this saved address</strong> <span class="av-why">{{ c.why }}</span>
+                <span class="av-choice-detail">{{ address(c, c.differs, false) }}{% if c.verified_at %} · ✓ Verified{% endif %}</span>
+                <span class="ab-detail">Its receiver and Attn stay; {% if c.differs %}the <span class="av-changed">highlighted</span> parts take the portal's version{% else %}the portal agrees with it{% endif %}.</span>
+            {% endcall %}
+        {% endfor %}
+        {% if p.status == 'update' %}
+            {% call choice(p, 'new', false, 'new') %}<strong>Add as a new address instead</strong>
+                <span class="av-choice-detail">Keep the saved address as it is and save the portal's as another one.</span>
+            {% endcall %}
+        {% endif %}
+        {% call choice(p, 'skip', p.status == 'conflict' or (p.status == 'new' and p.ambiguous), 'skip') %}<strong>Skip</strong>
+            <span class="av-choice-detail">{% if p.status == 'conflict' %}These rows give different addresses for the same entry; skip to fix the file instead.{% else %}Leave the address book as it is.{% endif %}</span>
+        {% endcall %}
+    </fieldset>
+</article>
+{% endmacro %}
 {% macro review_table(items) %}
 <div class="ab-table-wrap">
     <table class="ab-table av-table">
@@ -87,7 +140,7 @@
         {% if done %}
         <div class="success-box av-done">
             <h2 class="success-title">✅ Address book updated</h2>
-            <p>{{ applied }} address{{ '' if applied == 1 else 'es' }} updated, {{ confirmed }} confirmed as already correct{% if added %}, {{ added }} new address{{ '' if added == 1 else 'es' }} added{% endif %} — all marked as verified.{% if merged %} {{ merged }} older duplicate{{ '' if merged == 1 else 's' }} merged into {{ 'its' if merged == 1 else 'their' }} verified address.{% endif %}</p>
+            <p>{{ applied }} address{{ '' if applied == 1 else 'es' }} updated, {{ confirmed }} confirmed as already correct{% if added %}, {{ added }} new address{{ '' if added == 1 else 'es' }} added{% endif %}{% if joined %}, {{ joined }} merged into saved addresses{% endif %} — all marked as verified.{% if merged %} {{ merged }} older duplicate{{ '' if merged == 1 else 's' }} merged into {{ 'its' if merged == 1 else 'their' }} verified address.{% endif %}</p>
             {% if problems %}
             <ul class="av-problems">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
             {% endif %}
@@ -110,19 +163,37 @@
                 <span class="av-pill av-same">{{ counts.same }} already up to date</span>
                 {% if counts.conflict %}<span class="av-pill av-conflict">{{ counts.conflict }} conflicting</span>{% endif %}
             </p>
-            <p class="av-hint">Columns read: {% for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave'] if f in columns %}{{ LABELS[f] }}{{ ', ' if not loop.last }}{% endfor %}. Changed parts are <mark>highlighted</mark>. Only address details are updated: saved receiver names and Attn stay as they are. Untick anything you don't want saved.</p>
+            <p class="av-hint">Columns read: {% for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave'] if f in columns %}{{ LABELS[f] }}{{ ', ' if not loop.last }}{% endfor %}. Changed parts are <mark>highlighted</mark>. Only address details are updated: saved receiver names and Attn stay as they are. For each row pick what to do — the suggested choice is already selected.</p>
 
             {% set actionable = proposals|rejectattr('status', 'equalto', 'same')|list %}
             {% set up_to_date = proposals|selectattr('status', 'equalto', 'same')|list %}
 
             {% if actionable %}
-            {{ review_table(actionable) }}
+            <div class="av-toolbar" id="av-toolbar">
+                <div class="av-tabs" role="tablist" aria-label="Show rows">
+                    <button type="button" class="av-tab" data-filter="all" aria-selected="true">All <span>{{ actionable|length }}</span></button>
+                    {% if counts.update %}<button type="button" class="av-tab" data-filter="update" aria-selected="false">To update <span>{{ counts.update }}</span></button>{% endif %}
+                    {% if counts.new %}<button type="button" class="av-tab" data-filter="new" aria-selected="false">Not in the book <span>{{ counts.new }}</span></button>{% endif %}
+                    {% if counts.conflict %}<button type="button" class="av-tab" data-filter="conflict" aria-selected="false">Conflicting <span>{{ counts.conflict }}</span></button>{% endif %}
+                </div>
+                <div class="av-bulk">
+                    <span class="ab-detail">For the rows shown:</span>
+                    <button type="button" class="ab-btn ab-btn-plain av-bulk-btn" data-set="suggested">Suggested choice</button>
+                    <button type="button" class="ab-btn ab-btn-plain av-bulk-btn" data-set="best-merge">Merge into best match</button>
+                    <button type="button" class="ab-btn ab-btn-plain av-bulk-btn" data-set="new">Add all as new</button>
+                    <button type="button" class="ab-btn ab-btn-plain av-bulk-btn" data-set="skip">Skip all</button>
+                </div>
+            </div>
+            <div class="av-cards" id="av-cards">
+                {% for p in actionable %}{{ choice_card(p) }}{% endfor %}
+            </div>
             {% else %}
             <p class="av-nothing">Nothing to change: every address in this file already matches the address book. Mark them as verified below.</p>
             {% endif %}
 
-            <div class="av-actions">
-                {% if actionable %}<button type="submit" name="apply" value="1" class="ab-btn">Apply ticked changes</button>
+            <div class="av-actions av-apply-bar">
+                {% if actionable %}<button type="submit" name="apply" value="1" class="ab-btn" id="av-apply">Apply changes</button>
+                <span class="av-plan" id="av-plan" aria-live="polite"></span>
                 {% elif up_to_date %}<button type="submit" name="apply" value="1" class="ab-btn">Mark as verified</button>{% endif %}
                 <a href="{{ url_for('bulk_update_addresses') }}" class="ab-btn ab-btn-plain">Choose another file</a>
             </div>

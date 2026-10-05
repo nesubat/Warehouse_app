@@ -136,7 +136,11 @@
                 <!-- Action Bar: Sub-Group (or Stitch Labels for courier projects) & Delete -->
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     {% if project.csv_files %}
-                    <button type="button" class="btn-action btn-stitch" disabled title="Coming soon">🧵 Stitch Labels</button>
+                    {% if project.has_label_map %}
+                    <a href="{{ url_for('stitch_page', project_name=project.name) }}" class="btn-action btn-stitch" title="Put the courier portal's labels onto these packing labels">🧵 Stitch Labels</a>
+                    {% else %}
+                    <button type="button" class="btn-action btn-stitch" disabled title="This project has no label map">🧵 Stitch Labels</button>
+                    {% endif %}
                     {% else %}
                     <a href="javascript:void(0);"  
                     class="btn-action" 

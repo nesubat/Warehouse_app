@@ -82,6 +82,16 @@ def split_dimensions(digits, count=3):
     return tuple(int(p) for p in best)
 
 
+_COUNT = re.compile(r'^\s*(\d{1,2})\s*[x×*]\s*([a-z].*)$', re.I)
+
+
+def split_count(spec):
+    """'2 X OB170170170' -> (2, 'OB170170170'): a box count written in front of the spec. Anything else -> (1, spec).
+    The spec after the count must start with a letter, so '420 x 296' stays a size."""
+    m = _COUNT.match(str(spec or ''))
+    return (int(m.group(1)), m.group(2).strip()) if m and int(m.group(1)) > 0 else (1, str(spec or '').strip())
+
+
 def parse_formula(spec, fp_third_size=None):
     """('OB' | 'CS' | 'PALLET' | 'FP', (length, width, height) in cm or None) for formula codes, else None.
     Numbers can run together (OB1701701200) or be separated (OB 170 x 170 x 1200). An FP code with only
@@ -229,6 +239,10 @@ class SpecStore:
         named = {_norm(s['name']): s for s in data['named']}
 
         def resolve(spec):
+            count, spec = split_count(spec)  # '2 X OB170170170': the size and weight are those of one OB170170170
+            return {**_resolve(spec), 'count': count}
+
+        def _resolve(spec):
             formula = parse_formula(spec, data['formula']['FP']['third_size'])
             if formula:
                 prefix, size = formula

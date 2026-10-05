@@ -353,7 +353,7 @@ def resolve_destination(group):
     return {
         'receiver': receiver, 'contact': contact,
         'line1': line1, 'line2': line2,
-        'suburb': _tidy(p['suburb']) or col_suburb, 'state': state, 'postcode': postcode, 'country': country,
+        'suburb': (_tidy(p['suburb']) or col_suburb).upper(), 'state': state, 'postcode': postcode, 'country': country,
         'authority_to_leave': p['atl'], 'raw': raw,
     }
 
@@ -379,13 +379,21 @@ def _num(v):
 
 # ---------- consignments ----------
 
+def job_series(job_no):
+    """The job a Job Number belongs to, used as the Consignment Reference: strictly J + 6 digits at the start
+    ('J477161-17' -> 'J477161'). Anything else ('477161-17', 'J47716-1', 'J4771612') -> ''."""
+    m = re.match(r'J\d{6}(?!\d)', str(job_no or '').strip(), re.I)
+    return m.group(0).upper() if m else ''
+
+
 def detect_series(pack_groups):
+    """(the Consignment Reference: the job most Job Numbers in the distribution file belong to, every job seen)."""
     found = Counter()
     for g in pack_groups.values():
         for item in g['items']:
-            m = re.match(r'\s*(J\d+)', str(item.get('job_no', '')), re.I)
-            if m:
-                found[m.group(1).upper()] += 1
+            job = job_series(item.get('job_no'))
+            if job:
+                found[job] += 1
     return found.most_common(1)[0][0] if found else '', sorted(found)
 
 
@@ -397,7 +405,7 @@ def _apply_edit(dest, edit):
     if not any(k in edit for k in EDITABLE_FIELDS + ('authority_to_leave',)):
         return dest
     dest = {**dest, **{k: _tidy(edit[k]) for k in EDITABLE_FIELDS if k in edit}}
-    dest['state'] = dest['state'].upper()
+    dest['state'], dest['suburb'] = dest['state'].upper(), dest['suburb'].upper()  # suburbs always in capitals
     if 'state' in edit and dest['country'] in ('AU', 'NZ'):
         dest['country'] = _country('', dest['state'])
     dest['postcode'] = normalize_postcode(dest['postcode'], dest['country'])
@@ -556,7 +564,14 @@ def sendable(consignments, cartons):
     return keep, [x for x in cartons if x['consignment'] in numbers]
 
 
-def write_courier_csv(path, cartons, consignments, reference, fixed):
+SENDER_COLUMNS = {  # CSV column -> sender field: one sender for the whole file, on every row
+    'Sender Name': 'name', 'Sender Address 1': 'line1', 'Sender Address 2': 'line2', 'Sender Town': 'suburb',
+    'Sender State': 'state', 'Sender Postcode': 'postcode', 'Sender Country': 'country', 'Sender Contact': 'contact',
+    'Sender Phone': 'phone', 'Sender Email': 'email',
+}
+
+
+def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None):
     by_number = {c['number']: c for c in consignments}
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
@@ -578,18 +593,181 @@ def write_courier_csv(path, cartons, consignments, reference, fixed):
             if size:
                 row[19] = round(size[0] * size[1] * size[2] / 1_000_000, 3)
                 row[21:24] = [_num(v) for v in size]
+            if sender and sender.get('name'):
+                for column, field in SENDER_COLUMNS.items():
+                    row[CSV_HEADER.index(column)] = sender.get(field, '')
             row[-1] = carton['item_reference']
             writer.writerow(row)
 
 
-def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, page_info):
-    """Everything needed to match courier labels to packing-label pages before stitching."""
+# ---------- TIG Open360 bulk upload ----------
+
+# TIG Open360's standard bulk-upload header, exactly as its template has it (including the spaces in front of a few
+# names), so the portal recognises every column.
+OPEN360_HEADER = (
+    "Receiver Name, Receiver Address Line1,Receiver Address Line2,Receiver Suburb,Receiver State,Receiver Postcode,"
+    "Receiver Country,Receiver Contact Email,Receiver Contact Phone,Receiver Contact Name,Despatch Date,"
+    "Special Instructions,Service,Shipment Reference,Is Receiver Residential,Internal Reference,Cost Centre,"
+    "Item Quantity,Item Weight,Item Length,Item Width,Item Height,Item Type,Item Description,Item Reference,"
+    "Total Items,Total Weight,Total Volume,Sender Address Line1,Sender Suburb,Sender State,Sender Postcode,"
+    " Is Sender Residential,Authority To Leave,Is Dangerous Goods,DG Reference,DG Weight,DG Quantity,DG Type,"
+    "DG Package Type,Special Service, Sender Name, Sender Address Line 2, Sender Country, Sender Contact Phone,"
+    " Sender Contact Name"
+).split(',')
+
+
+def open360_items(cartons, consignments):
+    """The cartons as Open360 rows, in the distribution file's order: [{consignment, destination, service,
+    item_reference, packing_spec, weight_kg, size_cm, item_type}]."""
+    by_number = {c['number']: c for c in consignments}
+    return [{'consignment': x['consignment'], 'destination': by_number[x['consignment']]['destination'],
+             'service': by_number[x['consignment']]['service_code_used'], 'item_reference': x['item_reference'],
+             'packing_spec': x['packing_spec'], 'weight_kg': x['weight_kg'], 'size_cm': x['size_cm'], 'item_type': x['item_type'],
+             'label_no': x['label_no'], 'store': x['store']}
+            for x in cartons]
+
+
+def unique_codes(count, length=4):
+    """count different random codes of capital letters (QWXK). 4 letters, longer when there are so many rows that
+    a repeat would get likely (26^4 = 456,976 codes; a code length is kept at least 1,000 times the rows)."""
+    import secrets
+    import string
+    while 26 ** length < 1000 * max(count, 1):
+        length += 1
+    codes = set()
+    while len(codes) < count:
+        codes.add("".join(secrets.choice(string.ascii_uppercase) for _ in range(length)))
+    return list(codes)
+
+
+def open360_item_references(items, numbering='row'):
+    """The Open360 Item Reference of each row and its unique code: '01-QWXK-L-1-Provision Clayton'
+    = row number - code - 'L' - label number - store. The number is zero-padded so the portal's text sort keeps the
+    order; the code is what Stitch Labels reads back off the courier label to find its packing label.
+      numbering='row'       01, 02 ... 42: the row's place in the distribution file (the locked format)
+      numbering='shipment'  01.1, 01.2 ... 02.1: shipment by first appearance, then its cartons
+    Returns [(item reference, code)]."""
+    if numbering == 'shipment':
+        first, seen = {}, {}
+        for x in items:
+            first.setdefault(x['consignment'], len(first) + 1)
+        most = max([sum(1 for y in items if y['consignment'] == c) for c in first] or [1])
+        w_s, w_i = len(str(len(first))), len(str(most))
+        prefixes = []
+        for x in items:
+            seen[x['consignment']] = seen.get(x['consignment'], 0) + 1
+            prefixes.append(f"{first[x['consignment']]:0{w_s}d}.{seen[x['consignment']]:0{w_i}d}")
+    else:
+        width = len(str(len(items)))  # 42 rows -> 01..42, 150 rows -> 001..150
+        prefixes = [f"{n:0{width}d}" for n in range(1, len(items) + 1)]
+    codes = unique_codes(len(items))
+    return [(f"{p}-{code}-L-{x['label_no']}-{x['store']}", code) for p, code, x in zip(prefixes, codes, items)]
+
+
+def write_open360_csv(path, items, reference, despatch=None, numbering='row'):
+    """TIG Open360's standard bulk-upload file, in the format the portal accepted (J477161 - Lux Test 30 - Open360.csv):
+    one row per packing label, in the distribution file's order.
+
+      Shipment Reference   the reference chosen in the preview, on every row (the portal joins a receiver's rows)
+      Item Reference       '01-QWXK-L-1-Provision Clayton': row number (zero-padded, so sorting the text as the portal
+                           does keeps the file's order), a unique code for Stitch Labels, then label number and store
+      Internal Reference   kept but empty
+      Item Quantity        boxes on that row: 2 for a Packing Spec '2 X OB170170170', else 1; Total Items the same
+      Total Weight/Volume  the whole consignment's (all its rows, counting each box)
+      Sender columns       kept but empty: the portal uses the account's sender
+    Dates are d/m/yyyy, as Excel saves them; UTF-8 without a BOM, CRLF line endings.
+    Returns [(Item Reference, code)] per row."""
+    from packing_specs import split_count
+    item_refs = open360_item_references(items, numbering)
+    despatch = despatch or date.today()
+    yes_no = lambda v: 'Y' if v else 'N'
+    count = {id(x): split_count(x['packing_spec'])[0] for x in items}
+    totals = {}
+    for x in items:
+        t = totals.setdefault(x['consignment'], {'weight': 0.0, 'volume': 0.0})
+        t['weight'] += count[id(x)] * float(x['weight_kg'] or 0)
+        if x['size_cm']:
+            t['volume'] += count[id(x)] * x['size_cm'][0] * x['size_cm'][1] * x['size_cm'][2] / 1_000_000
+    dim = lambda v: _num(v) if v not in ('', None) else ''
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f, lineterminator='\r\n')
+        writer.writerow(OPEN360_HEADER)
+        for n, x in enumerate(items, start=1):
+            d = x['destination']
+            size = x['size_cm'] or ('', '', '')
+            t = totals[x['consignment']]
+            row = {
+                'Receiver Name': d['receiver'], 'Receiver Address Line1': d['line1'], 'Receiver Address Line2': d['line2'],
+                'Receiver Suburb': d['suburb'], 'Receiver State': d['state'], 'Receiver Postcode': d['postcode'],
+                'Receiver Country': d.get('country') or 'AU', 'Receiver Contact Name': d.get('contact', ''),
+                'Despatch Date': f"{despatch.day}/{despatch.month}/{despatch.year}", 'Service': x['service'],
+                'Shipment Reference': reference, 'Is Receiver Residential': 'N',
+                'Item Quantity': count[id(x)], 'Item Weight': x['weight_kg'],
+                'Item Length': dim(size[0]), 'Item Width': dim(size[1]), 'Item Height': dim(size[2]),
+                'Item Type': x['item_type'], 'Item Description': x['packing_spec'], 'Item Reference': item_refs[n - 1][0],
+                'Total Items': count[id(x)], 'Total Weight': _num(round(t['weight'], 2)),
+                'Total Volume': round(t['volume'], 3) if t['volume'] else '',
+                'Authority To Leave': yes_no(d.get('authority_to_leave')), 'Is Dangerous Goods': 'N',
+            }
+            writer.writerow([row.get(h.strip(), '') for h in OPEN360_HEADER])
+    return item_refs
+
+
+def project_open360_items(project_dir):
+    """Rebuilds an already generated project's Open360 rows from its courier CSV as last saved (address-book fills,
+    edits, weights, service codes, a changed reference) and its label map, in the courier CSV's (= the distribution
+    file's) order. Boxes whose size wasn't known then are sized now from the Packing Specs page.
+    Returns (items, reference)."""
+    import glob
+    from packing_specs import SpecStore
+    map_path = next(iter(glob.glob(os.path.join(project_dir, '*.labelmap.json'))), None)
+    if not map_path:
+        raise ValueError("This project has no label map (it was made before courier CSVs were added).")
+    with open(map_path, encoding='utf-8') as f:
+        label_map = json.load(f)
+    with open(os.path.join(project_dir, label_map['files']['courier_csv']), encoding='utf-8-sig', newline='') as f:
+        rows = list(csv.reader(f))
+    if rows and [h.strip() for h in rows[0]] == [h.strip() for h in OPEN360_HEADER]:
+        raise ValueError("This project's courier CSV is already in the Open360 format.")
+    col = {name: i for i, name in enumerate(rows[0]) if name != 'Reference'}
+    ref_col = len(rows[0]) - 1  # the last 'Reference' column holds the item reference
+    carton_of = {pk['item_reference']: {**pk, 'store': store} for store, packs in label_map['stores'].items() for pk in packs}
+    con_of = {c['number']: c for c in label_map['consignments']}
+    resolve = SpecStore(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'packing_specs.json')).resolver()
+    items = []
+    for r in rows[1:]:
+        pk = carton_of.get(r[ref_col])
+        if not pk:
+            continue
+        get = lambda name: r[col[name]] if name in col else ''
+        size = tuple(float(get(n)) for n in ('Item Length', 'Item Width', 'Item Height')) if get('Item Length') else None
+        if size is None:
+            size = resolve(pk.get('packing_spec', ''))['size_cm']
+        items.append({'consignment': pk['consignment'], 'destination': dict(con_of[pk['consignment']]['destination']),
+                      'service': get('Service Code'), 'item_reference': r[ref_col], 'packing_spec': pk.get('packing_spec', ''),
+                      'weight_kg': get('Total Weight'), 'size_cm': size, 'item_type': get('Item Type') or 'Carton',
+                      'label_no': pk['label'], 'store': pk['store']})
+    # The CSV as last saved wins (it may have been edited after Generate, e.g. a changed reference)
+    reference = next((r[1] for r in rows[1:] if len(r) > 1 and r[1]), label_map.get('consignment_reference', ''))
+    return items, reference
+
+
+def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, page_info, left_out=(), sender=None,
+                    open360=None, project=None):
+    """Everything needed to match courier labels to packing-label pages before stitching. left_out: cartons
+    that have packing labels but aren't in the courier CSV (no complete address), listed so nothing goes missing.
+    open360: {'file', 'shipment_reference', 'item_references': {item reference: (Open360 Item Reference, code)}}.
+    csv_name: the courier file (the Open360 CSV); csv_row is each label's row in it."""
+    open360 = open360 or {}
+    o360_refs = open360.get('item_references', {})
     stores = {}
     for csv_row, carton in enumerate(cartons, start=2):  # row 1 is the header
         pages = page_info['pages'].get(carton['pack_key'], [])
         dest = next(c['destination'] for c in consignments if c['number'] == carton['consignment'])
         stores.setdefault(carton['store'], []).append({
             'item_reference': carton['item_reference'],
+            'open360_item_reference': (o360_refs.get(carton['item_reference']) or (None, None))[0],
+            'open360_code': (o360_refs.get(carton['item_reference']) or (None, None))[1],
             'label': carton['label_no'], 'of': carton['label_total'],
             'packing_spec': carton['packing_spec'],
             'pdf_pages': [p + 1 for p in pages],
@@ -603,8 +781,11 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
         })
     data = {
         'consignment_reference': reference,
+        'project': project,
+        'sender': sender if sender and sender.get('name') else None,
         'dispatch_date': date.today().isoformat(),
-        'files': {'packing_labels_pdf': pdf_name, 'courier_csv': csv_name},
+        'files': {'packing_labels_pdf': pdf_name, 'courier_csv': csv_name, 'open360_csv': open360.get('file')},
+        'open360_shipment_reference': open360.get('shipment_reference'),
         'page_size_mm': page_info['page_size_mm'],
         'courier_label_region_mm': page_info['courier_region_mm'],
         'consignments': [{
@@ -616,6 +797,13 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
             'cartons': [x['item_reference'] for x in c['cartons']],
         } for c in consignments],
         'stores': stores,
+        'not_in_courier_csv': [{
+            'item_reference': x['item_reference'], 'store': x['store'], 'packing_spec': x['packing_spec'],
+            'label': x['label_no'], 'of': x['label_total'],
+            'pdf_pages': [p + 1 for p in page_info['pages'].get(x['pack_key'], [])],
+            'excel_rows': x['excel_rows'], 'job_numbers': x['job_numbers'],
+            'reason': 'no complete delivery address',
+        } for x in left_out],
     }
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

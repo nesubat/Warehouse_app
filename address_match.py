@@ -125,7 +125,9 @@ def best_match(address, candidates):
 MIN_SUGGEST = 0.35   # weakest saved address still worth showing as a suggestion
 
 
-def _why(n, s, same_postcode, has_address=True):
+def _why(n, s, same_postcode, has_address=True, typed_name=True):
+    if not typed_name:
+        return "Same address" if s >= 0.9 and same_postcode else "Similar address"
     if not has_address:
         return "Saved for this receiver" if n >= 0.9 else "Similar receiver"
     if s >= 0.9 and same_postcode:
@@ -137,25 +139,42 @@ def _why(n, s, same_postcode, has_address=True):
     return "Similar address" if s >= MIN_ADDRESS else "Similar receiver"
 
 
+def _typed_name_score(typed, saved):
+    """Credit for a name still being typed: 'eyed' already points at 'Eyedentity (Elsternwick)'."""
+    ta, tb = _words(typed, NAME_NOISE), _words(saved, NAME_NOISE)
+    if not ta or not tb:
+        return 0.0
+    hits = sum(1 for w in ta if any(x == w or (len(w) >= 2 and x.startswith(w)) for x in tb))
+    return 0.85 * hits / len(ta)
+
+
 def suggestions(address, candidates, limit=5):
     """Saved addresses most likely to be this one, most promising first, for someone to choose from.
     Nothing is applied automatically, so this is looser than best_match(). Weighted towards the address,
-    because one address is often saved under several receivers / Attn names."""
+    because one address is often saved under several receivers / Attn names. Works on half-typed text too."""
     postcode = _norm(address.get('postcode'))
     has_address = bool(postcode or address.get('line1') or address.get('suburb'))
+    typed_name = bool(_norm(address.get('receiver')))
+    typed_street = bool(_norm(address.get('line1')) or _norm(address.get('line2')))
     seen, ranked = set(), []
     for e in candidates:
         if e['id'] in seen:
             continue
         seen.add(e['id'])
-        n = name_score(address.get('receiver'), e.get('receiver'))
+        n = max(name_score(address.get('receiver'), e.get('receiver')),
+                _typed_name_score(address.get('receiver'), e.get('receiver')))
         same_postcode = _norm(e.get('postcode')) == postcode
-        s = address_score(address, e) * (1.0 if same_postcode else 0.6)
-        total = 0.6 * s + 0.4 * n
-        if total >= MIN_SUGGEST and (n >= MIN_NAME or s >= MIN_ADDRESS):
+        s = address_score(address, e)
+        if postcode:  # a postcode not typed yet isn't a different one
+            s *= 1.0 if same_postcode else 0.6
+            if same_postcode and not typed_street:
+                s = max(s, 0.6)  # only the postcode (and maybe suburb) typed so far: everything there is a candidate
+        # Nothing typed for the name yet: rank on the address alone
+        total = 0.6 * s + 0.4 * n if typed_name else s
+        if total >= MIN_SUGGEST and (n >= MIN_NAME or s >= MIN_ADDRESS or not typed_name):
             ranked.append((total, n, s, same_postcode, e))
     ranked.sort(key=lambda x: (x[0], x[4].get('use_count') or 0), reverse=True)
-    return [{**e, 'score': round(total, 2), 'why': _why(n, s, same, has_address)} for total, n, s, same, e in ranked[:limit]]
+    return [{**e, 'score': round(total, 2), 'why': _why(n, s, same, has_address, typed_name)} for total, n, s, same, e in ranked[:limit]]
 
 
 def best_by_address(address, candidates):

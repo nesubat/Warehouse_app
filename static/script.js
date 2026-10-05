@@ -498,14 +498,27 @@ document.addEventListener("DOMContentLoaded", function() {
             input.dispatchEvent(new Event('change', { bubbles: true }));
         });
 
+        // A box that takes several files (multiple) adds each pick or drop to what's already chosen
+        let chosen = [];
         function showFilename() {
             if (filenameEl) {
-                filenameEl.textContent = input.files.length ? `✓ ${input.files[0].name}` : '';
+                const names = [...input.files].map((f) => f.name);
+                filenameEl.textContent = !names.length ? '' :
+                    names.length === 1 ? `✓ ${names[0]}` : `✓ ${names.length} files: ${names.join(', ')}`;
             }
             clearBtn.hidden = !input.files.length;
         }
+        function keepAdding() {
+            if (!input.multiple) return;
+            if (!input.files.length) { chosen = []; return; }  // cleared
+            const seen = new Set(chosen.map((f) => `${f.name}|${f.size}`));
+            [...input.files].forEach((f) => { if (!seen.has(`${f.name}|${f.size}`)) { chosen.push(f); seen.add(`${f.name}|${f.size}`); } });
+            const all = new DataTransfer();
+            chosen.forEach((f) => all.items.add(f));
+            input.files = all.files;
+        }
 
-        input.addEventListener('change', showFilename);
+        input.addEventListener('change', () => { keepAdding(); showFilename(); });
         input.addEventListener('dragenter', () => zone.classList.add('dropzone-active'));
         input.addEventListener('dragleave', () => zone.classList.remove('dropzone-active'));
         input.addEventListener('drop', () => zone.classList.remove('dropzone-active'));
@@ -639,6 +652,7 @@ document.addEventListener('DOMContentLoaded', function () {
             d[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.value.trim();
         });
         d.state = (d.state || '').toUpperCase();
+        d.suburb = (d.suburb || '').toUpperCase();
         return d;
     }
 
@@ -678,21 +692,12 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         editRow.querySelector('.pl-edit-cancel').addEventListener('click', close);
 
-        // Closest saved addresses (rows not in the address book): clicking one fills the form
-        const closest = [...editRow.querySelectorAll('.pl-closest-item')];
-        closest.forEach((button) => {
-            button.setAttribute('aria-pressed', 'false');
-            button.addEventListener('click', () => {
-                fill(editRow, JSON.parse(button.dataset.entry));
-                closest.forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
-            });
-        });
+        // Closest saved addresses: clicking one fills the form; typing in any field re-ranks the list
+        const closest = attachClosest(editRow, (entry) => fill(editRow, entry), () => read(editRow));
         editRow.querySelector('.pl-edit-reset').addEventListener('click', () => {
             fill(editRow, original);
+            closest.refresh();  // the Excel address's closest matches, the address-book fill among them
         });
-
-        // Typing a receiver or street offers matches from the address book; picking one fills the form
-        attachAddressSuggestions(editRow, (entry) => fill(editRow, entry));
 
         // Enter inside the edit form saves the row instead of submitting the whole page
         editRow.addEventListener('keydown', (e) => {
@@ -776,64 +781,67 @@ document.addEventListener('DOMContentLoaded', function () {
 // =========================================
 // 12. ADDRESS BOOK
 // =========================================
-// Type-ahead suggestions from the address book, used in the consignment edit form. Waits for a short
-// pause in typing, cancels a request that a newer keystroke made stale, and shows at most 6 matches.
-function attachAddressSuggestions(container, onPick) {
-    const list = container.querySelector('.pl-suggest');
-    if (!list) return;
-    let timer = null, controller = null, items = [], active = -1;
+// The "Closest saved addresses" list in a consignment's ✏️ form. The server renders the first list; typing in
+// any field asks /api/addresses/suggest again with everything typed so far (after a short pause, cancelling a
+// request a newer keystroke made stale), so the most promising saved addresses stay on top. A click fills the form.
+function attachClosest(container, onPick, readForm) {
+    const box = container.querySelector('.pl-closest');
+    if (!box) return { refresh() {} };
+    const list = box.querySelector('.pl-closest-list');
+    const title = box.querySelector('.pl-closest-title');
+    const none = box.querySelector('.pl-closest-none');
+    const flagged = ['unverified', 'missing'].includes(box.dataset.status);
+    let timer = null, controller = null;
 
-    const hide = () => { list.hidden = true; list.replaceChildren(); items = []; active = -1; };
-    const highlight = (i) => {
-        active = i;
-        [...list.children].forEach((li, n) => li.setAttribute('aria-selected', String(n === i)));
+    const wire = (button) => {
+        button.setAttribute('aria-pressed', 'false');
+        button.addEventListener('click', () => {
+            onPick(JSON.parse(button.dataset.entry));
+            list.querySelectorAll('.pl-closest-item').forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
+        });
     };
-    const pick = (entry) => { onPick(entry); hide(); };
+    const span = (cls, text) => { const el = document.createElement('span'); el.className = cls; el.textContent = text; return el; };
     const render = (rows) => {
         list.replaceChildren();
-        items = rows;
-        active = -1;
-        if (!rows.length) { hide(); return; }
-        rows.forEach((entry) => {
-            const li = document.createElement('li');
-            li.setAttribute('role', 'option');
+        rows.forEach((s) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'pl-closest-item';
+            button.dataset.entry = JSON.stringify({ receiver: s.receiver, contact: s.contact, line1: s.line1, line2: s.line2,
+                suburb: s.suburb, state: s.state, postcode: s.postcode, authority_to_leave: s.authority_to_leave });
             const name = document.createElement('strong');
-            name.textContent = entry.receiver + (entry.contact ? ` · Attn ${entry.contact}` : '');
-            const where = document.createElement('span');
-            where.textContent = entry.address;
-            li.append(name, where);
-            li.addEventListener('mousedown', (e) => { e.preventDefault(); pick(entry); });
+            name.textContent = s.receiver + (s.contact ? ` · Attn ${s.contact}` : '');
+            button.append(span('pl-closest-why', s.why), name, span('pl-closest-address', s.address + (s.verified_at ? ' · ✓ Verified' : '')));
+            wire(button);
+            const li = document.createElement('li');
+            li.append(button);
             list.append(li);
         });
-        list.hidden = false;
+        title.hidden = !rows.length;
+        none.hidden = rows.length > 0 || !flagged;
+    };
+    const refresh = () => {
+        clearTimeout(timer);
+        timer = setTimeout(async () => {
+            if (controller) controller.abort();
+            controller = new AbortController();
+            const form = readForm();
+            const params = new URLSearchParams();
+            ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode'].forEach((k) => { if (form[k]) params.set(k, form[k]); });
+            try {
+                const res = await fetch(`/api/addresses/suggest?${params}`, { signal: controller.signal });
+                render((await res.json()).rows || []);
+            } catch (err) {
+                if (err.name !== 'AbortError') title.hidden = true;
+            }
+        }, 200);
     };
 
-    container.querySelectorAll('[data-field="receiver"], [data-field="line1"]').forEach((input) => {
-        input.setAttribute('autocomplete', 'off');
-        input.addEventListener('input', () => {
-            clearTimeout(timer);
-            const q = input.value.trim();
-            if (q.length < 2) { hide(); return; }
-            timer = setTimeout(async () => {
-                if (controller) controller.abort();
-                controller = new AbortController();
-                try {
-                    const res = await fetch(`/api/addresses?limit=6&q=${encodeURIComponent(q)}`, { signal: controller.signal });
-                    render((await res.json()).rows || []);
-                } catch (err) {
-                    if (err.name !== 'AbortError') hide();
-                }
-            }, 150);
-        });
-        input.addEventListener('keydown', (e) => {
-            if (list.hidden) return;
-            if (e.key === 'ArrowDown') { e.preventDefault(); highlight(Math.min(active + 1, items.length - 1)); }
-            else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(Math.max(active - 1, 0)); }
-            else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopPropagation(); pick(items[active]); }
-            else if (e.key === 'Escape') { e.stopPropagation(); hide(); }
-        });
-        input.addEventListener('blur', () => setTimeout(hide, 150));
+    list.querySelectorAll('.pl-closest-item').forEach(wire);
+    container.querySelectorAll('[data-field]').forEach((input) => {
+        if (input.type !== 'checkbox') { input.setAttribute('autocomplete', 'off'); input.addEventListener('input', refresh); }
     });
+    return { refresh };
 }
 
 // The Address Book page: instant search, add, edit and delete. Only one page of results (50) is ever
@@ -1058,5 +1066,637 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         // Enter inside the weight box must not submit the whole page
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+    });
+});
+
+// =========================================
+// 14. ENTER AND REQUIRED BOXES IN THE PACKING LABELS FORM
+// =========================================
+// Enter in a box would submit the form with its first button, Update Previews (the page reloads and scrolls,
+// nothing is generated). Instead: Enter in the Project Name presses Generate, Enter in a Header Row presses
+// Update Previews, and Enter anywhere else does nothing.
+document.addEventListener('DOMContentLoaded', function () {
+    const generate = document.querySelector('button[name="generate"]');
+    const form = generate && generate.form;
+    if (!form) return;
+    const preview = form.querySelector('button[name="preview"]');
+    // Generate: every required box filled in, else a message above the button naming them (and nothing is sent).
+    // Update Previews: header rows must be numbers. Runs first (capture), so the loading overlay only shows when
+    // the form really goes.
+    const error = document.getElementById('pl-generate-error');
+    const nameOf = (box) => {
+        const label = box.id && form.querySelector(`label[for="${box.id}"]`);
+        return (label ? label.textContent : box.name).replace(/[:*]\s*$/, '').trim();
+    };
+    form.addEventListener('submit', (e) => {
+        const by = e.submitter && e.submitter.name;
+        form.querySelectorAll('.pl-missing').forEach((b) => b.classList.remove('pl-missing'));
+        let bad = [];
+        if (by === 'generate') {
+            bad = [...form.querySelectorAll('[required]')].filter((b) => !b.disabled && !String(b.value).trim());
+        } else if (by === 'preview') {
+            bad = [...form.querySelectorAll('input[name^="header_row_"]')].filter((b) => !(parseInt(b.value, 10) >= 1));
+        }
+        if (!bad.length) {
+            if (error) error.hidden = true;
+            return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        bad.forEach((b) => b.classList.add('pl-missing'));
+        const text = by === 'generate' ? `Fill in ${bad.map(nameOf).join(', ')} before generating.`
+                                       : 'Each Header Row needs a row number (1 or more).';
+        if (error && by === 'generate') { error.textContent = `⚠️ ${text}`; error.hidden = false; }
+        else alert(text);
+        bad[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+        bad[0].focus({ preventScroll: true });
+    }, true);
+    form.addEventListener('input', (e) => { if (e.target.classList.contains('pl-missing') && String(e.target.value).trim()) e.target.classList.remove('pl-missing'); });
+    form.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        const box = e.target;
+        if (!(box instanceof HTMLInputElement) || ['button', 'submit', 'checkbox', 'radio', 'file'].includes(box.type)) return;
+        if (e.defaultPrevented) return;  // boxes with their own Enter (edit form, weights, filter)
+        e.preventDefault();
+        if (box.name === 'project_name') form.requestSubmit(generate);
+        else if (box.name.startsWith('header_row_') && preview) form.requestSubmit(preview);
+    });
+});
+
+// =========================================
+// 15. UPDATE IN BULK: REVIEW CHOICES
+// =========================================
+// Each row of the portal file is a card with one choice: update the matched saved address, add it as new,
+// merge it into one of the closest saved addresses, use one conflicting row, or skip. Tabs filter the cards,
+// the bulk buttons set every shown card at once, and the bar by Apply says what will be saved.
+document.addEventListener('DOMContentLoaded', function () {
+    const cards = [...document.querySelectorAll('.av-card')];
+    if (!cards.length) return;
+    const plan = document.getElementById('av-plan');
+    const apply = document.getElementById('av-apply');
+    const tabs = [...document.querySelectorAll('.av-tab')];
+    const radios = (card) => [...card.querySelectorAll('input[type="radio"]')];
+    const chosen = (card) => radios(card).find((r) => r.checked);
+    const suggested = new Map(cards.map((card) => [card, chosen(card)]));
+    const OUTCOME = { update: 'Will update the saved address', new: 'Will be added as new', merge: 'Will be merged into a saved address', skip: 'Skipped' };
+
+    function refresh() {
+        const n = { update: 0, new: 0, merge: 0, skip: 0 };
+        cards.forEach((card) => {
+            const kind = chosen(card) ? chosen(card).dataset.kind : 'skip';
+            n[kind] += 1;
+            card.dataset.choice = kind;
+            card.querySelector('.av-card-outcome').textContent = OUTCOME[kind];
+            radios(card).forEach((r) => r.closest('.av-choice').classList.toggle('av-choice-on', r.checked));
+        });
+        const doing = n.update + n.new + n.merge;
+        const parts = [n.update && `${n.update} update${n.update === 1 ? '' : 's'}`, n.new && `${n.new} new`,
+                       n.merge && `${n.merge} merge${n.merge === 1 ? '' : 's'}`, n.skip && `${n.skip} skipped`].filter(Boolean);
+        plan.textContent = parts.join(' · ');
+        apply.textContent = doing ? `Apply ${doing} change${doing === 1 ? '' : 's'}` : 'Apply (nothing chosen)';
+    }
+    cards.forEach((card) => radios(card).forEach((r) => r.addEventListener('change', refresh)));
+
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+        tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+        cards.forEach((card) => { card.hidden = tab.dataset.filter !== 'all' && card.dataset.status !== tab.dataset.filter; });
+    }));
+    document.querySelectorAll('.av-bulk-btn').forEach((button) => button.addEventListener('click', () => {
+        cards.filter((card) => !card.hidden).forEach((card) => {
+            const want = button.dataset.set;
+            let pick = null;
+            if (want === 'suggested') pick = suggested.get(card);
+            else if (want === 'best-merge') pick = radios(card).find((r) => r.dataset.kind === 'merge');
+            else pick = radios(card).find((r) => r.dataset.kind === want);
+            if (pick) pick.checked = true;  // a card without that option keeps its choice
+        });
+        refresh();
+    }));
+    refresh();
+});
+
+// =========================================
+// 16. MATCH COURIER LABELS BY HAND (stitch_match.html)
+// =========================================
+// Two areas, top to bottom:
+//   Pairs          courier label beside its packing label, grouped by receiver and address. They start as the
+//                  suggested pairs (an address with as many courier labels as packing labels is paired in order),
+//                  amber, to check. ✓ confirms one: its two boxes close together into one green box, in place, and
+//                  the page scrolls by exactly the distance to the next ✓, so it lands under the pointer (click,
+//                  click, click in one spot). ✕ splits a pair; a matched pair shows ↶ Undo on hover.
+//   Still to match each courier label with no pair beside its closest packing label still free ("closest 60%"),
+//                  with ✓ to match them; "Other…" picks another packing label for it. Packing labels nobody's
+//                  closest to are listed under it. Dragging (or clicking one card, then another) still works anywhere.
+// Courier cards show the address printed on the label in bold and its Item Ref in bold red. "Match all 100%"
+// confirms every sure suggestion at once. Save sends every pair ({courier key: item reference}), confirmed or
+// still to check, and stitches again in the background behind an overlay.
+document.addEventListener('DOMContentLoaded', function () {
+    const root = document.getElementById('stitch-match');
+    if (!root) return;
+    let session = { unmatched: [], waiting: [] };
+    try { session = JSON.parse(root.dataset.session || '{}'); } catch (e) { /* empty page */ }
+    const pairList = document.getElementById('sm-pairs');
+    const freeList = document.getElementById('sm-free');
+    const packList = document.getElementById('sm-packs');
+    const search = document.getElementById('sm-search');
+    const saveBtn = document.getElementById('sm-save');
+    const sureBtn = document.getElementById('sm-sure');
+    const overlay = document.getElementById('loading-overlay');
+    const status = document.getElementById('sm-status');
+    const hintbar = document.getElementById('sm-hintbar');
+    const hintText = document.getElementById('sm-hint-text');
+    const zoom = document.getElementById('sm-zoom');
+    const motion = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Full-page overlay while saving / stitching again: one click only, and nothing to change under it
+    const busy = (title, sub) => {
+        document.getElementById('loading-text').textContent = title;
+        if (sub) document.getElementById('loading-sub').textContent = sub;
+        overlay.style.display = 'flex';
+    };
+    const idle = () => { overlay.style.display = 'none'; };
+    const imageUrl = (i, size) => root.dataset.imageUrl.replace(/0\.png$/, `${i}.png`) + (size ? `?size=${size}` : '');
+    const packs = Object.fromEntries((session.waiting || []).map((w) => [w.item_reference, w]));
+    const indexOf = Object.fromEntries(session.unmatched.map((u, i) => [u.key, i]));
+    const byKey = Object.fromEntries(session.unmatched.map((u) => [u.key, u]));
+    const pairs = {};          // courier key -> item reference
+    const suggested = {};      // courier key -> true while the pair is still the suggested one (to check)
+    const fromSuggestion = {}; // courier key -> true when a confirmed pair was its suggestion (Undo puts it back to check)
+    const choice = {};         // courier key -> packing label picked with "Other…" in Still to match
+    let selected = null;       // {side: 'courier' | 'pack', id}
+    let saved = true;
+    let finished = false;      // saved and stitched: the page shows the result until it's opened again
+    let renderTimer = null;
+
+    const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const packName = (w) => `${w.store} · Label ${w.label} of ${w.of}`;
+    const courierOf = (ref) => Object.keys(pairs).find((k) => pairs[k] === ref);
+    const say = (text, bad) => { status.textContent = text; status.classList.toggle('sm-status-bad', !!bad); };
+    const placeKey = (w) => (w.not_in_csv ? 'none' : String(w.consignment));
+    const itemRef = (u) => u.item_ref || ((u.reason || '').match(/Item Ref '([^']*)'/) || [])[1] || '';
+    const why = (u) => u.why || (u.reason || '').replace(/^Item Ref '[^']*' /, '');
+    const scoreOf = (u, ref) => ((u.candidates || []).find((c) => c[0] === ref) || [null, 0])[1];
+    const pct = (x) => `${Math.round((x || 0) * 100)}%`;
+    const label = (u) => `courier label ${(u.snippet || [])[1] || u.file} ${u.page}`;
+
+    function restoreSuggestions() {
+        session.unmatched.forEach((u) => {
+            if (u.suggestion && packs[u.suggestion] && !pairs[u.key] && !courierOf(u.suggestion)) { pairs[u.key] = u.suggestion; suggested[u.key] = true; }
+        });
+    }
+    const sure = (u) => u.suggestion && packs[u.suggestion] && (u.score || 0) >= 0.995;
+    const sureLeft = () => session.unmatched.filter((u) => sure(u) && !(pairs[u.key] === u.suggestion && !suggested[u.key])
+                                                       && (!courierOf(u.suggestion) || courierOf(u.suggestion) === u.key));
+    const rowOf = (list, key) => list.querySelector(`[data-key="${CSS.escape(key)}"].sm-pair`);
+    const visibleRows = (list) => [...list.querySelectorAll('.sm-pair')].filter((r) => !r.hidden && !r.closest('[hidden]'));
+
+    // ---------- keeping the next ✓ under the pointer ----------
+    // anchor: where the clicked ✓ was on screen. The page scrolls by the distance from there to the next ✓.
+    // smooth: a scroll the eye follows (✓ in place); instant: making up for rows that moved (a pair made in Still
+    // to match goes up into Pairs, so everything under it shifts).
+    function bringUnder(next, anchor, smooth) {
+        if (!next) return;
+        const tick = next.querySelector('.sm-tick');
+        if (anchor != null && tick) {
+            const delta = tick.getBoundingClientRect().top - anchor;
+            if (Math.abs(delta) > 1) window.scrollBy({ top: delta, behavior: smooth && motion ? 'smooth' : 'instant' });
+        }
+        next.classList.remove('sm-next'); void next.offsetWidth; next.classList.add('sm-next');
+        if (tick) tick.focus({ preventScroll: true });   // Enter again confirms the next one
+    }
+    const nextAfter = (rows, row, wanted) => {
+        const at = rows.indexOf(row);
+        return rows.slice(at + 1).find(wanted) || rows.slice(0, Math.max(0, at)).find(wanted) || null;
+    };
+    const toCheckRow = (r) => r.classList.contains('sm-pair-suggested');
+    // Re-draws group headings and counts a moment after a ✓, once the boxes have closed; the page looks the same
+    const renderSoon = () => { clearTimeout(renderTimer); renderTimer = setTimeout(() => render(), 650); };
+
+    // ---------- pairing ----------
+    // ✓ on a pair to check: its two boxes close together into one green box, right where it is
+    function confirmRow(key, tick) {
+        if (!suggested[key]) return;
+        const row = rowOf(pairList, key);
+        const anchor = tick ? tick.getBoundingClientRect().top : null;
+        const next = row ? nextAfter(visibleRows(pairList), row, toCheckRow) : null;
+        delete suggested[key]; fromSuggestion[key] = true; saved = false;
+        if (row) setDone(row, byKey[key]);
+        updateCounts();
+        bringUnder(next, anchor, true);
+        renderSoon();
+    }
+    // ✓ in Still to match, or dragged / clicked together: a matched pair. A packing label takes one courier label.
+    function pair(key, ref, tick) {
+        clearTimeout(renderTimer);
+        const fromFree = tick && tick.closest('#sm-free');
+        const anchor = tick ? tick.getBoundingClientRect().top : null;
+        const list = fromFree ? freeList : pairList;
+        const before = visibleRows(list);
+        const row = tick ? tick.closest('.sm-pair') : null;
+        const nextKey = row ? (nextAfter(before, row, fromFree ? () => true : toCheckRow) || {}).dataset?.key : null;
+        const other = courierOf(ref);
+        const wasToCheck = !!other && !!suggested[other];
+        if (other && other !== key) { delete pairs[other]; delete suggested[other]; delete fromSuggestion[other]; }
+        pairs[key] = ref; delete suggested[key]; delete choice[key];
+        fromSuggestion[key] = byKey[key].suggestion === ref;
+        selected = null; saved = false;
+        render();
+        const made = rowOf(pairList, key);
+        if (made) made.classList.add('sm-arrived');
+        if (nextKey) bringUnder(rowOf(list, nextKey), anchor, !fromFree);
+        else if (wasToCheck) bringUnder(nextAfter(visibleRows(pairList), made, toCheckRow), null, true);
+    }
+    function unpair(key) { clearTimeout(renderTimer); delete pairs[key]; delete suggested[key]; delete fromSuggestion[key]; saved = false; render(); }
+    // ↶ Undo on a matched pair: back to check if it was the suggestion, else both labels back to Still to match
+    function undoPair(key) {
+        clearTimeout(renderTimer);
+        if (fromSuggestion[key] && pairs[key] === byKey[key].suggestion) { suggested[key] = true; delete fromSuggestion[key]; saved = false; render(); }
+        else unpair(key);
+        say('Match undone.');
+    }
+
+    // ---------- cards ----------
+    function courierCard(u) {
+        const i = indexOf[u.key];
+        const card = el('article', 'sm-card sm-courier');
+        card.draggable = true; card.tabIndex = 0; card.dataset.key = u.key;
+        const ref = itemRef(u);
+        card.dataset.search = [u.file, ref, why(u), ...(u.snippet || [])].join(' ').toLowerCase();
+        const img = el('img', 'sm-thumb'); img.src = imageUrl(i); img.loading = 'lazy';
+        img.alt = `Courier label (${u.file}, page ${u.page})`; img.title = `${u.file} · page ${u.page} — click to zoom`;
+        img.addEventListener('click', (e) => { e.stopPropagation(); zoom.querySelector('img').src = imageUrl(i, 'zoom'); zoom.showModal(); });
+        const body = el('div', 'sm-card-body');
+        // The address printed on the label, in bold: what the packing label has to match
+        const addr = el('div', 'sm-snippet');
+        (u.snippet || []).forEach((line) => addr.append(el('div', null, line)));
+        if (!(u.snippet || []).length) addr.append(el('div', 'ab-detail', 'No address text on this label'));
+        body.append(addr);
+        if (ref) body.append(el('div', 'sm-itemref', `Item Ref: ${ref}`));
+        body.append(el('div', 'ab-detail sm-reason', why(u)));
+        card.append(img, body);
+        card.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', u.key); card.classList.add('sm-dragging'); });
+        card.addEventListener('dragend', () => card.classList.remove('sm-dragging'));
+        card.addEventListener('click', () => choose('courier', u.key));
+        card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose('courier', u.key); } });
+        card.classList.toggle('sm-selected', !!selected && selected.side === 'courier' && selected.id === u.key);
+        return card;
+    }
+    function packCard(w) {
+        const card = el('article', 'sm-card sm-pack');
+        card.tabIndex = 0; card.dataset.ref = w.item_reference;
+        card.dataset.search = [w.store, w.receiver, w.contact, w.address, w.packing_spec, w.item_reference, `label ${w.label}`].join(' ').toLowerCase();
+        const body = el('div', 'sm-card-body');
+        const title = el('div', 'sm-card-title', packName(w));
+        title.append(el('span', 'sm-spec', w.packing_spec));
+        body.append(title, el('div', 'sm-receiver', w.receiver + (w.contact ? ` · Attn ${w.contact}` : '')), el('div', 'sm-address', w.address));
+        const tags = el('div', 'sm-tags');
+        if (w.installer) tags.append(el('span', 'pl-courier-tag sm-tag-installer', 'Installer'));
+        if (w.not_in_csv) tags.append(el('span', 'pl-courier-tag sm-tag-missing', 'Not in courier CSV'));
+        if (w.page) tags.append(el('span', 'ab-detail', `packing label page ${w.page}`));
+        body.append(tags);
+        card.append(body);
+        card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('sm-drop'); });
+        card.addEventListener('dragleave', () => card.classList.remove('sm-drop'));
+        card.addEventListener('drop', (e) => { e.preventDefault(); card.classList.remove('sm-drop'); const k = e.dataTransfer.getData('text/plain'); if (k) pair(k, w.item_reference); });
+        card.addEventListener('click', () => choose('pack', w.item_reference));
+        card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose('pack', w.item_reference); } });
+        card.classList.toggle('sm-selected', !!selected && selected.side === 'pack' && selected.id === w.item_reference);
+        return card;
+    }
+    function choose(side, id) {
+        if (selected && selected.side !== side) {
+            pair(side === 'courier' ? id : selected.id, side === 'pack' ? id : selected.id);
+            return;
+        }
+        selected = selected && selected.side === side && selected.id === id ? null : { side, id };
+        render();
+    }
+    // A matched pair's middle: ✓, and ↶ Undo on hover (also used to turn a pair to check into a matched one in place)
+    function setDone(row, u) {
+        const w = packs[pairs[u.key]];
+        row.classList.remove('sm-pair-suggested'); row.classList.add('sm-pair-done');
+        const mid = row.querySelector('.sm-pair-mid');
+        mid.replaceChildren(el('span', 'sm-done-tick', '✓'));
+        const b = el('button', 'sm-undo', '↶ Undo'); b.type = 'button'; b.title = 'Undo this match';
+        b.setAttribute('aria-label', `Undo the match of ${label(u)} with ${packName(w)}`);
+        b.addEventListener('click', () => undoPair(u.key));
+        row.append(b);
+    }
+    function pairRow(u, toCheck) {
+        const w = packs[pairs[u.key]];
+        const row = el('div', 'sm-pair sm-pair-suggested');
+        row.dataset.key = u.key;
+        const mid = el('div', 'sm-pair-mid');
+        mid.append(el('span', 'sm-suggested-tag', `suggested${u.score ? ' ' + pct(u.score) : ''}`));
+        const tick = el('button', 'sm-tick', '✓'); tick.type = 'button'; tick.title = 'Right pair: match them';
+        tick.setAttribute('aria-label', `Match ${label(u)} with ${packName(w)}`);
+        tick.addEventListener('click', () => confirmRow(u.key, tick));
+        const x = el('button', 'sm-x', '✕'); x.type = 'button'; x.title = 'Wrong pair: split it';
+        x.setAttribute('aria-label', `Split ${label(u)} from ${packName(w)}`);
+        x.addEventListener('click', () => unpair(u.key));
+        mid.append(tick, x);
+        row.append(courierCard(u), mid, packCard(w));
+        if (!toCheck) setDone(row, u);
+        return row;
+    }
+    // Still to match: a courier label beside its closest free packing label, ✓ to match them, "Other…" to pick another
+    function freeRow(u, ref, free) {
+        const row = el('div', `sm-pair sm-pair-free${ref ? '' : ' sm-pair-none'}`);
+        row.dataset.key = u.key;
+        const mid = el('div', 'sm-pair-mid');
+        const pick = el('select', 'sm-pick');
+        pick.setAttribute('aria-label', `Packing label for ${label(u)}`);
+        pick.append(new Option(ref ? 'Other…' : 'Pick…', ''));
+        const near = (u.candidates || []).filter((c) => free.has(c[0]) && c[0] !== ref);
+        const rest = [...free].filter((r) => r !== ref && !near.some((c) => c[0] === r))
+            .sort((a, b) => (packs[a].page || 0) - (packs[b].page || 0));
+        if (near.length) {
+            const g = el('optgroup'); g.label = 'Closest addresses';
+            near.forEach((c) => g.append(new Option(`${packName(packs[c[0]])} — ${pct(c[1])}`, c[0])));
+            pick.append(g);
+        }
+        if (rest.length) {
+            const g = el('optgroup'); g.label = 'All other packing labels';
+            rest.forEach((r) => g.append(new Option(`${packName(packs[r])} — ${packs[r].receiver}`, r)));
+            pick.append(g);
+        }
+        pick.addEventListener('change', () => { if (pick.value) { choice[u.key] = pick.value; render(); } });
+        if (ref) {
+            const sc = scoreOf(u, ref);
+            mid.append(el('span', 'sm-closest-tag', choice[u.key] === ref ? 'picked' : `closest${sc ? ' ' + pct(sc) : ''}`));
+            const tick = el('button', 'sm-tick', '✓'); tick.type = 'button'; tick.title = 'Match these two';
+            tick.setAttribute('aria-label', `Match ${label(u)} with ${packName(packs[ref])}`);
+            tick.addEventListener('click', () => pair(u.key, ref, tick));
+            mid.append(tick);
+        } else {
+            mid.append(el('span', 'sm-closest-tag', 'no close match'));
+        }
+        mid.append(pick);
+        const right = ref ? packCard(packs[ref]) : el('div', 'sm-card sm-none-box', 'No packing label at a matching address. Pick one, or drag this courier label onto one below.');
+        row.append(courierCard(u), mid, right);
+        return row;
+    }
+
+    // ---------- the page ----------
+    function render() {
+        clearTimeout(renderTimer);
+        const focusKey = document.activeElement && document.activeElement.classList.contains('sm-tick')
+            ? (document.activeElement.closest('.sm-pair') || {}).dataset?.key : null;
+        const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const hit = (text) => words.every((w) => text.includes(w));
+        const rowHit = (row) => [...row.querySelectorAll('.sm-card[data-search]')].some((c) => hit(c.dataset.search));
+        // Pairs, grouped by the packing label's receiver and address, side by side: to check, or matched
+        pairList.replaceChildren();
+        const groups = new Map();
+        session.unmatched.forEach((u) => {
+            if (!packs[pairs[u.key]]) return;
+            const g = placeKey(packs[pairs[u.key]]);
+            if (!groups.has(g)) groups.set(g, []);
+            groups.get(g).push(u);
+        });
+        groups.forEach((list, g) => {
+            const first = packs[pairs[list[0].key]];
+            const waitingHere = (session.waiting || []).filter((w) => placeKey(w) === g).length;
+            const checking = list.filter((u) => suggested[u.key]).length;
+            const box = el('div', 'sm-group sm-pair-group');
+            const head = el('div', 'sm-group-head');
+            head.append(el('strong', null, g === 'none' ? 'Not in the courier CSV' : first.receiver),
+                        el('span', 'ab-detail', `${g === 'none' ? '' : ' ' + first.address + ' · '}${plural(list.length, 'courier label')} ↔ ${plural(waitingHere, 'packing label')}${checking ? ` · ${checking} to check` : ' · ✓ all matched'}`));
+            box.append(head);
+            let shown = 0;
+            list.sort((a, b) => (packs[pairs[a.key]].page || 0) - (packs[pairs[b.key]].page || 0)).forEach((u) => {
+                const row = pairRow(u, !!suggested[u.key]);
+                row.hidden = !rowHit(row);
+                shown += !row.hidden;
+                box.append(row);
+            });
+            box.hidden = !shown;
+            box.classList.toggle('sm-group-done', !checking);
+            pairList.append(box);
+        });
+        if (!groups.size) pairList.append(el('p', 'ps-hint sm-empty', finished ? '✅ Saved and stitched — see the result above. "Match the rest" opens what is still unmatched.'
+                                                                              : 'No pairs yet: match the courier labels below with ✓, or drag one onto its packing label.'));
+        // Still to match: every free courier label with its closest free packing label (a picked one first)
+        freeList.replaceChildren();
+        const free = new Set((session.waiting || []).map((w) => w.item_reference).filter((r) => !courierOf(r)));
+        const freeCouriers = session.unmatched.filter((u) => !pairs[u.key]);
+        const shownWith = {};
+        const claimed = new Set();
+        freeCouriers.forEach((u) => { if (choice[u.key] && free.has(choice[u.key]) && !claimed.has(choice[u.key])) { shownWith[u.key] = choice[u.key]; claimed.add(choice[u.key]); } });
+        freeCouriers.forEach((u) => {
+            if (shownWith[u.key]) return;
+            const c = (u.candidates || []).find((x) => free.has(x[0]) && !claimed.has(x[0]));
+            if (c) { shownWith[u.key] = c[0]; claimed.add(c[0]); }
+        });
+        freeCouriers.forEach((u) => {
+            const row = freeRow(u, shownWith[u.key] || null, free);
+            row.hidden = !rowHit(row);
+            freeList.append(row);
+        });
+        // Packing labels nobody's closest to: still a drop target, or pick them with "Other…"
+        packList.replaceChildren();
+        const waitGroups = new Map();
+        (session.waiting || []).filter((w) => free.has(w.item_reference) && !claimed.has(w.item_reference)).forEach((w) => {
+            const g = placeKey(w);
+            if (!waitGroups.has(g)) waitGroups.set(g, []);
+            waitGroups.get(g).push(w);
+        });
+        waitGroups.forEach((list, g) => {
+            const box = el('div', 'sm-group');
+            const head = el('div', 'sm-group-head');
+            head.append(el('strong', null, g === 'none' ? 'Not in the courier CSV' : list[0].receiver),
+                        el('span', 'ab-detail', g === 'none' ? '' : ` ${list[0].address} · ${list.length} waiting`));
+            box.append(head);
+            let shown = 0;
+            list.forEach((w) => { const card = packCard(w); card.hidden = !hit(card.dataset.search); shown += !card.hidden; box.append(card); });
+            box.hidden = !shown;
+            packList.append(box);
+        });
+        document.getElementById('sm-others').hidden = !waitGroups.size;
+        document.getElementById('sm-right-count').textContent = `(${free.size - claimed.size})`;
+        hintbar.hidden = !words.length;
+        updateCounts();
+        if (focusKey) {
+            const t = pairList.querySelector(`.sm-pair[data-key="${CSS.escape(focusKey)}"] .sm-tick`) || freeList.querySelector(`.sm-pair[data-key="${CSS.escape(focusKey)}"] .sm-tick`);
+            if (t) t.focus({ preventScroll: true });
+        }
+    }
+    // Counts and buttons, without re-drawing the cards
+    function updateCounts() {
+        const toCheck = Object.keys(suggested).length;
+        const n = Object.keys(pairs).length;
+        const restCouriers = session.unmatched.length - n, restPacks = (session.waiting || []).length - n;
+        document.getElementById('sm-paired-count').textContent =
+            `(${n - toCheck} of ${plural(session.unmatched.length, 'courier label')} matched${toCheck ? `, ${toCheck} to check` : ''})`;
+        document.getElementById('sm-left-count').textContent = `(${plural(restCouriers, 'courier label')}, ${plural(restPacks, 'packing label')})`;
+        document.getElementById('sm-rest').hidden = !restCouriers && !restPacks;
+        const shownCouriers = visibleRows(freeList).length;
+        const shownPacks = [...document.querySelectorAll('#sm-rest .sm-pack')].filter((c) => !c.hidden && !c.closest('[hidden]')).length;
+        hintText.textContent = `Shown still to match: ${plural(shownCouriers, 'courier label')} and ${plural(shownPacks, 'packing label')}.`;
+        const matchShown = document.getElementById('sm-match-shown');
+        matchShown.disabled = !shownCouriers || shownCouriers !== shownPacks;
+        matchShown.textContent = shownCouriers === shownPacks ? `Match these ${shownPacks} in order` : 'Counts differ — narrow the search';
+        const sures = sureLeft().length;
+        document.querySelectorAll('.sm-sure-btn').forEach((b) => {
+            b.disabled = !sures || root.dataset.running === '1';
+            b.textContent = `✓ Match all 100% (${sures})`;
+            b.title = sures ? `Match the ${plural(sures, 'pair')} whose courier label address matched the packing label 100%`
+                            : 'No pair to check matched 100% — check the amber ones with ✓ or ✕';
+        });
+        saveBtn.disabled = (!n && !session.unmatched.length) || root.dataset.running === '1';
+        saveBtn.textContent = n ? `Save ${n} match${n === 1 ? '' : 'es'}` : (finished ? 'Saved' : 'Finish without matching');
+    }
+
+    // Search shows the same number of courier and packing labels: pair them in order (courier labels in file order,
+    // packing labels in packing label order)
+    document.getElementById('sm-match-shown').addEventListener('click', () => {
+        const couriers = visibleRows(freeList).map((r) => r.dataset.key);
+        const refs = [...document.querySelectorAll('#sm-rest .sm-pack')].filter((c) => !c.hidden && !c.closest('[hidden]'))
+            .map((c) => c.dataset.ref).sort((a, b) => (packs[a].page || 0) - (packs[b].page || 0));
+        if (!couriers.length || couriers.length !== refs.length) return;
+        couriers.forEach((k, i) => { pairs[k] = refs[i]; delete suggested[k]; delete choice[k]; fromSuggestion[k] = byKey[k].suggestion === refs[i]; });
+        saved = false; render();
+        say(`${plural(refs.length, 'pair')} matched in order: the first courier label shown with the first packing label, and so on.`);
+    });
+    const matchAllSure = () => {
+        const list = sureLeft();
+        if (!list.length) return;
+        list.forEach((u) => { pairs[u.key] = u.suggestion; delete suggested[u.key]; fromSuggestion[u.key] = true; });
+        saved = false; render();
+        say(`${plural(list.length, 'pair')} matched 100%.${Object.keys(suggested).length ? ' The amber ones left need a look.' : ''}`);
+        const first = visibleRows(pairList).find(toCheckRow);
+        if (first) { first.scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'center' }); bringUnder(first, null); }
+    };
+    document.querySelectorAll('.sm-sure-btn').forEach((b) => b.addEventListener('click', matchAllSure));
+    document.getElementById('sm-restore').addEventListener('click', () => { restoreSuggestions(); render(); say('Suggested pairs put back where their labels were free.'); });
+    document.getElementById('sm-clear').addEventListener('click', () => {
+        Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; }); selected = null; saved = true; render();
+        say('Every pair split.');
+    });
+    search.addEventListener('input', () => render());
+    search.addEventListener('keydown', (e) => { if (e.key === 'Escape') { search.value = ''; render(); } });
+    zoom.querySelector('.sm-zoom-close').addEventListener('click', () => zoom.close());
+    zoom.addEventListener('click', (e) => { if (e.target === zoom) zoom.close(); });
+
+    // Courier labels still matching nothing after this save: ask whether to add them 4-up at the end
+    const ask = document.getElementById('sm-ask');
+    const askUser = (left) => new Promise((resolve) => {
+        document.getElementById('sm-ask-text').textContent =
+            `${plural(left, 'courier label')} will still match no packing label. Add ${left === 1 ? 'it' : 'them'} 4-up at the end of the Complete Labels PDF (in cut-and-stack order), or leave ${left === 1 ? 'it' : 'them'} out?`;
+        const done = (answer) => { ask.close(); resolve(answer); };
+        ask.querySelectorAll('[data-answer]').forEach((b) => { b.onclick = () => done(b.dataset.answer); });
+        ask.oncancel = (e) => { e.preventDefault(); done('cancel'); };
+        ask.showModal();
+    });
+    saveBtn.addEventListener('click', async () => {
+        if (root.dataset.running === '1') return;   // one click only
+        const n = Object.keys(pairs).length;
+        const left = session.unmatched.length - n;
+        if (!n && !left) return;
+        let addUnmatched = true;
+        if (left > 0) {
+            const answer = await askUser(left);
+            if (answer === 'cancel') return;
+            addUnmatched = answer === 'add';
+        }
+        if (root.dataset.running === '1') return;
+        root.dataset.running = '1'; render();
+        busy(n ? `Saving ${n} match${n === 1 ? '' : 'es'} and stitching again…` : 'Stitching again…');
+        say(n ? `Saving ${n} match${n === 1 ? '' : 'es'} and stitching again…` : 'Stitching again…');
+        try {
+            const res = await fetch(root.dataset.saveUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ matches: pairs, add_unmatched: addUnmatched, finish: true }) });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Could not save.');
+            saved = true;
+            poll();
+        } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
+    });
+    async function poll() {
+        try {
+            // The server answers when the stitch is done (or after 25 s): one request at a time, not one a second
+            const data = await (await fetch(`${root.dataset.statusUrl}?wait=1`)).json();
+            if (data.state === 'running') { say('Stitching again in the background…'); setTimeout(poll, 100); return; }
+            root.dataset.running = '';
+            idle();
+            if (data.state === 'error') { render(); say(data.error || 'Stitching failed.', true); return; }
+            const link = root.dataset.downloadUrl.replace('__FILE__', encodeURIComponent(data.output));
+            status.replaceChildren(el('span', null, `✅ Saved. ${data.output}: ${data.placed} courier labels placed, ${data.unmatched} still unmatched`
+                + (data.unmatched ? (data.added_unmatched ? ' (added 4-up at the end). ' : ' (left out). ') : '. ')));
+            const a = el('a', 'ab-btn', '⬇ Download'); a.href = link;
+            const again = el('a', 'ab-btn ab-btn-plain', 'Match the rest'); again.href = window.location.href;
+            status.append(a, ' ', again);
+            status.classList.remove('sm-status-bad');
+            // These labels are in the new file now: nothing left on this page until it's opened again
+            Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; });
+            session.unmatched = []; session.waiting = []; finished = true;
+            render();
+            status.scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'center' });
+        } catch (e) { setTimeout(poll, 2500); }
+    }
+    // More courier label PDFs: uploaded, stitched in with the others in the background, then the page reloads
+    document.getElementById('sm-add-files').addEventListener('change', async (e) => {
+        const files = [...e.target.files];
+        if (!files.length) return;
+        if (!saved && Object.keys(pairs).length && !confirm("Matches you haven't saved will be lost. Add the PDFs anyway?")) { e.target.value = ''; return; }
+        const form = new FormData();
+        files.forEach((f) => form.append('labels', f));
+        root.dataset.running = '1'; render();
+        busy(`Adding ${plural(files.length, 'PDF')} and stitching again…`);
+        say(`Adding ${plural(files.length, 'PDF')} and stitching again…`);
+        try {
+            const res = await fetch(root.dataset.addUrl, { method: 'POST', body: form });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Could not add the PDFs.');
+            saved = true;
+            const waitDone = async () => {
+                const st = await (await fetch(`${root.dataset.statusUrl}?wait=1`)).json();
+                if (st.state === 'running') { setTimeout(waitDone, 100); return; }
+                if (st.state === 'error') { root.dataset.running = ''; idle(); render(); say(st.error || 'Stitching failed.', true); return; }
+                window.location.reload();  // the new leftovers
+            };
+            waitDone();
+        } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
+        e.target.value = '';
+    });
+    window.addEventListener('beforeunload', (e) => { if (!saved && Object.keys(pairs).length) { e.preventDefault(); e.returnValue = ''; } });
+    restoreSuggestions();                 // suggested pairs start paired, ready to check
+    saved = !Object.keys(pairs).length;
+    render();
+    if (!session.unmatched.length) say('Every courier label is matched. Nothing to do here.');
+    else if (Object.keys(pairs).length) say(`${plural(Object.keys(pairs).length, 'pair')} suggested from the addresses on the courier labels — ✓ each one (or Match all 100%), then Save.`);
+});
+
+// =========================================
+// 17. STITCH LABELS FORM: one click only
+// =========================================
+// The first click disables the button and shows the loading overlay (the global submit handler, section 8);
+// a second click can't send the PDFs again. Nothing chosen: say so instead of submitting.
+document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('st-form');
+    if (!form) return;
+    const button = document.getElementById('st-submit');
+    const error = document.getElementById('st-form-error');
+    form.addEventListener('submit', (e) => {
+        const files = form.querySelector('.dropzone-input');
+        const ticked = form.querySelectorAll('input[name="existing"]:checked').length;
+        if (form.dataset.sent === '1' || (!(files && files.files.length) && !ticked)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();  // no overlay for a form that isn't sent
+            if (form.dataset.sent !== '1') error.hidden = false;
+            return;
+        }
+        error.hidden = true;
+        form.dataset.sent = '1';
+        button.disabled = true;
+        button.textContent = '🧵 Stitching…';
+    }, true);  // capture: runs before the overlay handler on <body>
+    // Coming back with the browser's Back button: ready to use again
+    window.addEventListener('pageshow', () => {
+        form.dataset.sent = '';
+        button.disabled = false;
+        button.textContent = '🧵 Stitch Labels';
+        const overlay = document.getElementById('loading-overlay');
+        if (overlay) overlay.style.display = '';
     });
 });

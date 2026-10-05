@@ -89,7 +89,7 @@ def _clean(fields):
     out = {}
     for k in TEXT_FIELDS:
         v = " ".join(str(fields.get(k) or '').split())[:MAX_LENGTH]
-        out[k] = v.upper() if k in ('state', 'country') else v
+        out[k] = v.upper() if k in ('suburb', 'state', 'country') else v  # suburbs always in capitals
     out['country'] = out['country'] or 'AU'
     out['postcode'] = normalize_postcode(out['postcode'], out['country'])
     out['authority_to_leave'] = 1 if fields.get('authority_to_leave') in (True, 1, '1', 'true', 'on', 'Y', 'y') else 0
@@ -138,6 +138,9 @@ class AddressBook:
         self._add_contact_key()
         with self._connect() as db:
             self._pad_short_postcodes(db)
+            # Suburbs are kept in capitals; entries saved before that are upper-cased (matching ignores case,
+            # so keys and learned spellings are unchanged)
+            db.execute("UPDATE addresses SET suburb = UPPER(suburb) WHERE suburb != UPPER(suburb)")
 
     # One connection per thread: Flask serves requests on several threads, and WAL mode lets
     # searches run while a Generate is writing.
@@ -342,6 +345,11 @@ class AddressBook:
         receiver = address.get('receiver')
         if receiver:
             for e in self.find_by_receiver(receiver) + self.search(receiver, 10)[0]:
+                found.setdefault(e['id'], e)
+        # The street as typed so far ('27 Siri'), in case neither postcode nor name lead to it
+        street = " ".join(str(address.get(k) or '') for k in ('line1', 'suburb')).strip()
+        if len(street) >= 3:
+            for e in self.search(street, 10)[0]:
                 found.setdefault(e['id'], e)
         return list(found.values())
 

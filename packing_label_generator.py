@@ -775,11 +775,103 @@ def assign_label_numbers(pack_groups):
         g['label_no'], g['label_total'] = seen[key], totals[key]
 
 
-def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None):
+REPORT_COLOURS = {'bad': (0.75, 0.15, 0.13), 'warn': (0.85, 0.55, 0.0), 'info': (0.16, 0.44, 0.64)}
+
+
+def _latin(text):
+    """The built-in PDF fonts only have Latin-1: swap the few other characters the app writes."""
+    swaps = {'—': '-', '–': '-', '→': '->', '✓': 'OK', '✏️': '', '’': "'", '‘': "'", '“': '"', '”': '"', '…': '...', '×': 'x'}
+    for a, b in swaps.items():
+        text = str(text).replace(a, b)
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+
+def draw_report_pages(doc, report, at=0):
+    """Inserts the job report in front of the labels (A4 landscape), as many pages as it needs. Returns the count.
+
+    report: {'title': 'Packing Labels Only', 'job': 'J477161', 'project': 'Lux Test 30', 'when': '05/10/2026 20:25',
+             'facts': [(label, value) or (label, value, 'bad'|'warn')...],
+             'sections': [{'title', 'level': 'bad'|'warn'|'info', 'items': [text...]}]}
+    Compact: the job number in a white-on-black panel with the project beside it, the facts as one row of chips
+    (red / amber when they need a look), then each finding as a coloured heading with its items run together."""
+    W, H = fitz.paper_size("a4-l")
+    M = 30
+    pages = []
+
+    def new_page():
+        page = doc.new_page(pno=at + len(pages), width=W, height=H)
+        pages.append(page)
+        page.insert_text((M, M + 10), _latin(f"{report['title'].upper()}  ·  REPORT"), fontname="hebo", fontsize=9,
+                         color=(0.35, 0.35, 0.35))
+        page.insert_text((W - M - 40, M + 10), _latin(f"Page {len(pages)}"), fontname="helv", fontsize=8, color=(0.5, 0.5, 0.5))
+        return page, M + 20
+
+    page, y = new_page()
+    # Job number: the thing to check first. The project name beside it needs no caption.
+    job = _latin(report.get('job') or '(no job number)')
+    size = 30
+    job_w = fitz.get_text_length(job, fontname="hebo", fontsize=size) + 30
+    panel = fitz.Rect(M, y, M + job_w, y + 48)
+    _round_rect(page, panel, 8, fill=(0, 0, 0))
+    page.insert_text((M + 8, y + 12), "JOB NUMBER", fontname="hebo", fontsize=6.5, color=(1, 1, 1))
+    page.insert_text((M + 15, y + 40), job, fontname="hebo", fontsize=size, color=(1, 1, 1))
+    x = panel.x1 + 16
+    name = (_wrap(_latin(report.get('project') or ''), "hebo", 20, W - M - x) or [''])[0]
+    page.insert_text((x, y + 24), name, fontname="hebo", fontsize=20)
+    page.insert_text((x, y + 42), _latin(report.get('when', '')), fontname="helv", fontsize=9, color=(0.35, 0.35, 0.35))
+    y = panel.y1 + 10
+
+    # Key facts as chips; the ones that need a look are coloured
+    cx = M
+    for fact in report.get('facts', []):
+        label, value = fact[0], fact[1]
+        colour = REPORT_COLOURS.get(fact[2]) if len(fact) > 2 and fact[2] else None
+        text = _latin(f"{label}: {value}")
+        w = fitz.get_text_length(text, fontname="hebo", fontsize=8.5) + 14
+        if cx + w > W - M:
+            cx, y = M, y + 20
+        _round_rect(page, fitz.Rect(cx, y, cx + w, y + 16), 8, color=colour or (0, 0, 0), width=1.2 if colour else 0.8,
+                    fill=colour)
+        page.insert_text((cx + 7, y + 11.5), text, fontname="hebo", fontsize=8.5, color=(1, 1, 1) if colour else (0, 0, 0))
+        cx += w + 6
+    y += 28
+
+    sections = [s for s in report.get('sections', []) if s.get('items')]
+    if not sections:
+        page.insert_text((M, y + 12), "Nothing needs a look: every label, address and courier detail checked out.",
+                         fontname="hebo", fontsize=11, color=(0.12, 0.52, 0.29))
+    for section in sections:
+        colour = REPORT_COLOURS.get(section.get('level'), REPORT_COLOURS['info'])
+        # The items run on as one paragraph, separated by dots, instead of a line each
+        body = _wrap(_latin("   ·   ".join(section['items'])), "helv", 8.5, W - 2 * M - 12)
+        lines = [(True, _latin(f"{section['title']} ({len(section['items'])})"))] + [(False, t) for t in body]
+        top = y
+        for bold, text in lines:
+            if y + 12 > H - M:
+                page.draw_rect(fitz.Rect(M, top, M + 3, y), color=None, fill=colour)
+                page, y = new_page()
+                top = y
+            if bold:
+                page.insert_text((M + 9, y + 9.5), text, fontname="hebo", fontsize=9.5, color=colour)
+                y += 13
+            else:
+                page.insert_text((M + 9, y + 9), text, fontname="helv", fontsize=8.5)
+                y += 11
+        page.draw_rect(fitz.Rect(M, top, M + 3, y), color=None, fill=colour)
+        y += 7
+    return len(pages)
+
+
+def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
+                            report=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
 
-    addresses: {pack_key: address text} as finalised in the consignment preview (address book, edits).
-    A pack without one (no usable address for the courier) shows its Excel address."""
+    addresses: {pack_key: {'address', 'receiver', 'contact', 'sent'}} as finalised in the consignment preview
+    (address book, edits); a plain address string also works. A pack going to an installer gets a red
+    "Installer: <receiver> · Attn <contact>" line; any other pack whose
+    receiver isn't the store (or has an Attn) gets "Deliver to: …". A pack left out of the courier CSV
+    (sent=False) says so in the courier label region. A pack missing from addresses shows its Excel address.
+    report: the job report (draw_report_pages) put in front as page 1; the page numbers returned count it."""
     addresses = addresses or {}
     doc = fitz.open()
     MM2PT = 2.83465
@@ -814,6 +906,10 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         store = group_data['store_name']
         spec = group_data.get('pack_spec_name', '')
         label_text = f"LABEL {group_data['label_no']} OF {group_data['label_total']}"
+        info = addresses.get(pack_key) or {}
+        if isinstance(info, str):
+            info = {'address': info}
+        installer = bool(group_data.get('install'))
         first_page = len(doc)
 
         total_pages = 1 if total_items <= FIRST_PAGE_CELLS else 1 + math.ceil((total_items - FIRST_PAGE_CELLS) / NEXT_PAGE_CELLS)
@@ -827,7 +923,13 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
             if page_num == 1:
                 zone_a_rect = fitz.Rect(MARGIN, MARGIN, MARGIN + ZONE_A_W, MARGIN + ZONE_A_H)
                 page.draw_rect(zone_a_rect, color=(0.8, 0.8, 0.8), width=0.5, dashes="[3] 0")
-                page.insert_textbox(zone_a_rect, "Courier Label Region\n(107mm x 150mm)", fontsize=10, color=(0.6, 0.6, 0.6), align=1)
+                if info.get('sent', True):
+                    page.insert_textbox(zone_a_rect, "Courier Label Region\n(107mm x 150mm)", fontsize=10, color=(0.6, 0.6, 0.6), align=1)
+                else:
+                    # Left out of the courier CSV: no courier label will come for this box
+                    note = fitz.Rect(zone_a_rect.x0 + 10, zone_a_rect.y0 + zone_a_rect.height / 2 - 30, zone_a_rect.x1 - 10, zone_a_rect.y1)
+                    page.insert_textbox(note, "NOT IN COURIER CSV\nAddress incomplete: no courier label for this box",
+                                        fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
 
                 zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
                 y = _spec_panel(page, zone_b, spec) + 8
@@ -837,7 +939,17 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         page.insert_text((zone_b.x0, y + 12), line, fontname="hebo", fontsize=13)
                         y += 13 * LINE
 
-                address = addresses.get(pack_key)
+                # Who it's really going to, when that isn't the store itself (installers, Attn names)
+                receiver, contact = _clean(info.get('receiver')), _clean(info.get('contact'))
+                if installer or (receiver and _norm(receiver) != _norm(store)) or contact:
+                    to = ("Installer: " if installer else "Deliver to: ") + (receiver or store or '')
+                    to += f" · Attn {contact}" if contact else ''
+                    for line in _wrap(to, "hebo", 9.5, zone_b.width)[:2]:
+                        page.insert_text((zone_b.x0, y + 9.5), line, fontname="hebo", fontsize=9.5,
+                                         color=(0.75, 0.1, 0.1) if installer else (0, 0, 0))
+                        y += 9.5 * LINE
+
+                address = info.get('address')
                 if not address:
                     addr_parts = [_clean(group_data.get(k)) for k in ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')]
                     address = ", ".join(p for p in addr_parts if p)
@@ -880,10 +992,14 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
             if total_items == 0: break
         page_map[pack_key] = list(range(first_page, len(doc)))
 
+    report_pages = draw_report_pages(doc, report, at=0) if report else 0
+    if report_pages:
+        page_map = {k: [p + report_pages for p in v] for k, v in page_map.items()}
     doc.save(output_pdf_path)
     doc.close()
     return {
         'pages': page_map,
+        'report_pages': report_pages,
         'page_size_mm': [round(A4_W / MM2PT, 1), round(A4_H / MM2PT, 1)],
         'courier_region_mm': {'x': round(MARGIN / MM2PT, 1), 'y': round(MARGIN / MM2PT, 1),
                               'width': round(ZONE_A_W / MM2PT, 1), 'height': round(ZONE_A_H / MM2PT, 1)},

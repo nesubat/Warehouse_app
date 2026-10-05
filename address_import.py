@@ -19,7 +19,7 @@ import json
 import os
 
 from packing_label_generator import _norm, normalize_postcode
-from address_match import best_match, best_by_address, address_score
+from address_match import best_match, best_by_address, address_score, suggestions
 
 # Only the columns the address book needs are read; everything else in the file is ignored.
 # Each field is recognised by keywords in its header (ignoring capitals and punctuation), so other
@@ -191,6 +191,8 @@ def load_label_maps(paths):
                 dest = destinations.get(label.get('consignment'))
                 if dest:
                     by_reference.setdefault(label['item_reference'], []).append((reference, dest))
+                    if label.get('open360_item_reference'):  # what the portal shows after an Open360 upload
+                        by_reference.setdefault(label['open360_item_reference'], []).append((reference, dest))
     return by_reference
 
 
@@ -205,6 +207,8 @@ def _row_address(row, columns):
         address['authority_to_leave'] = (get('authority_to_leave') or '').lower() in YES
     if 'postcode' in address:
         address['postcode'] = normalize_postcode(address['postcode'], address.get('country'))
+    if 'suburb' in address:
+        address['suburb'] = address['suburb'].upper()  # suburbs always in capitals
     return address
 
 
@@ -315,18 +319,69 @@ def build_review(data, filename, label_map_paths, book):
         p['variant_diff'] = [f for f in ADDRESS_FIELDS + ('authority_to_leave',)
                              if len({str(v['new'].get(f, '')) for v in p['variants']}) > 1]
 
+    # Saved addresses a row could be merged into instead: always offered for rows not in the book, and for
+    # close (not exact) matches in case the match is wrong
+    for p in proposals.values():
+        p['candidates'] = []
+        if p['status'] == 'new' or (p['status'] in ('update', 'conflict') and p['likely']):
+            skip = {p['entry']['id']} if p['entry'] else set()
+            skip |= {m['id'] for m in p['merges']}
+            found = suggestions(p['new'], book.candidates(p['new'], nearby), limit=6)
+            p['candidates'] = [{**c, 'differs': _changes(c, p['new'])} for c in found if c['id'] not in skip][:4]
+
     order = {'conflict': 0, 'update': 1, 'new': 2, 'same': 3}
-    return sorted(proposals.values(), key=lambda p: (order[p['status']], p['rows'][0])), columns
+    ranked = sorted(proposals.values(), key=lambda p: (order[p['status']], p['rows'][0]))
+    for i, p in enumerate(ranked):
+        p['idx'] = i
+    return ranked, columns
 
 
-def apply_review(proposals, chosen_keys, book):
-    """Writes the ticked proposals, and marks every address the portal confirmed unchanged as verified
-    (those need no tick: the portal already agrees with the address book).
+def _verify_into(book, entry, new):
+    """The courier portal's address goes onto a saved entry: only its address details change (never its receiver
+    or Attn), older copies of that place for the same receiver + Attn are folded into it, and other receivers /
+    Attn names saved at the old address get the corrected address too. Returns how many copies were folded in."""
+    fields = {f: new[f] for f in UPDATE_FIELDS if f in new}
+    place = {f: fields[f] for f in PLACE_FIELDS if f in fields}
+    verified = {**entry, **place}
+    stale = [e for e in book.same_identity(entry) if address_score(verified, e) >= SAME_PLACE]
+    # Who else is saved at the old address, read before anything changes
+    skip = {entry['id']} | {m['id'] for m in stale}
+    others = {e['id'] for old in [entry] + stale for e in book.at_address(old) if e['id'] not in skip}
+    target = book.apply_verified(entry['id'], fields)
+    folded = sum(book.merge_into(target['id'], m['id']) for m in stale)
+    for other_id in others:
+        if place and book.get(other_id):
+            book.apply_verified(other_id, place)
+    return folded
 
-    A ticked update changes only the entry's address details (never its receiver or Attn), folds the
-    older copies of that place for the same receiver + Attn into it, and gives the corrected address to the
-    other receivers / Attn names saved at the old address. Returns (applied, confirmed, added, merged, problems)."""
-    applied = confirmed = added = merged = 0
+
+def _add_new(book, new):
+    created = book.create(new)
+    book.apply_verified(created['id'], {})
+
+
+def default_action(p):
+    """What a row does unless the user picks otherwise on the review screen."""
+    if p['status'] == 'update':
+        return 'update'
+    if p['status'] == 'new':
+        return 'skip' if p.get('ambiguous') else 'new'
+    return 'skip'  # conflicting rows: the user picks which row's address to use
+
+
+def apply_review(proposals, chosen_keys, book, actions=None):
+    """Writes what the review screen asked for, and marks every address the portal confirmed unchanged as
+    verified (those need no choice: the portal already agrees with the address book).
+
+    actions: {row idx: 'update' | 'new' | 'merge:<entry id>' | 'use:<variant>' | 'skip'}, one per actionable row.
+      update        the matched saved address takes the portal's address (_verify_into)
+      new           added as a new verified address
+      merge:<id>    the portal's address goes onto that saved address instead (_verify_into)
+      use:<n>       conflicting rows: use variant n, then update the match (or add it, if there's none)
+      skip          nothing
+    Without actions (older callers) a row whose key is in chosen_keys does its default ('update' / 'new').
+    Returns (applied, confirmed, added, merged, joined, problems): joined = rows merged into a chosen saved address."""
+    applied = confirmed = added = merged = joined = 0
     problems = []
     for p in proposals:
         if p['status'] == 'same' and p['entry']:
@@ -335,27 +390,31 @@ def apply_review(proposals, chosen_keys, book):
             except Exception as e:
                 problems.append(f"CSV row {', '.join(map(str, p['rows']))}: {e}")
             continue
-        if p['key'] not in chosen_keys or p['status'] == 'conflict':
-            continue
+        if actions is not None:
+            action = actions.get(str(p.get('idx')), default_action(p))
+        else:
+            action = ('update' if p['entry'] else 'new') if p['key'] in chosen_keys and p['status'] != 'conflict' else 'skip'
+        new = p['new']
+        if action.startswith('use:'):
+            try:
+                new = p['variants'][int(action[4:])]['new']
+            except (ValueError, IndexError):
+                problems.append(f"CSV row {', '.join(map(str, p['rows']))}: that choice no longer matches the file.")
+                continue
+            action = 'update' if p['entry'] else 'new'
         try:
-            if p['entry']:
-                fields = {f: p['new'][f] for f in UPDATE_FIELDS if f in p['new']}
-                place = {f: fields[f] for f in PLACE_FIELDS if f in fields}
-                stale = [m for m in p.get('merges') or [] if m['id'] != p['entry']['id']]
-                # Who else is saved at the old address, read before anything changes
-                skip = {p['entry']['id']} | {m['id'] for m in stale}
-                others = {e['id'] for old in [p['entry']] + stale for e in book.at_address(old) if e['id'] not in skip}
-                target = book.apply_verified(p['entry']['id'], fields)
+            if action == 'update' and p['entry']:
+                merged += _verify_into(book, p['entry'], new)
                 applied += 1
-                for m in stale:
-                    merged += book.merge_into(target['id'], m['id'])
-                for other_id in others:
-                    if place and book.get(other_id):
-                        book.apply_verified(other_id, place)
-            else:
-                created = book.create(p['new'])
-                book.apply_verified(created['id'], {})
+            elif action.startswith('merge:'):
+                entry = book.get(int(action[6:]))
+                if not entry:
+                    raise ValueError("the saved address chosen to merge into no longer exists")
+                merged += _verify_into(book, entry, new)
+                joined += 1
+            elif action == 'new':
+                _add_new(book, new)
                 added += 1
         except Exception as e:  # one bad row shouldn't stop the rest
             problems.append(f"CSV row {', '.join(map(str, p['rows']))}: {e}")
-    return applied, confirmed, added, merged, problems
+    return applied, confirmed, added, merged, joined, problems

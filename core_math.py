@@ -319,6 +319,43 @@ def close_if_open_elsewhere(file_path):
     return closed
 
 
+def save_if_open_elsewhere(file_path):
+    """If this file is open in Excel with changes not saved yet, saves them first, so what's read next is what the
+    user sees in Excel (Update Previews after editing the upload, without pressing Ctrl+S).
+    Returns 'saved', 'open' (open, nothing unsaved), 'busy' (Excel is in the middle of editing a cell and won't
+    save), 'protected' (open read-only in Protected View) or None (not open in Excel)."""
+    target = os.path.normcase(os.path.normpath(file_path))
+    same = lambda path: os.path.normcase(os.path.normpath(path)) == target
+    found = None
+    seen_apps = set()
+    for window in _excel_windows() or ():
+        try:
+            source = os.path.join(window.SourcePath, window.SourceName)  # only a Protected View window has these
+        except Exception:
+            source = None
+        try:
+            if source is not None:
+                if same(source):
+                    found = found or 'protected'
+                continue
+            excel = window.Application
+            if excel.Hwnd in seen_apps:
+                continue
+            seen_apps.add(excel.Hwnd)
+            books = excel.Workbooks
+            for i in range(books.Count, 0, -1):
+                book = books.Item(i)
+                if not same(book.FullName):
+                    continue
+                if book.Saved:
+                    found = found or 'open'
+                else:
+                    found = 'saved' if _close_with_retry(book.Save, file_path) else 'busy'
+        except Exception as e:
+            print(f"[WARNING] Skipped an Excel window while looking for {os.path.basename(file_path)}: {e}")
+    return found
+
+
 def _excel_windows():
     """COM objects for every Excel window on screen or hidden, across all Excel processes.
 
