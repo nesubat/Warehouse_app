@@ -3,7 +3,7 @@ Feature: Packing labels
 Check what happens when there is 5 different pack groups in distro with somewhat similar address entries. - I want the user to be able to consolidate different pack groups to same address in consignment previews and user now need to only check and verify address once. 
 
 
-check what happens to the packing label if the packing spec has 2 x OB170170170- if nothing set. I want packing label created twice so that while matching courier label it will match perfectly. remember this one will have same code in the item reference. 
+check what happens to the packing label if the packing spec has 2 x OB170170170(there could be spaces between count and x, x and actual packing spec or there can be not. so if there is number before any Alphabetical value that means there is need for two packing labels with the watermark and item count in csv forgot the actual geader name but reflect this count) - if nothing set. I want packing label created twice so that while matching courier label it will match perfectly. remember this one will have same code in the item reference. 
 the packing labels will be generic with daigonal watermark count exact packing Label created for this to warn the packers. 
 
 
