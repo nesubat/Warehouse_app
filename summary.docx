@@ -8,3 +8,9 @@ the packing labels will be generic with daigonal watermark count exact packing L
 
 
 Until now the same label is opened and shut as many times there is save changes if there label unmatched but I want to simplyfy this processs. When stitch button is hit, instead of trying look and stitch one by one, I want you grab text from each courier label pages at once, grab packing label details at once run the check against, if missing anything or seem like it didn't match, then load up manual matching process page straight up by where user will continue to match manually and then when save changes is made, the new mapping data is saved but labels are only stitched once user hits finalise button. right next to button to download, leave a open file button too. and if the user adds up another courier pdf file,close the previously stitched labels and redo the process, but if there is complete match no need for all these details. Land a page straight with the links to download the complete labels. Ultimate goal is to reduce the number of files in project folder and increase the speed of the process. 
+
+
+
+Do these test and apply the changes. do other test for other possible case that could lead to crash or failure of the tool but don't make changes until my approval. 
+
+Can you write the summary of the changes made to achieve the requirements and checks listed on this file, removing everything and filling up with details of the findings of the tests 
