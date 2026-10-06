@@ -1277,8 +1277,11 @@ Written only when **OpenFreight** is chosen above the project name (see 10.12 fo
 | Service Code | the consignment's own pick, or the main Service Code |
 | No Items | the pack's boxes: 2 for `2 x OB170170170`, else 1 |
 | Weight, Cubic, Item Type, L/W/H | from 10.3; Weight and Cubic count every box |
+| Commercial Value … Tariff Code | **only for a delivery outside Australia** (Receiver Country not `AU`): the preview's **Export details** (below), Contents Weight = the row's weight; blank for Australian deliveries |
 | Sender Name … Sender Email | blank: the portal uses the account's sender |
 | Reference (last column) | the label's **Item Reference**, the same as Open360's: `01T1QWXK Store` (serial + the job's code + store, 10.12), so courier labels booked from either file stitch by code |
+
+**Export details** (deliveries outside Australia). Under the Courier CSV buttons, shown only while OpenFreight is chosen **and** the job has consignments outside Australia, with how many (counted again as ✏️ edits change a country, so it appears as soon as an address is made overseas and goes when none are left): Commercial value (Yes 1 / No 0), Export description, Export origin (2-letter country), Contents description, Contents qty, Contents $AUD and Tariff code. They start as the saved defaults (`data/export_details.json`; built in, `EXPORT_DEFAULTS`: Yes, `Signage, poster, banners`, `AU`, `Signage, poster, banners`, 1, 5, `491110` = HS 4911.10, trade advertising material: printed posters, banners and display signs, duty free) and can be changed for the job; **Save as default** keeps them for future jobs (`/api/export-defaults`, POST), **Reset to default** reads them back (GET). **What's in the fields is what's saved and used**, for the job and as defaults: an emptied field stays empty (no Tariff Code, for example), numbers are written as typed. `clean_export()` only tidies them (spaces trimmed, Export Origin in capitals, Commercial value 1 or 0); a field that isn't sent at all is the built-in default. Save as default leaves the values in the fields, so the job generated next uses them too.
 
 The **consignment reference** is pre-filled from the distro's Job Numbers, strictly **J + 6 digits** at the start (`J477161-54` → `J477161`; the most common one when there are several), and is editable. The files are named `<reference> - <project> - OpenFreight.csv` and `<reference> - <project>.labelmap.json`.
 
@@ -1310,6 +1313,10 @@ After a clean preview, "3. Courier Consignments" lists each consignment's receiv
 
 - The keys are **source ids** (the address as read from Excel), not consignment numbers. Numbers change when consignments merge; the source address doesn't, so edits survive any number of preview refreshes.
 - Edits are applied **before** grouping (`_apply_edit`). If an edited address produces the same key as another consignment, the two merge after "Update Previews" — the same thing the courier would do.
+
+**Service Code in the ✏️ form.** The edit form also has the consignment's Service Code list ("Same as main" or a code), the same as the one in its row: filled from the row when the form opens, and copied back to the row (and so to the edits) on Save.
+
+**Country in the ✏️ form.** The edit form has a **Country** box (AU, NZ or another country; `EDITABLE_FIELDS` includes `country`). A country typed there decides (`_apply_edit()`: `New Zealand` → `NZ`), which is what makes an address overseas when it has no NZ region code in its State; left empty, the country follows the State as before. Address-book fills and merges carry the country too, the address column shows it when it isn't AU (`…, QUEENSTOWN, 9300, NZ`), and each row's `data-country` keeps the Export details panel's count of consignments outside Australia up to date as addresses are edited.
 
 ### 10.7 Service code order
 

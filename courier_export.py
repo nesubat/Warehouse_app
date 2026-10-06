@@ -56,6 +56,69 @@ CSV_HEADER = [
 
 DEFAULT_FIXED = {'who_pays': 'S', 'charge_account': '', 'service_code': ''}
 
+# OpenFreight CSV, a delivery outside Australia: what the goods are for customs. Edited per job in the preview, with
+# defaults saved in data/export_details.json; these are the built-in ones. The tariff code is HS 4911.10, "trade
+# advertising material, commercial catalogues and the like" (printed posters, banners and display signs).
+# Contents Weight is always the row's weight.
+EXPORT_DEFAULTS = {
+    'commercial_value': 1, 'export_desc': 'Signage, poster, banners', 'export_origin': 'AU',
+    'contents_desc': 'Signage, poster, banners', 'contents_qty': 1, 'contents_aud': 5, 'tariff_code': '491110',
+}
+EXPORT_COLUMNS = {  # field -> OpenFreight column
+    'commercial_value': 'Commercial Value (0/1)', 'export_desc': 'Export Desc', 'export_origin': 'Export Origin',
+    'contents_desc': 'Contents Desc', 'contents_qty': 'Contents Qty', 'contents_aud': 'Contents $AUD',
+    'tariff_code': 'Tariff Code',
+}
+
+
+def clean_export(values):
+    """The export details as the CSV takes them: exactly what's in the fields (an emptied field stays empty, numbers as
+    typed), only tidied: spaces trimmed, Export Origin in capitals, Commercial Value 1 or 0. A field that isn't given
+    at all is the built-in default. Returns (values, problems); problems lists numbers that aren't numbers."""
+    values, out, problems = values or {}, {}, []
+    given = lambda key: str(values[key]).strip() if key in values and values[key] is not None else None
+    cv = given('commercial_value')
+    out['commercial_value'] = EXPORT_DEFAULTS['commercial_value'] if cv is None else (1 if cv.lower() in ('1', 'yes', 'true') else 0)
+    for key in ('export_desc', 'contents_desc', 'tariff_code'):
+        v = given(key)
+        out[key] = EXPORT_DEFAULTS[key] if v is None else " ".join(v.split())[:120]
+    v = given('export_origin')
+    out['export_origin'] = EXPORT_DEFAULTS['export_origin'] if v is None else v.upper()[:3]
+    for key, kind in (('contents_qty', int), ('contents_aud', float)):
+        v = given(key)
+        if v is None:
+            out[key] = EXPORT_DEFAULTS[key]
+        elif v == '':
+            out[key] = ''
+        else:
+            try:
+                n = kind(float(v)) if kind is int else float(v)
+                out[key] = int(n) if float(n).is_integer() else round(n, 2)
+            except ValueError:
+                out[key] = v  # written as typed
+                problems.append(key)
+    return out, problems
+
+
+def load_export_defaults(path):
+    """The saved export defaults (data/export_details.json), else the built-in ones."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return clean_export({**EXPORT_DEFAULTS, **json.load(f)})[0]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return dict(EXPORT_DEFAULTS)
+
+
+def save_export_defaults(path, values):
+    """Keeps these export details as the defaults for future jobs. Returns (saved values, problems)."""
+    clean, problems = clean_export(values)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(clean, f, indent=2)
+    os.replace(tmp, path)
+    return clean, problems
+
 # Courier service codes offered in the preview.
 SERVICE_CODES = [
     ('BORDERP', 'BORDER EXPRESS PARCEL'),
@@ -397,7 +460,7 @@ def detect_series(pack_groups):
     return found.most_common(1)[0][0] if found else '', sorted(found)
 
 
-EDITABLE_FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode')
+EDITABLE_FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country')
 
 
 def _apply_edit(dest, edit):
@@ -406,7 +469,10 @@ def _apply_edit(dest, edit):
         return dest
     dest = {**dest, **{k: _tidy(edit[k]) for k in EDITABLE_FIELDS if k in edit}}
     dest['state'], dest['suburb'] = dest['state'].upper(), dest['suburb'].upper()  # suburbs always in capitals
-    if 'state' in edit and dest['country'] in ('AU', 'NZ'):
+    if _tidy(edit.get('country')):
+        # Typed in the form ('NZ', 'New Zealand'): it decides, e.g. an address overseas with no state
+        dest['country'] = _country(edit['country'], dest['state'])
+    elif 'state' in edit and dest['country'] in ('AU', 'NZ'):
         dest['country'] = _country('', dest['state'])
     dest['postcode'] = normalize_postcode(dest['postcode'], dest['country'])
     if 'authority_to_leave' in edit:
@@ -571,14 +637,17 @@ SENDER_COLUMNS = {  # CSV column -> sender field: one sender for the whole file,
 }
 
 
-def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None, item_refs=None):
+def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None, item_refs=None, export=None):
     """The OpenFreight courier CSV (CSV_HEADER): one row per packing label. item_refs: {item reference: the Open360
     Item Reference ('01T1QWXK Store')}, used as this file's Reference too, so courier labels booked from either
     file carry the job's code for Stitch Labels. A pack of several boxes ('2 x OB170170170') is No Items 2, with
-    the weight and cubic of both boxes."""
+    the weight and cubic of both boxes. A delivery outside Australia gets the export details (export: the
+    preview's values, clean_export; the built-in EXPORT_DEFAULTS when not given), with Contents Weight = the row's
+    weight."""
     from packing_specs import split_count
     by_number = {c['number']: c for c in consignments}
     item_refs = item_refs or {}
+    export = clean_export(export or EXPORT_DEFAULTS)[0]
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
@@ -600,6 +669,10 @@ def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None
             if size:
                 row[19] = round(boxes * size[0] * size[1] * size[2] / 1_000_000, 3)
                 row[21:24] = [_num(v) for v in size]
+            if (d.get('country') or 'AU').upper() != 'AU':
+                for field, column in EXPORT_COLUMNS.items():
+                    row[CSV_HEADER.index(column)] = export[field]
+                row[CSV_HEADER.index('Contents Weight')] = row[18]
             if sender and sender.get('name'):
                 for column, field in SENDER_COLUMNS.items():
                     row[CSV_HEADER.index(column)] = sender.get(field, '')

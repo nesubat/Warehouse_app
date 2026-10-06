@@ -660,7 +660,7 @@ document.addEventListener('DOMContentLoaded', function () {
     try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
     const save = () => { editsField.value = JSON.stringify(edits); };
 
-    const ADDRESS = ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode'];
+    const ADDRESS = ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country'];
     const rows = [...document.querySelectorAll('.pl-con-row')];
     const mainService = document.getElementById('service_code');
     const applyBtn = document.getElementById('apply-service');
@@ -675,9 +675,12 @@ document.addEventListener('DOMContentLoaded', function () {
         row.querySelector('.pl-show-receiver').textContent = d.receiver;
         row.querySelector('.pl-show-contact').textContent = d.contact ? 'Attn ' + d.contact : '';
         row.querySelector('.pl-show-atl').hidden = !d.authority_to_leave;
+        const country = (d.country || 'AU').toUpperCase();
         row.querySelector('.pl-show-address').textContent =
-            [d.line1, d.line2, d.suburb, d.state, d.postcode].filter(Boolean).join(', ');
+            [d.line1, d.line2, d.suburb, d.state, d.postcode, country !== 'AU' ? country : ''].filter(Boolean).join(', ');
         row.dataset.state = (d.state || '').toUpperCase();
+        row.dataset.country = country;
+        document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
     }
     function fill(editRow, d) {
         editRow.querySelectorAll('[data-field]').forEach((input) => {
@@ -692,6 +695,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         d.state = (d.state || '').toUpperCase();
         d.suburb = (d.suburb || '').toUpperCase();
+        if ('country' in d) d.country = (d.country || '').toUpperCase();
         return d;
     }
 
@@ -706,12 +710,23 @@ document.addEventListener('DOMContentLoaded', function () {
         };
         const close = () => { editRow.hidden = true; };
 
+        // The form's Service Code list mirrors the row's: filled from it when the form opens, copied back on Save
+        const editService = editRow.querySelector('.pl-edit-service');
         row.querySelector('.pl-edit-btn').addEventListener('click', () => {
             editRow.hidden = !editRow.hidden;
-            if (!editRow.hidden) { fill(editRow, current()); editRow.querySelector('input').focus(); }
+            if (!editRow.hidden) {
+                fill(editRow, current());
+                if (editService) editService.value = row.querySelector('.pl-service-input').value;
+                editRow.querySelector('input').focus();
+            }
         });
 
         editRow.querySelector('.pl-edit-save').addEventListener('click', () => {
+            const rowService = row.querySelector('.pl-service-input');
+            if (editService && rowService.value !== editService.value) {
+                rowService.value = editService.value;
+                rowService.dispatchEvent(new Event('change'));  // the row's own handler keeps it in the edits
+            }
             const d = read(editRow);
             const changed = ADDRESS.some((k) => (d[k] || '') !== (original[k] || '')) ||
                             d.authority_to_leave !== !!original.authority_to_leave;
@@ -1933,5 +1948,49 @@ document.addEventListener('DOMContentLoaded', function () {
         };
         box.addEventListener('input', show);
         show();
+    });
+});
+
+// =========================================
+// 21. EXPORT DETAILS (packing labels preview)
+// =========================================
+// For deliveries outside Australia in the OpenFreight CSV: shown under the Courier CSV buttons only while OpenFreight
+// is chosen and the job has consignments outside Australia (counted again when a ✏️ edit changes a country, so
+// it appears as soon as an address is made overseas, and goes when none are left).
+// The values start as the saved defaults and can be changed for this job; "Save as default" keeps them for future
+// jobs (/api/export-defaults) and this job uses them too; "Reset to default" puts the saved ones back.
+document.addEventListener('DOMContentLoaded', function () {
+    const panel = document.getElementById('pl-export');
+    if (!panel) return;
+    const openfreight = document.querySelector('input[name="courier_csv"][value="openfreight"]');
+    const fields = [...panel.querySelectorAll('[data-export]')];
+    const status = document.getElementById('pl-export-status');
+    const count = document.getElementById('pl-export-count');
+    const show = () => {
+        const n = [...document.querySelectorAll('.pl-con-row')].filter((r) => (r.dataset.country || 'AU') !== 'AU').length;
+        panel.hidden = !(openfreight && openfreight.checked && n > 0);
+        if (count) count.textContent = `${n} consignment${n === 1 ? '' : 's'}`;
+    };
+    if (openfreight) openfreight.addEventListener('change', show);
+    document.addEventListener('pl-countries-changed', show);
+    show();
+    const read = () => Object.fromEntries(fields.map((f) => [f.dataset.export, f.value]));
+    const fill = (values) => fields.forEach((f) => { if (values[f.dataset.export] !== undefined) f.value = values[f.dataset.export]; });
+    document.getElementById('pl-export-save').addEventListener('click', async () => {
+        try {
+            const res = await fetch(panel.dataset.defaultsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(read()) });
+            const data = await res.json();
+            fill(data.saved);
+            // The fields keep what was saved, so this job's Generate uses the same values
+            status.textContent = data.problems && data.problems.length
+                ? `Saved as the default, and used for this job (not a number, kept as typed: ${data.problems.join(', ')}).`
+                : '✓ Saved as the default, and used for this job.';
+        } catch (e) { status.textContent = 'Could not save the defaults.'; }
+    });
+    document.getElementById('pl-export-reset').addEventListener('click', async () => {
+        try {
+            fill(await (await fetch(panel.dataset.defaultsUrl)).json());
+            status.textContent = 'Back to the saved defaults.';
+        } catch (e) { status.textContent = 'Could not read the defaults.'; }
     });
 });

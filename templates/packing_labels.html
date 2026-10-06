@@ -417,7 +417,7 @@
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -431,7 +431,7 @@
                                 {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
-                            <td class="pl-show-address">{% if c.address %}{{ c.address }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</td>
+                            <td class="pl-show-address">{% if c.address %}{{ c.address }}{% if d.country and d.country != 'AU' %}, {{ d.country }}{% endif %}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</td>
                             <td>
                                 <select class="pl-service-input" id="service-{{ c.number }}" aria-label="Service code for consignment {{ c.number }}">
                                     <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
@@ -456,12 +456,21 @@
                         <tr class="pl-edit-row" data-id="{{ c.id }}" hidden>
                             <td colspan="5">
                                 <div class="pl-edit-grid">
-                                    {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact Name'), ('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode')] %}
+                                    {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact Name'), ('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode'), ('country', 'Country')] %}
                                     <div class="input-field">
                                         <label for="edit-{{ c.number }}-{{ field }}">{{ label }}</label>
-                                        <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}">
+                                        <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}"{% if field == 'country' %} list="pl-countries" placeholder="AU" title="AU, NZ or another country: decides whether the export details go in the OpenFreight CSV"{% endif %}>
                                     </div>
                                     {% endfor %}
+                                    <div class="input-field">
+                                        <label for="edit-{{ c.number }}-service">Service Code</label>
+                                        <select id="edit-{{ c.number }}-service" class="pl-edit-service">
+                                            <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
+                                            {% for o in courier.service_options %}
+                                            <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
                                     <label class="pl-edit-atl" for="edit-{{ c.number }}-atl">
                                         <input type="checkbox" id="edit-{{ c.number }}-atl" data-field="authority_to_leave"{% if d.authority_to_leave %} checked{% endif %}> Authority to leave
                                     </label>
@@ -494,6 +503,7 @@
                 </div>
                 {% endif %}
 
+                <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
                 <fieldset class="pl-csv-choice" id="pl-csv-choice">
                     <legend>Courier CSV</legend>
                     <div class="pl-csv-options">
@@ -503,6 +513,28 @@
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>OpenFreight CSV</strong><small>the older courier CSV, with Who Pays and Charge Account</small></span></label>
                     </div>
                     <span class="pl-csv-hint issue-detail">Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.</span>
+                    {% if courier and courier.export %}
+                    {% set ex = courier.export %}
+                    <div class="pl-export" id="pl-export" data-defaults-url="{{ url_for('api_export_defaults') }}" hidden>
+                        <p class="pl-export-title"><strong>Export details</strong> — for deliveries outside Australia, in the OpenFreight CSV: <span id="pl-export-count">{{ courier.international }} consignment{{ '' if courier.international == 1 else 's' }}</span> in this job. Contents Weight is each row's weight.</p>
+                        <div class="pl-export-grid">
+                            <label>Commercial value<select name="export_commercial_value" data-export="commercial_value">
+                                <option value="1"{% if ex.commercial_value == 1 %} selected{% endif %}>Yes (1)</option>
+                                <option value="0"{% if ex.commercial_value == 0 %} selected{% endif %}>No (0)</option></select></label>
+                            <label>Export description<input type="text" name="export_export_desc" data-export="export_desc" value="{{ ex.export_desc }}" maxlength="120"></label>
+                            <label>Export origin<input type="text" name="export_export_origin" data-export="export_origin" value="{{ ex.export_origin }}" maxlength="3" title="Country code, e.g. AU"></label>
+                            <label>Contents description<input type="text" name="export_contents_desc" data-export="contents_desc" value="{{ ex.contents_desc }}" maxlength="120"></label>
+                            <label>Contents qty<input type="number" name="export_contents_qty" data-export="contents_qty" value="{{ ex.contents_qty }}" min="1" step="1"></label>
+                            <label>Contents $AUD<input type="number" name="export_contents_aud" data-export="contents_aud" value="{{ ex.contents_aud }}" min="0" step="0.01"></label>
+                            <label>Tariff code<input type="text" name="export_tariff_code" data-export="tariff_code" value="{{ ex.tariff_code }}" maxlength="14" title="HS code, e.g. 491110 (4911.10: printed advertising material)"></label>
+                        </div>
+                        <div class="pl-export-actions">
+                            <button type="button" class="pl-btn-small" id="pl-export-save">Save as default</button>
+                            <button type="button" class="pl-btn-small pl-btn-plain" id="pl-export-reset">Reset to default</button>
+                            <span class="pl-export-status issue-detail" id="pl-export-status" role="status" aria-live="polite"></span>
+                        </div>
+                    </div>
+                    {% endif %}
                 </fieldset>
                 <div class="project-name-group">
                     <label class="project-name-label" for="project_name">Name this Project / Job:</label>

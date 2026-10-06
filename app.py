@@ -30,7 +30,8 @@ import threading
 from collections import Counter
 import secrets
 from courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
-                            write_courier_csv, open360_item_references,
+                            write_courier_csv, open360_item_references, clean_export, load_export_defaults,
+                            save_export_defaults, EXPORT_DEFAULTS, EXPORT_COLUMNS,
                             open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
@@ -57,6 +58,7 @@ logging.getLogger('werkzeug').addFilter(lambda r: not re.search(r'"GET /stitch/[
 
 PROJECTS_FOLDER = os.path.join(BASE_DIR, 'projects')
 SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
+EXPORT_FILE = os.path.join(BASE_DIR, 'data', 'export_details.json')  # OpenFreight export details: saved defaults
 ADDRESS_BOOK = AddressBook(os.path.join(BASE_DIR, 'data', 'address_book.db'))
 SPEC_STORE = SpecStore(os.path.join(BASE_DIR, 'data', 'packing_specs.json'))
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
@@ -1354,7 +1356,7 @@ def _receiver_groups(consignments):
                      'no_address': bool(m.get('no_address')),
                      'service': m.get('service_code') or '', 'service_used': m.get('service_code_used') or '',
                      'sources': sorted({x['source_id'] for x in m['cartons']}),
-                     'fields': {k: m['destination'][k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode')}}
+                     'fields': {k: m['destination'][k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}}
                     for m in members]
             for i, m in enumerate(members):
                 m['group'] = {'id': f"g{members[0]['number']}", 'first': i == 0, 'size': len(members),
@@ -1576,6 +1578,22 @@ def api_addresses():
     return {'rows': rows, 'has_more': has_more}
 
 
+def _export_values(form):
+    """The export details on the page: what's been typed (export_<field>), else the saved defaults."""
+    typed = {k: form.get(f'export_{k}') for k in EXPORT_DEFAULTS if form.get(f'export_{k}') is not None}
+    return clean_export({**load_export_defaults(EXPORT_FILE), **typed})[0]
+
+
+@app.route('/api/export-defaults', methods=['GET', 'POST'])
+def api_export_defaults():
+    """The saved export defaults (GET), or keep these as the defaults (POST {field: value})."""
+    if request.method == 'GET':
+        return load_export_defaults(EXPORT_FILE)
+    saved, problems = save_export_defaults(EXPORT_FILE, request.get_json(silent=True) or {})
+    log_pack.info("Export defaults saved: %s%s", saved, f" (not usable, kept as before: {problems})" if problems else '')
+    return {'saved': saved, 'problems': problems}
+
+
 @app.route('/api/addresses/suggest')
 def api_address_suggest():
     """Closest saved addresses to what's typed in a consignment's ✏️ form so far (any field), best first."""
@@ -1775,6 +1793,9 @@ def create_packing_labels():
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
                 'edits_json': json.dumps({**edits, '__offered__': offered}),
+                # Export details for deliveries outside Australia (OpenFreight): as typed so far, else the defaults
+                'export': _export_values(request.form),
+                'international': sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU'),
                 'service_options': options,
             }
 
@@ -1909,8 +1930,12 @@ def create_packing_labels():
             if 'openfreight' in csv_formats:
                 openfreight_name = f"{base_name} - OpenFreight.csv"
                 with app_log.step(log_pack, f"  OpenFreight CSV {openfreight_name}"):
+                    export, export_problems = clean_export(_export_values(request.form))
                     write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,
-                                      item_refs=ref_of)
+                                      item_refs=ref_of, export=export)
+                    abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
+                    if abroad:
+                        log_pack.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
                 csv_files.append(openfreight_name)
             for x, r in zip(cartons, open360_refs):
                 log_pack.debug("    %s -> %s", x['item_reference'], r)

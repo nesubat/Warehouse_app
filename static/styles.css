@@ -1653,3 +1653,11 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 /* Project name: characters used of the 50 allowed */
 .name-count { display: block; font-size: 11.5px; color: #7f8c8d; text-align: right; margin-top: 3px; }
 .name-count.name-count-full { color: #c0392b; font-weight: 700; }
+
+/* Export details for deliveries outside Australia (OpenFreight) */
+.pl-page .pl-export { margin-top: 10px; border: 1px solid #c9e2f2; background: #f4f9fd; border-radius: 10px; padding: 10px 14px; }
+.pl-page .pl-export-title { font-size: 13px; margin: 0 0 8px; }
+.pl-page .pl-export-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px 12px; }
+.pl-page .pl-export-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: #2c3e50; margin: 0; }
+.pl-page .pl-export-grid input, .pl-page .pl-export-grid select { font-size: 13px; padding: 6px 8px; border: 1px solid #ccd1d1; border-radius: 6px; background: #fff; font-weight: 400; }
+.pl-page .pl-export-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
