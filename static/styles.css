@@ -1661,3 +1661,47 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-export-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: #2c3e50; margin: 0; }
 .pl-page .pl-export-grid input, .pl-page .pl-export-grid select { font-size: 13px; padding: 6px 8px; border: 1px solid #ccd1d1; border-radius: 6px; background: #fff; font-weight: 400; }
 .pl-page .pl-export-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+/* Consignment table: a consignment's items under its address, three to a row, the address larger above them */
+.pl-page .pl-address-cell { width: 62%; }
+.pl-page .pl-show-address { font-size: 16px; line-height: 1.45; font-weight: 500; color: #2c3e50; }
+.pl-page .pl-items-label { margin: 10px 0 5px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #7f8c8d; }
+.pl-page .pl-items-count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 3px; font-size: 11px; text-align: center; color: #fff; background: #95a5a6; border-radius: 9px; }
+.pl-page .pl-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pl-page .pl-items .pl-carton { margin: 0; padding: 7px 9px; background: #fbfcfc; border: 1px solid #e5e8e8; border-radius: 6px; min-width: 0; overflow-wrap: anywhere; }
+.pl-page .pl-carton-ref { color: #c0392b; }
+.pl-page .pl-carton-store { color: #2c3e50; }
+@media (max-width: 1000px) { .pl-page .pl-items { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .pl-page .pl-items { grid-template-columns: 1fr; } }
+
+/* Courier Import: what Generate made */
+.pl-page .pl-success-summary { font-weight: 600; color: #2c3e50; }
+.pl-page .pl-success-left-out { text-align: left; margin: 12px auto; max-width: 720px; }
+.pl-page .pl-success-left-out ul { margin: 6px 0 0; padding-left: 20px; }
+
+/* Home: the features as a grid of square tiles */
+.portal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 230px)); justify-content: center; gap: 24px; }
+.portal-grid .portal-card { aspect-ratio: 1 / 1; max-width: none; padding: 22px 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; }
+.portal-grid .portal-icon { font-size: 44px; margin-bottom: 12px; }
+.portal-grid .portal-title { font-size: 18px; margin-bottom: 8px; }
+.portal-grid .portal-desc { font-size: 13px; line-height: 1.4; }
+.portal-card.import-card { border-top-color: #16a085; }
+.portal-card.labels-card { border-top-color: #8e44ad; }
+@media (max-width: 520px) { .portal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; } .portal-grid .portal-desc { display: none; } }
+.project-kind { display: inline-block; padding: 8px 12px; border-radius: 5px; font-weight: bold; color: #117a65; background: #e8f8f5; border: 1px solid #a3e4d7; }
+.pl-page .pl-items .pl-carton-spec { display: block; }
+
+/* Nav links on Home: Home goes to the very top, Dashboard stops with "Recent Projects" just below the bar */
+#home { scroll-margin-top: 100vh; }
+#dashboard-section { scroll-margin-top: 72px; }
+
+/* Dashboard: each project in the colours of the features it was made with (the same as their tiles on Home).
+   The band is drawn from --band (set per card): one colour, or equal shares when two features were used. */
+.project-card { position: relative; border-left-color: transparent; }
+.project-card::before { content: ''; position: absolute; left: -5px; top: -1px; bottom: -1px; width: 5px; background: var(--band, #3498db); border-radius: 6px 0 0 6px; }
+.project-feature { display: inline-block; margin-left: 8px; padding: 2px 9px; font-size: 12px; font-weight: 600; vertical-align: middle; border-radius: 10px; background: #ecf0f1; color: #2c3e50; }
+.project-feature + .project-feature { margin-left: 4px; }
+.project-feature-sheets { background: #eaf2fb; color: #2471a3; }
+.project-feature-shuffler { background: #fdf2e9; color: #ba4a00; }
+.project-feature-labels { background: #f4ecf7; color: #6c3483; }
+.project-feature-import { background: #e8f8f5; color: #117a65; }

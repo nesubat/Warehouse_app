@@ -67,8 +67,8 @@ def _item_ref_text(text):
 
 
 def _tab_code(text, known):
-    """The code in a '01T1QWXK Store' Item Reference, if it's one of known: the serial with the job's code
-    ('01T1QWXK'), or for a project generated with a code per label, the code alone ('QWXK'). The capitals after the
+    """The code in a '01T1QWXK Store' Item Reference, if it's one of known: the serial with its code
+    ('01T1QWXK'), or the code alone ('QWXK') for older projects. The capitals after the
     serial are tried from the longest down, so a store name the portal ran straight on ('01T1QWXKPROVISION')
     doesn't get in."""
     for m in _CODE_TAB.finditer(text):
@@ -282,7 +282,7 @@ def codes_elsewhere(project_dir):
                     if pk.get('open360_code'):
                         code = pk['open360_code'].upper()
                         found.setdefault(code, name)
-                        job = re.match(r'^\d+T\d+([A-Z]{4,})$', code)  # '01T1QWXK': the job's code is QWXK
+                        job = re.match(r'^\d+T\d+([A-Z]{4,})$', code)  # '01T1QWXK': QWXK (one code per job in older projects)
                         if job:
                             found.setdefault(job.group(1), name)
     return found

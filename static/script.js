@@ -540,10 +540,46 @@ document.addEventListener("DOMContentLoaded", function() {
             input.files = all.files;
         }
 
+        // A picked file is read into memory straight away and that copy is what's sent. The browser otherwise reads
+        // it from disk only when the form goes, and gives up (an error page, ERR_UPLOAD_FILE_CHANGED / ERR_FAILED)
+        // if it changed in between, e.g. it was saved in Excel after picking it. A file that can't be read at all
+        // says so here instead.
+        const copies = new WeakSet();
+        let reading = null;
+        async function takeCopies() {
+            const files = [...input.files];
+            if (!files.length || files.every((f) => copies.has(f))) return;
+            try {
+                const read = await Promise.all(files.map(async (f) => (copies.has(f) ? f
+                    : new File([await f.arrayBuffer()], f.name, { type: f.type, lastModified: f.lastModified }))));
+                read.forEach((f) => copies.add(f));
+                const all = new DataTransfer();
+                read.forEach((f) => all.items.add(f));
+                input.files = all.files;
+                if (input.multiple) chosen = read;
+                pickedFiles.set(keepKey, read);
+            } catch (e) {
+                input.value = '';
+                chosen = [];
+                showFilename();
+                pickedFiles.drop(keepKey);
+                if (filenameEl) filenameEl.textContent = `⚠ Couldn't read ${files.map((f) => f.name).join(', ')}. ` +
+                    'If it’s open in Excel, save it (or close it), then pick it again.';
+            }
+        }
         input.addEventListener('change', () => {
             keepAdding(); showFilename();
-            if (input.files.length) pickedFiles.set(keepKey, [...input.files]); else pickedFiles.drop(keepKey);
+            if (!input.files.length) { pickedFiles.drop(keepKey); return; }
+            reading = takeCopies().finally(() => { reading = null; });
         });
+        // Sent while a copy is still being read: wait for it, then send (with the button that was pressed)
+        if (input.form) input.form.addEventListener('submit', (e) => {
+            if (!reading) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const by = e.submitter;
+            reading.then(() => { if (input.files.length || !input.required) input.form.requestSubmit(by || undefined); });
+        }, true);
         input.addEventListener('dragenter', () => zone.classList.add('dropzone-active'));
         input.addEventListener('dragleave', () => zone.classList.remove('dropzone-active'));
         input.addEventListener('drop', () => zone.classList.remove('dropzone-active'));
@@ -1797,10 +1833,11 @@ document.addEventListener('DOMContentLoaded', function () {
 // "Not used") shows its cell straight away; Update Previews reads the file with it. What's picked is remembered in
 // this browser for the file and tab (localStorage), so it comes back after a refresh or when the same file is
 // scanned again: it's sent with the first preview of the file even before the mapping is on the page.
+// Packing Labels and Courier Import keep theirs apart (data-colmap-key): their fields differ.
 document.addEventListener('DOMContentLoaded', function () {
     const form = document.getElementById('pl-form');
     if (!form) return;
-    const KEY = 'pl_column_mapping';
+    const KEY = form.dataset.colmapKey || 'pl_column_mapping';
     const file = (form.querySelector('input[name="filename"]') || {}).value || '';
     const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } };
     const store = (all) => { try { localStorage.setItem(KEY, JSON.stringify(all)); } catch (e) { /* storage blocked */ } };

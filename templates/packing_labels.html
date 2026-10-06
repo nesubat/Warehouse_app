@@ -1,4 +1,10 @@
 <!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
+{# One page for two features: Packing Labels (mode 'labels': packing labels PDF + courier CSVs) and Courier Import
+   (mode 'courier': only the courier CSV, from an address list with a column per pack, headed 1, 2, 3 …) #}
+{% set courier_mode = mode == 'courier' %}
+{% set page_url = url_for('courier_import') if courier_mode else url_for('create_packing_labels') %}
+{% set feature_name = '🚚 Courier Import' if courier_mode else '📦 Packing Labels' %}
 {% macro issue_table(items, kind) %}
 <table class="issue-table issue-{{ kind }}">
     {% for i in items %}
@@ -69,26 +75,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Generate Packing Labels</title>
+    <title>{{ 'Courier Import' if courier_mode else 'Generate Packing Labels' }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
 
-    <div class="sticky-nav">
-        <a href="/#home">🏠 Home</a>
-        <span class="divider">|</span>
-        <a href="/#dashboard-section">📊 Dashboard</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
-        <span class="divider">|</span>
-        <a href="/packing-labels" class="active">📦 Packing Labels</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
-    </div>
+    {{ nav(feature_name, page_url) }}
 
     <!-- Loading Overlay -->
     <div id="loading-overlay">
@@ -97,13 +89,13 @@
     </div>
 
     <div class="container pl-page">
-        <h1>📦 Generate Packing Labels</h1>
+        <h1>{{ '🚚 Generate Courier Import File' if courier_mode else '📦 Generate Packing Labels' }}</h1>
         
         <div class="pl-top-links">
             <a href="/" class="nav-link">← Home</a>
             {% if tabs or generation_complete %}
             <span class="divider">|</span>
-            <a href="/packing-labels" class="nav-link-reset">↻ Start Over (Clear File)</a>
+            <a href="{{ page_url }}" class="nav-link-reset">↻ Start Over (Clear File)</a>
             {% endif %}
         </div>
 
@@ -118,6 +110,20 @@
         {% if not tabs and not generation_complete %}
         <div class="instructions-box pl-instructions">
             <h4 class="instructions-title">⚠️ Requirements</h4>
+            {% if courier_mode %}
+            <ul class="instructions-list">
+                <li><strong>One row per store / receiver</strong>, with its address. The columns are found by their headers, as in Packing Labels: "Store Name", "Receiver Name", "Attn", "Address 1", "Address 2", "Address 3", "Suburb", "State", "Postcode" and "Country". A whole address in one column works too. Columns that describe the store ("Store Type", "Store Size") aren't its name.</li>
+                <li><strong>Header Row:</strong> Tell the tool which row holds those headers (e.g. 7).</li>
+                <li><strong>Pack columns:</strong> one per pack group, headed <strong>1, 2, 3 …</strong> (or P1, P2 …). Each store's cell holds that pack's Packing Spec, e.g. <em>OB600100100</em>, <em>CS1070580140</em>, <em>Box</em>, or <em>2 x OB600100100</em> for two boxes.</li>
+                <li><strong>x or X</strong> (or a blank cell) under a pack: that store doesn't get that pack, so it isn't counted for it.</li>
+                <li><strong>Not pack columns:</strong> numbered columns that hold only numbers (item quantities), and a number heading several columns at once (a merged cell over a pack's items).</li>
+                <li><strong>Item Reference:</strong> T + the tab + P + the pack's number, then the store, e.g. <strong>T1P2 Corio Village</strong> = pack 2 of the first selected tab for Corio Village; T2P1 … = pack 1 of the second tab.</li>
+                <li><strong>Names:</strong> "Store Name" (or "Store", "Retailer") names the store and goes in the Item Reference; "Receiver Name" (or "Receiver", "Consignee", "Ship To") is who the courier delivers to; "Attn" is the person to attend. They can be the same or different. No Receiver Name: the store receives it. No Store Name: the receiver's name stands in for it.</li>
+                <li><strong>Consignment Reference:</strong> the job (J + 6 digits) found above the header row, e.g. J466307 from J466307-11; type it in if there's none.</li>
+                <li><strong>Output:</strong> only the courier CSV (Open360, OpenFreight or both), in a new project folder with the Excel file. No packing labels.</li>
+                <li><strong>Names only:</strong> a list with store names and no address columns still works: addresses come from the address book, or you pick or type them in the consignment table.</li>
+            </ul>
+            {% else %}
             <ul class="instructions-list">
                 <li><strong>Header Row:</strong> Tell the tool which row holds your headers (e.g. 1 or 2). It finds the columns automatically.</li>
                 <li><strong>Required Columns:</strong> "Packing Spec", "Job Number" and "Install" <strong>must</strong> be present.</li>
@@ -125,12 +131,13 @@
                 <li><strong>Job Number:</strong> Every row needs one.</li>
                 <li><strong>Install:</strong> <strong>Y</strong> for a box going to an installer; <strong>N</strong> or blank for a box going to the store. All rows of one box must agree.</li>
                 <li><strong>Address:</strong> All rows of one box must have the same address (merged cells are fine). A store's own boxes must share one address; installer boxes may differ.</li>
-                <li><strong>Store / Receiver:</strong> The store column can be headed "Store Name", "Retailer", "Receiver Name", "Receiver" or "Consignee". Address columns can be headed with or without "Receiver" / "Store" in front (e.g. "Receiver Address Line 1", "Store Suburb").</li>
+                <li><strong>Store, Receiver and Attn:</strong> "Store Name" (or "Store", "Retailer") names the label and starts the Item Reference; "Receiver Name" (or "Receiver", "Consignee", "Ship To") is who the courier delivers to; "Attn" (or "Attention", "Contact") is the person to attend. They can be the same or different. No Receiver Name column: the receiver is taken from the address cell, else it's the store. No Store Name column: the receiver's name stands in for it. Address columns can be headed with or without "Receiver" / "Store" in front (e.g. "Receiver Address Line 1", "Store Suburb").</li>
                 <li><strong>Whole address in one column:</strong> One "Address" column holding everything also works, e.g. <em>Andrew, 27 Sirius Road, Lane Cove NSW, 2067</em>. The parts can be separated by commas, semicolons, |, line breaks, " - " or " / ", or just spaces. The name at the front becomes the receiver (and the label's store name when there's no store column); a person and a company both given become contact and receiver. Phone numbers are ignored.</li>
                 <li><strong>Receiver name only:</strong> A file with no address columns still works. Each receiver's address is filled in from the address book when it holds one address for that receiver; otherwise the consignment preview lists its saved addresses to pick from, or you type it in. Boxes still without an address are left out of the courier CSV.</li>
                 <li><strong>Thumbnail:</strong> Put each row's image inside its own Thumbnail cell. Several images in one cell, or a merged Thumbnail cell, are all used.</li>
                 <li><strong>Other Columns Supported:</strong> "Store Name" (or "Receiver Name"), "Quantity", "Description", "Width" &amp; "Height" (or "Dimension"), "Address Line 1", "Address Line 2", "Suburb", "State", "Postcode", "Country", "Material" and "Notes".</li>
             </ul>
+            {% endif %}
         </div>
 
         <form method="POST" enctype="multipart/form-data">
@@ -158,7 +165,7 @@
 
         <!-- Single form handles both Preview and Generate. novalidate: Update Previews always goes through;
              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
-        <form method="POST" id="pl-form" novalidate>
+        <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else 'pl_column_mapping' }}">
             <input type="hidden" name="filename" value="{{ filename }}">
             
             {% for tab in tabs %}
@@ -219,6 +226,7 @@
                         <span class="metric-badge">Last Row Parsed: {{ bp.last_row }}</span>
                         <span class="metric-badge">Total Packs: {{ bp.total_packs }}</span>
                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
+                        {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
                     </div>
                     {% if bp.warnings %}
                     <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
@@ -236,6 +244,7 @@
                 <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
             {% else %}
                 
+                {% if not courier_mode %}
                 <!-- 2-Column Seamless Visual Grid Configurator -->
                 <div class="pl-configurator">
                     
@@ -327,11 +336,12 @@
                         <input type="hidden" name="attribute_order" id="attribute_order" value="">
                     </div>
                 </div>
+                {% endif %}
 
                 {% if courier %}
                 <div class="pl-courier">
-                    <h4 class="pl-config-title">3. Courier Consignments</h4>
-                    <p class="pl-config-hint">{{ courier.carton_count }} cartons in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
+                    <h4 class="pl-config-title">{{ 'Courier Consignments' if courier_mode else '3. Courier Consignments' }}</h4>
+                    <p class="pl-config-hint">{{ courier.carton_count }} {{ 'items' if courier_mode else 'cartons' }} in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
                     <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
                     <input type="hidden" id="carton-weights" name="carton_weights" value="{{ courier.weights_json }}">
 
@@ -396,13 +406,13 @@
                         {{ 'It’s' if courier.unverified == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-check">Check address</span>. Open ✏️ to compare with the closest saved addresses, then Save.</p>
                     {% endif %}
                     <table class="pl-courier-table">
-                        <thead><tr><th>#</th><th>Receiver</th><th>Address</th><th>Service Code</th><th>Cartons</th></tr></thead>
+                        <thead><tr><th>#</th><th>Receiver</th><th>Address · Items</th><th>Service Code</th></tr></thead>
                         <tbody>
                         {% for c in courier.consignments %}
                         {% set d = c.destination %}
                         {% if c.group and c.group.first %}
                         <tr class="pl-group-row{% if not c.group.similar %} pl-group-differs{% endif %}" data-group="{{ c.group.id }}">
-                            <td colspan="5">
+                            <td colspan="4">
                                 <div class="pl-group-head">
                                     <span class="pl-group-title">🔀 <strong>{{ c.group.receiver }}</strong>: {{ c.group.size }} consignments at different addresses
                                         <span class="pl-group-hint">{% if c.group.similar %}— they look like one place written differently{% else %}— check: some really differ{% endif %}</span>
@@ -431,17 +441,11 @@
                                 {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
-                            <td class="pl-show-address">{% if c.address %}{{ c.address }}{% if d.country and d.country != 'AU' %}, {{ d.country }}{% endif %}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</td>
-                            <td>
-                                <select class="pl-service-input" id="service-{{ c.number }}" aria-label="Service code for consignment {{ c.number }}">
-                                    <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
-                                    {% for o in courier.service_options %}
-                                    <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
-                                    {% endfor %}
-                                </select>
-                            </td>
-                            <td>{% for x in c.cartons %}
-                                <div class="pl-carton">{{ x.item_reference }} <span class="issue-detail">{{ x.packing_spec }}</span>
+                            <td class="pl-address-cell">
+                                <div class="pl-show-address">{% if c.address %}{{ c.address }}{% if d.country and d.country != 'AU' %}, {{ d.country }}{% endif %}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
+                                <div class="pl-items-label">Items <span class="pl-items-count">{{ c.cartons|length }}</span></div>
+                                <div class="pl-items">{% for x in c.cartons %}
+                                <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
                                     <div class="issue-detail pl-carton-facts">
                                         {% if x.size_cm %}{{ x.size_cm|join(' × ') }} cm{% else %}<span class="pl-no-size">no size</span>{% endif %}
                                         · {{ x.item_type }}
@@ -451,10 +455,19 @@
                                                data-pack="{{ x.pack_key }}" data-default="{{ x.weight_default }}" value="{{ x.weight_kg }}"
                                                aria-label="Weight in kg of {{ x.item_reference }}"> kg
                                     </label>
-                                </div>{% endfor %}</td>
+                                </div>{% endfor %}</div>
+                            </td>
+                            <td>
+                                <select class="pl-service-input" id="service-{{ c.number }}" aria-label="Service code for consignment {{ c.number }}">
+                                    <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
+                                    {% for o in courier.service_options %}
+                                    <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
                         </tr>
                         <tr class="pl-edit-row" data-id="{{ c.id }}" hidden>
-                            <td colspan="5">
+                            <td colspan="4">
                                 <div class="pl-edit-grid">
                                     {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact Name'), ('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode'), ('country', 'Country')] %}
                                     <div class="input-field">
@@ -512,7 +525,7 @@
                         <label class="pl-csv-option"><input type="checkbox" name="courier_csv" value="openfreight">
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>OpenFreight CSV</strong><small>the older courier CSV, with Who Pays and Charge Account</small></span></label>
                     </div>
-                    <span class="pl-csv-hint issue-detail">Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.</span>
+                    <span class="pl-csv-hint issue-detail">{% if courier_mode %}Choose one or both for this job. Both carry the same Item References (T1P1 Store, T1P2 Store …).{% else %}Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.{% endif %}</span>
                     {% if courier and courier.export %}
                     {% set ex = courier.export %}
                     <div class="pl-export" id="pl-export" data-defaults-url="{{ url_for('api_export_defaults') }}" hidden>
@@ -541,7 +554,7 @@
                     <input type="text" id="project_name" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" maxlength="50" data-count required>
                 </div>
                 <p class="pl-generate-error" id="pl-generate-error" role="alert" hidden></p>
-                <button type="submit" name="generate" class="btn-generate pl-submit">Create Project & Generate PDF</button>
+                <button type="submit" name="generate" class="btn-generate pl-submit">{{ 'Create Project & Generate CSV' if courier_mode else 'Create Project & Generate PDF' }}</button>
             {% endif %}
             
             {% endif %}
@@ -551,8 +564,17 @@
         <!-- STEP 4: SUCCESS PAGE -->
         {% if generation_complete %}
         <div class="success-box">
-            <h2 class="success-title">🎉 Labels Successfully Generated!</h2>
+            <h2 class="success-title">{{ '🎉 Courier Import File Generated!' if courier_mode else '🎉 Labels Successfully Generated!' }}</h2>
             <p>Your distribution file was processed and saved to a new project folder.</p>
+            {% if summary %}
+            <p class="pl-success-summary">{{ summary['items'] }} item{{ '' if summary['items'] == 1 else 's' }} in {{ summary.consignments }} consignment{{ '' if summary.consignments == 1 else 's' }}.</p>
+            {% if summary.left_out %}
+            <div class="warning-box pl-success-left-out">
+                <strong>Not in the CSV — no complete address ({{ summary.left_out|length }}):</strong>
+                <ul>{% for x in summary.left_out %}<li>{{ x }}</li>{% endfor %}</ul>
+            </div>
+            {% endif %}
+            {% endif %}
 
             <div class="success-actions actions-grid">
             {% for file in generated_files %}
@@ -564,7 +586,7 @@
             </div>
             
             <div class="success-nav">
-                <a href="/packing-labels" class="nav-bottom-link1">← Process Another File</a>
+                <a href="{{ page_url }}" class="nav-bottom-link1">← Process Another File</a>
                 <span class="divider">|</span>
                 <a href="/#dashboard-section" class="nav-bottom-link2">🏠 View on Dashboard</a>
             </div>

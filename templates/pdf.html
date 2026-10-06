@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -13,22 +14,7 @@
         <div id="loading-text">Shuffling Labels...</div>
         <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;">Please wait, this might take a moment.</p>
     </div>
-    <!-- Consistent Top Navigation Bar -->
-    <div class="sticky-nav">
-        <a href="/" id="nav-home">🏠 Home</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="/#dashboard-section" id="nav-dash">📊 Dashboard</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('matrix') }}">⚙️ Distribution Mapper</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('pdf_engine') }}" class="active">🏷️ Label Shuffler</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
-    </div>
+    {{ nav('🏷️ Label Shuffler', url_for('pdf_engine')) }}
 
     <div class="container">
         <div class="text-center hr-divider" style="border: none; padding-bottom: 0;">

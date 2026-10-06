@@ -171,16 +171,26 @@ def _norm(text):
 
 
 NOT_A_PLACE = ('email', 'e-mail', 'phone', 'mobile', 'contact', 'attn', 'attention', 'fax')
-RECEIVER_WORDS = ('store', 'retailer', 'receiver', 'consignee', 'ship to', 'deliver to', 'delivery name')
+STORE_WORDS = ('store', 'retailer', 'outlet', 'site name')
+RECEIVER_WORDS = ('receiver', 'consignee', 'ship to', 'deliver to', 'delivery name', 'recipient')
+# 'Store Type', 'Store Size', 'Store Code', 'Receiver No' … describe the store or receiver: they aren't its name
+NOT_A_NAME = {'type', 'size', 'code', 'number', 'no', 'num', 'id', 'format', 'group', 'level', 'cluster', 'region',
+              'manager', 'email', 'phone', 'mobile', 'count', 'status', 'category', 'tier', 'class', 'grade', 'date',
+              'channel', 'owner', 'brand', 'area', 'zone', 'hours', 'open', 'opening'}
 
 
 def _header_field(header):
-    """Which column a header is: 'Store Name', 'Retailer', 'Receiver Name' or 'Consignee' are all the store
-    (receiver); 'Address Line 1', 'Receiver Address Line 1' or 'Store Address' the street. Address parts
-    are checked before the store/receiver words, so 'Receiver Suburb' is the suburb, not the receiver."""
+    """Which column a header is. Three names: 'Store Name' / 'Store' / 'Retailer' is the store (it names the label
+    and starts the Item Reference); 'Receiver Name' / 'Receiver' / 'Consignee' / 'Ship To' is who the courier
+    delivers to; 'Attn' / 'Attention' / 'Contact' the person to attend. 'Address Line 1', 'Receiver Address Line 1'
+    or 'Store Address' is the street: address parts are checked before the name words, so 'Receiver Suburb' is the
+    suburb, not the receiver. A name header with a describing word ('Store Type', 'Store Code') isn't a name."""
     h = " ".join(str(header).strip().lower().replace('_', ' ').split())
     words = set(re.findall(r'[a-z]+', h))
     place_ok = not any(w in h for w in NOT_A_PLACE)
+    if words & {'attn', 'atnn', 'attention'} or h in ('contact', 'contact name', 'contact person', 'receiver contact',
+                                                        'receiver contact name', 'attention to'):
+        return 'contact'
     if 'packing spec' in h: return 'packing_spec'
     if 'job' in h: return 'job_no'
     if 'qty' in h or 'quantity' in h: return 'qty'
@@ -198,14 +208,17 @@ def _header_field(header):
     if 'material' in h: return 'material'
     if 'note' in h: return 'notes'
     if 'install' in h: return 'install'
-    if place_ok and any(w in h for w in RECEIVER_WORDS): return 'store_name'
+    describes = bool(words & NOT_A_NAME) and 'name' not in words
+    if place_ok and not describes and any(w in h for w in RECEIVER_WORDS): return 'receiver_name'
+    if place_ok and not describes and any(w in h for w in STORE_WORDS): return 'store_name'
     return None
 
 
 # The columns the preview's Column mapping can set by hand: (field, label, required)
 MAPPABLE_FIELDS = (
     ('packing_spec', 'Packing Spec', True), ('job_no', 'Job Number', True), ('install', 'Install', True),
-    ('store_name', 'Store / Receiver', False), ('qty', 'Quantity', False), ('desc', 'Description', False),
+    ('store_name', 'Store Name', False), ('receiver_name', 'Receiver Name', False), ('contact', 'Attn', False),
+    ('qty', 'Quantity', False), ('desc', 'Description', False),
     ('thumbnail', 'Thumbnail', False), ('dim_combined', 'Dimensions', False), ('dim_w', 'Width', False),
     ('dim_h', 'Height', False), ('address_1', 'Address Line 1', False), ('address_2', 'Address Line 2', False),
     ('suburb', 'Suburb', False), ('state', 'State', False), ('postcode', 'Postcode', False),
@@ -215,21 +228,14 @@ MAPPABLE_FIELDS = (
 
 def detect_columns(headers):
     """{field: column number} from the header row's cells [(column number, text)], by their names (_header_field).
-    A later matching column wins, but a 'Store'/'Retailer' column beats a 'Receiver'-type one."""
+    A later matching column wins."""
     cols = {}
     for col_idx, val in headers:
         if not val:
             continue
         field = _header_field(str(val))
-        if not field:
-            continue
-        is_store = field == 'store_name' and ('store' in str(val).lower() or 'retailer' in str(val).lower())
-        if field == 'store_name' and not is_store and cols.get('_store_is_named'):
-            continue
-        cols[field] = col_idx
-        if is_store:
-            cols['_store_is_named'] = True
-    cols.pop('_store_is_named', None)
+        if field:
+            cols[field] = col_idx
     return cols
 
 
@@ -378,6 +384,10 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
             blank = [r['row'] for r in rows if not r['store_key']]
             errors.append(_issue(_row_ranges(blank), col['store_name'], f"Store name blank in pack {pack}"))
 
+        receivers = _distinct(rows, 'receiver_key')
+        if len(receivers) > 1 and col['receiver_name'] != col['store_name']:
+            errors.append(_issue(span, col['receiver_name'], f"Receiver name differs in pack {pack}", _variants(rows, 'receiver_key', 'receiver')))
+
         if len({r['install'] for r in rows}) > 1:
             flagged = [r['row'] for r in rows if r['install']]
             errors.append(_issue(span, col['install'], f"Install mixed in pack {pack}", f"Y on {_row_ranges(flagged)}"))
@@ -473,7 +483,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
 
     found_headers = {
         'Packing Spec': 'packing_spec' in cols,
-        'Store Name': 'store_name' in cols,
+        'Store Name': 'store_name' in cols or 'receiver_name' in cols,
         'Job Number': 'job_no' in cols,
         'Quantity': 'qty' in cols,
         'Description': 'desc' in cols,
@@ -508,7 +518,9 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
     col_ref = {k: f"{get_column_letter(c)} · {str(ws.cell(row=header_row, column=c).value or '').strip().title()}" for k, c in cols.items()}
     addr_letters = [get_column_letter(cols[k]) for k in address_keys]
     col_ref['address'] = f"{addr_letters[0]}–{addr_letters[-1]} · Address" if len(addr_letters) > 1 else (f"{addr_letters[0]} · Address" if addr_letters else "Address")
-    col_ref.setdefault('store_name', "Store Name")
+    # No Store Name column: the Receiver Name stands in for it (names the label, starts the Item Reference)
+    col_ref.setdefault('store_name', col_ref.get('receiver_name', "Store Name"))
+    col_ref.setdefault('receiver_name', "Receiver Name")
     col_ref.setdefault('install', "Install")
     col_ref.setdefault('thumbnail', "Thumbnail")
     current_row = header_row + 1
@@ -528,7 +540,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
                 return str(val).strip() if val is not None else ""
             return ""
 
-        store_name = get_val('store_name')
+        receiver_name = get_val('receiver_name')
+        store_name = get_val('store_name') or receiver_name  # no store name: the receiver's names the label
         address_parts = {k: get_val(k) for k in address_keys}
         install = is_install_flag(get_val('install'))
 
@@ -542,6 +555,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
             pack_groups[pack_id] = {
                 'pack_spec_name': packing_spec,
                 'store_name': store_name,
+                'receiver_name': receiver_name,  # who the courier delivers to; else from the address, else the store
+                'contact': get_val('contact'),   # the Attn column
                 'install': install,
                 **{k: address_parts.get(k, '') for k in ADDRESS_FIELDS},
                 'excel_rows': [],
@@ -553,6 +568,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
             'row': current_row,
             'store': store_name,
             'store_key': _norm(store_name),
+            'receiver': receiver_name,
+            'receiver_key': _norm(receiver_name),
             'address': ", ".join(v for v in address_parts.values() if v),
             'address_key': _address_key(" ".join(address_parts.values())),
             'install': install,

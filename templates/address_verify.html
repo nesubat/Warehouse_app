@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
 {% set LABELS = {'receiver': 'Receiver', 'contact': 'Contact', 'line1': 'Address Line 1', 'line2': 'Address Line 2', 'suburb': 'Suburb', 'state': 'State', 'postcode': 'Postcode', 'country': 'Country', 'authority_to_leave': 'Authority to leave'} %}
 {% macro address(a, changed=[], show_removed=true) %}{% set parts = [] %}
     {%- for f in ['receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country'] -%}
@@ -110,21 +111,7 @@
 </head>
 <body>
 
-    <div class="sticky-nav">
-        <a href="/#home">🏠 Home</a>
-        <span class="divider">|</span>
-        <a href="/#dashboard-section">📊 Dashboard</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('matrix') }}">⚙ Distribution Mapper</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('pdf_engine') }}">🏷️ Label Shuffler</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('create_packing_labels') }}">📦 Packing Labels</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('address_book_page') }}" class="active">📇 Address Book</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
-    </div>
+    {{ nav(active='book') }}
 
     <div class="container ab-page av-page">
         <h1>📇 Update in Bulk</h1>

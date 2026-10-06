@@ -397,15 +397,18 @@ def resolve_destination(group):
         return None
     from_address = group.get('store_from_address')  # the store name was itself taken from this address
     store = '' if from_address else _tidy(group.get('store_name'))
-    p = parse_address_text("\n".join(t for t in texts if t), names=not store)
+    given = _tidy(group.get('receiver_name'))  # a Receiver Name column
+    p = parse_address_text("\n".join(t for t in texts if t), names=not (store or given))
 
     people = [n for n in ([p['head']] if p['head'] else []) + p['names']]
     company = next((n for n in people if _is_company(n)), '')
     person = next((n for n in people if n != company), '')
     if p['head'] and not company and len(people) > 1:
         company = people[1]
-    receiver = company or person or store
-    contact = ", ".join(x for x in (person if company else '', p['attn']) if x)
+    # Who the courier delivers to: the Receiver Name column, else a name in the address cell, else the store
+    receiver = given or company or person or store
+    others = [n for n in (company, person) if n and _norm(n) != _norm(receiver)]
+    contact = ", ".join(x for x in ((others[-1] if others and (company or given) else ''), attn_text(group.get('contact')) or p['attn']) if x)
 
     line1, line2 = _split_lines(p['street'])
     # As always: what the address cell spells out wins over the Suburb / State / Postcode columns
@@ -419,6 +422,12 @@ def resolve_destination(group):
         'suburb': (_tidy(p['suburb']) or col_suburb).upper(), 'state': state, 'postcode': postcode, 'country': country,
         'authority_to_leave': p['atl'], 'raw': raw,
     }
+
+
+def attn_text(value):
+    """An Attn column's person: 'Attn: Manager on duty' -> 'Manager on duty'."""
+    m = _ATTN.match(str(value or '').strip())
+    return _tidy(m.group(1) if m else value)
 
 
 def one_line(dest):
@@ -486,11 +495,11 @@ def pack_destination(group):
     consignment, so its address can be filled in from the address book or typed in the preview. The id is the
     Excel address, or 'name:' + the receiver when there's no postcode, so it's the same on every refresh."""
     dest = resolve_destination(group)
-    store = _tidy(group.get('store_name'))
+    store = _tidy(group.get('receiver_name')) or _tidy(group.get('store_name'))  # the receiver, else the store
     if dest is None:
         if not store:
             return None
-        dest = {'receiver': store, 'contact': '', 'line1': '', 'line2': '', 'suburb': '', 'state': '', 'postcode': '',
+        dest = {'receiver': store, 'contact': attn_text(group.get('contact')), 'line1': '', 'line2': '', 'suburb': '', 'state': '', 'postcode': '',
                 'country': 'AU', 'authority_to_leave': False, 'raw': ''}
     if dest['postcode']:
         return _address_key(one_line(dest)), dest
@@ -640,7 +649,7 @@ SENDER_COLUMNS = {  # CSV column -> sender field: one sender for the whole file,
 def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None, item_refs=None, export=None):
     """The OpenFreight courier CSV (CSV_HEADER): one row per packing label. item_refs: {item reference: the Open360
     Item Reference ('01T1QWXK Store')}, used as this file's Reference too, so courier labels booked from either
-    file carry the job's code for Stitch Labels. A pack of several boxes ('2 x OB170170170') is No Items 2, with
+    file carry the same codes for Stitch Labels. A pack of several boxes ('2 x OB170170170') is No Items 2, with
     the weight and cubic of both boxes. A delivery outside Australia gets the export details (export: the
     preview's values, clean_export; the built-in EXPORT_DEFAULTS when not given), with Contents Weight = the row's
     weight."""
@@ -727,11 +736,11 @@ def unique_codes(count, length=4):
 def open360_item_references(items, numbering='row'):
     """The Open360 Item Reference of each row and its unique code: '01T1QWXK Provision Clayton'
     = the label's serial in its tab ('01T1': the count in its tab, 'T' + the tab, T1 being the first selected tab;
-    the same serial is printed on the packing label), the job's code, a space, the store. The serial is zero-padded
-    within the tab (01..42, 001..150). The job's code is one random code for the whole Generate, so every label of
-    the job reads the same code: serial + code ('01T1QWXK') is the label's unique code, what Stitch Labels reads back
-    off the courier label to find its packing label (label_stitcher.find_code). A label of another job, or of an
-    earlier Generate of the same job, has another code, so it can't land on a packing label of this one.
+    the same serial is printed on the packing label), the row's own random code, a space, the store. The serial is
+    zero-padded within the tab (01..42, 001..150). Every row gets a different code (01T1QWXK, 02T1HBRM …), and
+    serial + code ('01T1QWXK') is what Stitch Labels reads back off the courier label to find its packing label
+    (label_stitcher.find_code). Codes are new on every Generate, so a label of another job, or of an earlier Generate
+    of the same job, can't land on a packing label of this one.
       numbering='row'       01T1, 02T1 ... 01T2: the count of the label in its tab
       numbering='shipment'  01.1, 01.2 ... 02.1 (the older layout '01.1-QWXK-L-1-Store'): shipment, then its cartons
     Returns [(item reference, code)]."""
@@ -749,14 +758,14 @@ def open360_item_references(items, numbering='row'):
         return [(f"{p}-{code}-L-{x['label_no']}-{x['store']}", code) for p, code, x in zip(prefixes, codes, items)]
     per_tab = Counter(x.get('tab', 1) for x in items)
     seen = Counter()
-    job = unique_codes(1)[0]  # one code for the whole Generate
+    codes = unique_codes(len(items))  # a different code on every row
     out = []
-    for x in items:
+    for x, code in zip(items, codes):
         tab = x.get('tab', 1)
         seen[tab] += 1
         width = max(2, len(str(per_tab[tab])))  # 42 labels in a tab -> 01..42, 150 -> 001..150
         serial = x.get('serial') or f"{seen[tab]:0{width}d}T{tab}"  # the packing label's own serial when given
-        out.append((f"{serial}{job} {x['store']}", f"{serial}{job}"))
+        out.append((f"{serial}{code} {x['store']}", f"{serial}{code}"))
     return out
 
 

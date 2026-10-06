@@ -1,0 +1,18 @@
+{# The bar at the top of every page: Home, Dashboard, Address Book and Packing Specs everywhere; a feature's own
+   link only on that feature's pages. nav('📦 Packing Labels', url_for('create_packing_labels')) on a feature page,
+   nav(active='book') / nav(active='specs') / nav(active='dashboard') elsewhere. #}
+{% macro nav(feature=None, feature_url=None, active=None) %}
+<div class="sticky-nav">
+    <a href="/#home" id="nav-home">🏠 Home</a>
+    <span class="divider">|</span>
+    <a href="/#dashboard-section" id="nav-dash"{% if active == 'dashboard' %} class="active"{% endif %}>📊 Dashboard</a>
+    {% if feature %}
+    <span class="divider">|</span>
+    <a href="{{ feature_url }}" class="active">{{ feature }}</a>
+    {% endif %}
+    <span class="divider">|</span>
+    <a href="{{ url_for('address_book_page') }}"{% if active == 'book' %} class="active"{% endif %}>📇 Address Book</a>
+    <span class="divider">|</span>
+    <a href="{{ url_for('packing_specs_page') }}"{% if active == 'specs' %} class="active"{% endif %}>📐 Packing Specs</a>
+</div>
+{% endmacro %}

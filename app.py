@@ -25,6 +25,8 @@ from address_book import AddressBook, AddressBookError
 from address_import import build_review, apply_review, all_label_maps, ImportProblem
 from address_match import suggestions as closest_addresses, name_score
 from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
+from courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
+    FIELD_NAMES as IMPORT_FIELD_NAMES
 from label_stitcher import plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label
 import threading
 from collections import Counter
@@ -53,6 +55,7 @@ else:
 app_log.setup(BASE_DIR)  # terminal + logs/warehouse.log (app_log.py)
 log_pack, log_stitch, log_book = app_log.get('packing'), app_log.get('stitch'), app_log.get('book')
 log_specs = app_log.get('specs')
+log_import = app_log.get('import')
 # The matching page's "finished yet?" checks and label pictures aren't worth a terminal line each
 logging.getLogger('werkzeug').addFilter(lambda r: not re.search(r'"GET /stitch/[^ ]*/(status|label/)', r.getMessage()))
 
@@ -853,6 +856,21 @@ def dashboard():
                         break
                         
                 display_name = folder_name.split('_Job-')[0] if '_Job-' in folder_name else folder_name
+                has_label_map = any(f.endswith('.labelmap.json') for f in files)
+                courier_only = bool(csv_files) and not pdf_files and not has_label_map
+
+                # The features the project was made with, for its colours on the dashboard (the same as their tiles
+                # on Home): Courier Import, Packing Labels, or Packing Sheets, plus the Label Shuffler when its labels
+                # were shuffled there too (both shown, sharing the colour band equally)
+                sheets = '_Job-' in folder_name or any(f.startswith('Packing Sheet_') for f in files)
+                if courier_only:
+                    kinds = ['import']
+                elif has_label_map or any(f.startswith(('Packing Labels', 'Complete Labels')) for f in pdf_files):
+                    kinds = ['labels']
+                elif sheets:
+                    kinds = ['sheets'] + (['shuffler'] if any('_Shuffled' in f for f in pdf_files) else [])
+                else:
+                    kinds = ['labels'] if pdf_files else ['sheets']
                 
                 projects.append({
                     "name": folder_name,          
@@ -863,7 +881,9 @@ def dashboard():
                     "excel_files": excel_files,  # Pass the grouped Excel files
                     "pdf_files": pdf_files,       # Pass the grouped PDFs
                     "csv_files": csv_files,
-                    "has_label_map": any(f.endswith('.labelmap.json') for f in files),
+                    "has_label_map": has_label_map,
+                    "courier_only": courier_only,  # Courier Import: the courier CSV only, nothing to stitch or sub-group
+                    "kinds": kinds,
                     "json_files": json_files     # Pass the grouped JSON files
                 })
                 
@@ -1283,25 +1303,33 @@ def _consignment_edits(form):
     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
 
 
-def _read_tab(filepath, header_row, tab, columns=None):
-    """parse_packing_data(), plus store names for files whose only address info is one combined cell.
-    columns: the tab's Column mapping set by hand in the preview (_column_choices)."""
-    pack_groups, last_row, found_headers, warnings = parse_packing_data(filepath, header_row, sheet_name=tab, columns=columns)
+def _read_tab(filepath, header_row, tab, columns=None, mode='labels'):
+    """parse_packing_data() (Courier Import: read_allocation()), plus store names for files whose only address info
+    is one combined cell. columns: the tab's Column mapping set by hand in the preview (_column_choices)."""
+    read = read_allocation if mode == 'courier' else parse_packing_data
+    pack_groups, last_row, found_headers, warnings = read(filepath, header_row, sheet_name=tab, columns=columns)
     return fill_store_names(pack_groups), last_row, found_headers, warnings
 
 
-def _column_choices(form, tab):
+def _column_choices(form, tab, mode='labels'):
     """The preview's Column mapping for a tab: {field: column letter, or '-' for not used}; automatic ones left out.
-    Sent as 'colmap::<tab>::<field>' (the page also puts back what was chosen for this file last time)."""
+    Sent as 'colmap::<tab>::<field>' (the page also puts back what was chosen for this file last time). Courier
+    Import's fields are the address list's, and 'pack_<n>' for its pack columns."""
     choices = {}
-    for field, _, _ in MAPPABLE_FIELDS:
-        value = form.get(f'colmap::{tab}::{field}', '').strip().upper()
+    prefix = f'colmap::{tab}::'
+    if mode == 'courier':
+        fields = [k[len(prefix):] for k in form if k.startswith(prefix)]
+        fields = [f for f in fields if f in IMPORT_FIELD_NAMES or PACK_FIELD.match(f)]
+    else:
+        fields = [f for f, _, _ in MAPPABLE_FIELDS]
+    for field in fields:
+        value = form.get(prefix + field, '').strip().upper()
         if value == '-' or re.fullmatch(r'[A-Z]{1,3}', value):
             choices[field] = value
     return choices
 
 
-def _mapping_view(filepath, header_row, tab, choices):
+def _mapping_view(filepath, header_row, tab, choices, mode='labels'):
     """What the Column mapping shows for a tab: each field, the header it's matched to and that header's cell."""
     try:
         columns = header_columns(filepath, header_row, tab)
@@ -1309,9 +1337,19 @@ def _mapping_view(filepath, header_row, tab, choices):
         log_pack.warning("  tab %s: couldn't read header row %s for the column mapping: %s", tab, header_row, e)
         columns = []
     text_of = dict(columns)
-    auto = {f: get_column_letter(i) for f, i in detect_columns([(column_index_from_string(l), t) for l, t in columns]).items()}
+    if mode == 'courier':
+        try:
+            found, packs, _ = scan_columns(filepath, header_row, tab)
+        except Exception as e:
+            log_import.warning("  tab %s: couldn't find the columns in header row %s: %s", tab, header_row, e)
+            found, packs = {}, {}
+        auto = {f: get_column_letter(i) for f, i in found.items()} | {f"pack_{n}": get_column_letter(i) for n, i in packs.items()}
+        fields = mapping_fields(packs, choices)
+    else:
+        auto = {f: get_column_letter(i) for f, i in detect_columns([(column_index_from_string(l), t) for l, t in columns]).items()}
+        fields = MAPPABLE_FIELDS
     items = []
-    for field, label, required in MAPPABLE_FIELDS:
+    for field, label, required in fields:
         chosen = choices.get(field, '')
         used = None if chosen == '-' else (chosen or auto.get(field))
         items.append({'field': field, 'label': label, 'required': required, 'auto': auto.get(field, ''),
@@ -1367,6 +1405,45 @@ def _receiver_groups(consignments):
             ordered.append(m)
             placed.add(m['number'])
     return ordered
+
+
+def _import_refs(groups, tab_number):
+    """Courier Import: each pack's code, T<tab>P<pack> ('T1P2' = pack 2 of the first selected tab)."""
+    for g in groups.values():
+        g['item_ref'] = f"T{tab_number}P{g['pack_no']}"
+    return groups
+
+
+def _import_item_refs(cartons, groups):
+    """Courier Import: each carton's Item Reference, its pack's code and its store: 'T1P2 Corio Village' (the Store
+    Name, else the Receiver Name). In the table and both CSVs."""
+    for x in cartons:
+        x['ref_code'] = groups[x['pack_key']]['item_ref']
+        x['item_reference'] = f"{x['ref_code']} {x['store']}".strip()
+
+
+def _import_csvs(project_dir, reference, project, csv_formats, cartons, consignments, fixed, form, log):
+    """Courier Import's Generate: the courier CSVs chosen, with each pack's T<tab>P<pack> as its Item Reference
+    (Open360's Item Reference, OpenFreight's Reference). Returns the file names."""
+    base_name = f"{reference} - {project}" if reference else project
+    refs = [(x['item_reference'], x['item_reference']) for x in cartons]
+    csv_files = []
+    if 'open360' in csv_formats:
+        name = f"{base_name} - Open360.csv"
+        with app_log.step(log, f"  Open360 CSV {name}"):
+            write_open360_csv(os.path.join(project_dir, name), open360_items(cartons, consignments), reference, item_refs=refs)
+        log.info("    %d row(s), Shipment Reference %s", len(refs), reference)
+        csv_files.append(name)
+    if 'openfreight' in csv_formats:
+        name = f"{base_name} - OpenFreight.csv"
+        with app_log.step(log, f"  OpenFreight CSV {name}"):
+            export, _ = clean_export(_export_values(form))
+            write_courier_csv(os.path.join(project_dir, name), cartons, consignments, reference, fixed, export=export)
+            abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
+            if abroad:
+                log.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
+        csv_files.append(name)
+    return csv_files
 
 
 def _carton_weights(form):
@@ -1635,11 +1712,30 @@ def api_address_delete(address_id):
 
 @app.route('/packing-labels', methods=['GET', 'POST'])
 def create_packing_labels():
+    """Packing labels (PDF) and courier CSVs from a packing list (a Packing Spec column, rows merged per box)."""
+    return _distribution_page('labels')
+
+
+@app.route('/courier-import', methods=['GET', 'POST'])
+def courier_import():
+    """Courier Import: only the courier CSV, from an address list with a column per pack (courier_import.py)."""
+    return _distribution_page('courier')
+
+
+def _distribution_page(mode):
+    """Packing Labels and Courier Import share one page and its steps: upload, tabs and header rows, the preview
+    (Column mapping, consignment table with the address book, ✏️ edits, merges, service codes, weights), the
+    courier CSV choice and Generate. mode 'labels': packing labels PDF + courier CSVs + label map, from a packing
+    list. mode 'courier': the courier CSV(s) only, from an address list whose pack columns are headed 1, 2, 3 …;
+    each pack's Item Reference is T<tab>P<pack> ('T1P2')."""
     kept = _kept_view()
     if kept:
         return kept
+    courier_mode = mode == 'courier'
+    log = log_import if courier_mode else log_pack
+    show = lambda **context: _show('packing_labels.html', mode=mode, **context)
     if request.method == 'GET':
-        return _show('packing_labels.html')
+        return show()
 
     # STEP 1: Handle File Upload
     if 'file' in request.files:
@@ -1647,12 +1743,12 @@ def create_packing_labels():
         original_filename = file.filename or ''
         extension = os.path.splitext(original_filename)[1].lower()
         if not original_filename:
-            return _show('packing_labels.html', page_error="Choose an Excel file to scan.")
+            return show(page_error="Choose an Excel file to scan.")
         if extension not in ('.xlsx', '.xls'):
-            return _show('packing_labels.html', page_error="Unsupported file type. Choose an .xlsx or .xls file.")
+            return show(page_error="Unsupported file type. Choose an .xlsx or .xls file.")
         filename = secure_filename(original_filename)
         if not filename:
-            return _show('packing_labels.html', page_error="The uploaded filename is not valid.")
+            return show(page_error="The uploaded filename is not valid.")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         try:
             close_if_open_elsewhere(filepath)
@@ -1666,19 +1762,19 @@ def create_packing_labels():
             finally:
                 wb.close()
 
-            log_pack.info("Upload %s: %d tab(s) %s", filename, len(tabs), tabs)
-            return _show('packing_labels.html', tabs=tabs, filename=filename)
+            log.info("Upload %s: %d tab(s) %s", filename, len(tabs), tabs)
+            return show(tabs=tabs, filename=filename)
         except Exception as e:
-            log_pack.exception("Could not scan upload %s", original_filename)
-            return _show('packing_labels.html', page_error=f"Could not scan '{original_filename}': {e}")
+            log.exception("Could not scan upload %s", original_filename)
+            return show(page_error=f"Could not scan '{original_filename}': {e}")
     # Base variables for Step 2 & 3
     filename = request.form.get('filename')
     if not filename:
-        return redirect(url_for('create_packing_labels'))
+        return redirect(url_for(request.endpoint))
         
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(filename))
     if not os.path.isfile(filepath):
-        return _show('packing_labels.html', page_error="The uploaded file is no longer available. Scan it again.")
+        return show(page_error="The uploaded file is no longer available. Scan it again.")
     all_tabs = request.form.getlist('all_tabs')
     selected_tabs = request.form.getlist('selected_tabs')
     
@@ -1692,35 +1788,35 @@ def create_packing_labels():
 
     # Action: Update Previews
     if 'preview' in request.form:
-        log_pack.info("Preview %s: tabs %s", filename, selected_tabs)
+        log.info("Preview %s: tabs %s", filename, selected_tabs)
         started = time.perf_counter()
         # The upload may be open in Excel (the Open button): changes not saved yet are saved first, so the preview
         # shows what's in Excel. The page says which saved version it read.
         excel = save_if_open_elsewhere(filepath)
         saved_at = datetime.fromtimestamp(os.path.getmtime(filepath))
         file_note = {'saved_at': saved_at.strftime('%d/%m/%Y %H:%M:%S'), 'excel': excel}
-        log_pack.info("  file saved %s; open in Excel: %s", file_note['saved_at'], excel or 'no')
+        log.info("  file saved %s; open in Excel: %s", file_note['saved_at'], excel or 'no')
         previews = []
         header_rows = {}  # each tab's header row as a number (a blank, 0 or text one is read as row 1)
         for tab in selected_tabs:
-            choices = _column_choices(request.form, tab)
+            choices = _column_choices(request.form, tab, mode)
             try:
                 header_row = max(1, int(user_inputs[tab]['header_row']))
             except ValueError:
                 header_row = 1
             header_rows[tab] = header_row
-            mapping = _mapping_view(filepath, header_row, tab, choices)
+            mapping = _mapping_view(filepath, header_row, tab, choices, mode)
             if choices:
-                log_pack.info("  tab %s: columns set by hand %s", tab, choices)
+                log.info("  tab %s: columns set by hand %s", tab, choices)
             try:
-                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices)
+                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices, mode)
                 
                 total_packs = len(pack_groups)
                 total_stores = len(set(g['store_name'] for g in pack_groups.values()))
-                log_pack.info("  tab %s (header row %d): %d packs, %d stores, last row %s, %d warning(s)",
+                log.info("  tab %s (header row %d): %d packs, %d stores, last row %s, %d warning(s)",
                               tab, header_row, total_packs, total_stores, last_row, len(warnings))
                 for w in warnings:
-                    log_pack.debug("    warning: %s", w)
+                    log.debug("    warning: %s", w)
                 
                 previews.append({
                     'sheet_name': tab, 
@@ -1733,15 +1829,15 @@ def create_packing_labels():
                     'error': None
                 })
             except PackCheckError as e:
-                log_pack.warning("  tab %s: %d problem(s) stop it: %s", tab, len(e.issues),
+                log.warning("  tab %s: %d problem(s) stop it: %s", tab, len(e.issues),
                                  "; ".join(f"{i.get('rows', '')} {i.get('col', '')} {i.get('text', '')}".strip() for i in e.issues[:5]))
                 previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings, 'mapping': mapping})
             except ValueError as e:  # a column that can't be found: picked in the Column mapping
-                log_pack.warning("  tab %s: %s", tab, e)
+                log.warning("  tab %s: %s", tab, e)
                 previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}],
                                  'warnings': [], 'mapping': mapping})
             except Exception as e:
-                log_pack.exception("  tab %s could not be read", tab)
+                log.exception("  tab %s could not be read", tab)
                 previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}],
                                  'warnings': [], 'mapping': mapping})
 
@@ -1749,8 +1845,10 @@ def create_packing_labels():
         if previews and not any(p['error'] for p in previews):
             combined = {}
             for tab in selected_tabs:
-                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab))
+                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode)
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
+                if courier_mode:
+                    _import_refs(groups, selected_tabs.index(tab) + 1)
             edits, offered = _apply_address_book(combined, _consignment_edits(request.form), _book_offered(request.form))
             options = service_options(load_service_usage(SERVICE_USAGE_FILE))
             most_used = options[0]['code'] if options[0]['used'] else ''
@@ -1759,24 +1857,28 @@ def create_packing_labels():
             weights = _carton_weights(request.form)
             consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'],
                                                                          SPEC_STORE.resolver(), weights)
+            if courier_mode:
+                _import_item_refs(cartons, combined)
             consignments = _receiver_groups(_check_against_book(consignments, edits))  # one receiver's next to each other
             # Specs the Packing Specs page doesn't know yet are listed there for the user to fill in
             try:
                 SPEC_STORE.note_unknown(x['packing_spec'] for x in cartons if x['spec_kind'] == 'unknown')
             except OSError as e:
                 log_specs.warning("Could not note new packing specs: %s", e)
-            series, all_series = detect_series(combined)
+            # Courier Import: the job numbers above the header rows (or in the file name)
+            series, all_series = (reference_in_sheets(filepath, [(t, header_rows[t]) for t in selected_tabs], filename)
+                                  if courier_mode else detect_series(combined))
             if len(all_series) > 1:
                 courier_warnings.insert(0, f"Job numbers use more than one series ({', '.join(all_series)}). Using {series}; change it below if needed.")
             status = {}
             for c in consignments:
                 status[c['book']] = status.get(c['book'], 0) + 1
-            log_pack.info("  %d cartons in %d consignments | job %s (found %s) | service %s | address book: %s",
+            log.info("  %d cartons in %d consignments | job %s (found %s) | service %s | address book: %s",
                           len(cartons), len(consignments), series or '-', all_series or 'none', fixed.get('service_code') or '-',
                           ", ".join(f"{k} {v}" for k, v in sorted(status.items())))
             for w in courier_warnings:
-                log_pack.info("  courier check: %s", w)
-            log_pack.info("Preview ready in %.2fs", time.perf_counter() - started)
+                log.info("  courier check: %s", w)
+            log.info("Preview ready in %.2fs", time.perf_counter() - started)
             courier = {
                 'consignments': [{**c, 'address': one_line(c['destination']),
                                   'source_text': (c['original']['raw'] if c['original']['postcode'] in c['original']['raw']
@@ -1799,7 +1901,7 @@ def create_packing_labels():
                 'service_options': options,
             }
 
-        return _show('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
+        return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
                                file_note=file_note)
 
     # Action: Generate Final PDF & Save to Project
@@ -1816,11 +1918,11 @@ def create_packing_labels():
         csv_formats = [f for f in CSV_FORMATS if f in request.form.getlist('courier_csv')]
         if not csv_formats:
             missing.append('Courier CSV (Open360, OpenFreight or both)')
-        log_pack.info("Generate %s: tabs %s, project %r, reference %r, service %r", filename, selected_tabs,
+        log.info("Generate %s: tabs %s, project %r, reference %r, service %r", filename, selected_tabs,
                       request.form.get('project_name', ''), request.form.get('reference', ''), request.form.get('service_code', ''))
         if missing:
-            log_pack.warning("Generate stopped: %s not filled in", ", ".join(missing))
-            return _show('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
+            log.warning("Generate stopped: %s not filled in", ", ".join(missing))
+            return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs,
                                    page_error=f"Fill in {', '.join(missing)} before generating.")
         sender = None  # the portal uses the account's sender (the Open360 CSV leaves it empty)
 
@@ -1828,12 +1930,12 @@ def create_packing_labels():
         # then that copy is closed, so nothing stops the file moving into the project folder
         excel = save_if_open_elsewhere(filepath)
         if excel == 'busy':
-            log_pack.warning("Generate stopped: %s is open in Excel in the middle of editing a cell", filename)
-            return _show('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs,
+            log.warning("Generate stopped: %s is open in Excel in the middle of editing a cell", filename)
+            return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs,
                                    page_error=f"{filename} is open in Excel in the middle of editing a cell, so it can't be saved. "
                                               f"Press Enter (or Esc) in Excel, then Update Previews and Generate again.")
         if excel == 'saved':
-            log_pack.info("  saved the changes made in Excel to %s before generating", filename)
+            log.info("  saved the changes made in Excel to %s before generating", filename)
         close_if_open_elsewhere(filepath)
 
         project_dir = None
@@ -1844,7 +1946,9 @@ def create_packing_labels():
             sheet_warnings = []
             for tab in selected_tabs:
                 header_row = int(user_inputs[tab]['header_row'])
-                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab))
+                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode)
+                if courier_mode:
+                    _import_refs(pack_groups, selected_tabs.index(tab) + 1)
                 sheet_warnings += [{**w, 'col': f"{tab} {w.get('col', '')}".strip() if len(selected_tabs) > 1 else w.get('col', '')}
                                    for w in tab_warnings]
                 for key, val in pack_groups.items():
@@ -1867,19 +1971,21 @@ def create_packing_labels():
             consignments, cartons, courier_warnings = build_consignments(combined_pack_groups, _consignment_edits(request.form),
                                                                          fixed['service_code'], SPEC_STORE.resolver(),
                                                                          _carton_weights(request.form))
+            if courier_mode:
+                _import_item_refs(cartons, combined_pack_groups)
             all_consignments, all_cartons = consignments, cartons
             consignments, cartons = sendable(consignments, cartons)  # still no address: left out of the CSV
-            log_pack.info("  %d packing labels; %d cartons in %d consignments go in the courier CSV, %d left out (no complete address)",
+            log.info("  %d packing labels; %d cartons in %d consignments go in the courier CSV, %d left out (no complete address)",
                           len(all_cartons), len(cartons), len(consignments), len(all_cartons) - len(cartons))
             for x in all_cartons:
                 if x not in cartons:
-                    log_pack.info("    left out: %s (%s)", x['item_reference'], x.get('packing_spec', ''))
+                    log.info("    left out: %s (%s)", x['item_reference'], x.get('packing_spec', ''))
             unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
             if unknown:
                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
 
             # 3. Setup Project Folder structure
-            raw_project_name = _project_name(request.form.get('project_name'), 'Packing_Labels_Job')
+            raw_project_name = _project_name(request.form.get('project_name'), 'Courier_Import_Job' if courier_mode else 'Packing_Labels_Job')
             safe_project_name = clean_file_name(raw_project_name)
             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
             final_folder_name = f"{safe_project_name}_{time_stamp}"
@@ -1889,65 +1995,71 @@ def create_packing_labels():
             # 4. Move the Excel File into the Project
             new_filepath = os.path.join(project_dir, filename)
             shutil.move(filepath, new_filepath)
-            log_pack.info("  project folder %s", final_folder_name)
+            log.info("  project folder %s", final_folder_name)
 
-            # 5. Generate the PDF with Custom Layout
-            # 'Packing Labels Only 1 - J477161 - Lux Test 30 - 261005_1732.pdf' (stitched: 'Complete Labels 1 - ...')
-            output_pdf_name = numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp)
-            output_pdf = os.path.join(project_dir, output_pdf_name)
-            # Each label shows who and where its consignment goes (after address-book fills and ✏️ edits),
-            # exactly as in the preview, not the raw Excel text. Every pack gets its label, sent or not.
-            by_number = {c['number']: c for c in all_consignments}
-            label_addresses = {}
-            for x in all_cartons:
-                c = by_number[x['consignment']]
-                d = c['destination']
-                label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
-                                                  'sent': not c.get('no_address')}
-            shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
-            report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
-                                        all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats)
-            with app_log.step(log_pack, f"  packing labels PDF {output_pdf_name}"):
-                page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
-                                                serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
-            log_pack.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
+            if courier_mode:
+                csv_files = _import_csvs(project_dir, reference, safe_project_name, csv_formats, cartons, consignments,
+                                         fixed, request.form, log)
+                output_files = csv_files
+            else:
+                # 5. Generate the PDF with Custom Layout
+                # 'Packing Labels Only 1 - J477161 - Lux Test 30 - 261005_1732.pdf' (stitched: 'Complete Labels 1 - ...')
+                output_pdf_name = numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp)
+                output_pdf = os.path.join(project_dir, output_pdf_name)
+                # Each label shows who and where its consignment goes (after address-book fills and ✏️ edits),
+                # exactly as in the preview, not the raw Excel text. Every pack gets its label, sent or not.
+                by_number = {c['number']: c for c in all_consignments}
+                label_addresses = {}
+                for x in all_cartons:
+                    c = by_number[x['consignment']]
+                    d = c['destination']
+                    label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
+                                                      'sent': not c.get('no_address')}
+                shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
+                report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
+                                            all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats)
+                with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
+                    page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
+                                                    serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
+                log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
 
-            # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
-            # match courier labels back to packing label pages. Both files carry the same Item References
-            # ('01T1QWXK Store': serial + the job's code), so courier labels booked from either stitch by code.
-            base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
-            map_name = f"{base_name}.labelmap.json"
-            items = open360_items(cartons, consignments, tab_of, serials)
-            open360_refs = open360_item_references(items)
-            ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
-            csv_files = []
-            if 'open360' in csv_formats:
-                open360_name = f"{base_name} - Open360.csv"
-                with app_log.step(log_pack, f"  Open360 CSV {open360_name}"):
-                    write_open360_csv(os.path.join(project_dir, open360_name), items, shipment_reference, item_refs=open360_refs)
-                csv_files.append(open360_name)
-                log_pack.info("    %d row(s), Shipment Reference %s", len(open360_refs), shipment_reference)
-            if 'openfreight' in csv_formats:
-                openfreight_name = f"{base_name} - OpenFreight.csv"
-                with app_log.step(log_pack, f"  OpenFreight CSV {openfreight_name}"):
-                    export, export_problems = clean_export(_export_values(request.form))
-                    write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,
-                                      item_refs=ref_of, export=export)
-                    abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
-                    if abroad:
-                        log_pack.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
-                csv_files.append(openfreight_name)
-            for x, r in zip(cartons, open360_refs):
-                log_pack.debug("    %s -> %s", x['item_reference'], r)
-            left_out = [x for x in all_cartons if x not in cartons]
-            write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
-                            output_pdf_name, csv_files[0], page_info, left_out, sender,
-                            {'file': csv_files[0] if 'open360' in csv_formats else None, 'shipment_reference': shipment_reference,
-                             'item_references': {x['item_reference']: r for x, r in zip(cartons, open360_refs)},
-                             'csv_files': csv_files},
-                            {'name': safe_project_name, 'generated': time_stamp, 'report': report,
-                             'report_pages': page_info.get('report_pages', 0)})
-            log_pack.info("  label map %s", map_name)
+                # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
+                # match courier labels back to packing label pages. Both files carry the same Item References
+                # ('01T1QWXK Store': serial + the row's own code), so courier labels booked from either stitch by code.
+                base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
+                map_name = f"{base_name}.labelmap.json"
+                items = open360_items(cartons, consignments, tab_of, serials)
+                open360_refs = open360_item_references(items)
+                ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
+                csv_files = []
+                if 'open360' in csv_formats:
+                    open360_name = f"{base_name} - Open360.csv"
+                    with app_log.step(log, f"  Open360 CSV {open360_name}"):
+                        write_open360_csv(os.path.join(project_dir, open360_name), items, shipment_reference, item_refs=open360_refs)
+                    csv_files.append(open360_name)
+                    log.info("    %d row(s), Shipment Reference %s", len(open360_refs), shipment_reference)
+                if 'openfreight' in csv_formats:
+                    openfreight_name = f"{base_name} - OpenFreight.csv"
+                    with app_log.step(log, f"  OpenFreight CSV {openfreight_name}"):
+                        export, export_problems = clean_export(_export_values(request.form))
+                        write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,
+                                          item_refs=ref_of, export=export)
+                        abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
+                        if abroad:
+                            log.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
+                    csv_files.append(openfreight_name)
+                for x, r in zip(cartons, open360_refs):
+                    log.debug("    %s -> %s", x['item_reference'], r)
+                left_out = [x for x in all_cartons if x not in cartons]
+                write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
+                                output_pdf_name, csv_files[0], page_info, left_out, sender,
+                                {'file': csv_files[0] if 'open360' in csv_formats else None, 'shipment_reference': shipment_reference,
+                                 'item_references': {x['item_reference']: r for x, r in zip(cartons, open360_refs)},
+                                 'csv_files': csv_files},
+                                {'name': safe_project_name, 'generated': time_stamp, 'report': report,
+                                 'report_pages': page_info.get('report_pages', 0)})
+                log.info("  label map %s", map_name)
+                output_files = [output_pdf_name] + csv_files
             record_service_usage(SERVICE_USAGE_FILE, consignments)
             try:
                 ADDRESS_BOOK.record_used([(c['destination'], [x['source_id'] for x in c['cartons']]) for c in consignments])
@@ -1955,23 +2067,24 @@ def create_packing_labels():
             except Exception as e:
                 log_book.exception("Could not update the address book after Generate: %s", e)
 
-            log_pack.info("Generate done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
-            return _show('packing_labels.html',
-                                   generation_complete=True,
-                                   project_folder=final_folder_name,
-                                   generated_files=[output_pdf_name] + csv_files)
+            log.info("Generate done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
+            left_out = [x for x in all_cartons if x not in cartons]
+            summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
+                f"{x['item_reference']} ({x['packing_spec']}) - {x['store']}" for x in left_out]} if courier_mode else None
+            return show(generation_complete=True, project_folder=final_folder_name, generated_files=output_files,
+                        summary=summary)
 
         except Exception as e:
-            log_pack.exception("Generate FAILED after %.2fs (project folder undone)", time.perf_counter() - started)
+            log.exception("Generate FAILED after %.2fs (project folder undone)", time.perf_counter() - started)
             # Undo a half-made project so the upload is back where it was and Generate can be retried
             if project_dir and os.path.isdir(project_dir):
                 moved = os.path.join(project_dir, filename)
                 if os.path.exists(moved) and not os.path.exists(filepath):
                     shutil.move(moved, filepath)
                 shutil.rmtree(project_dir, ignore_errors=True)
-            return _show('packing_labels.html', tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
+            return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
 
-    return _show('packing_labels.html')
+    return show()
 
 PORT = 5001
 

@@ -1,19 +1,12 @@
 <!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
 <html>
 <head>
     <title>Create Sub-Group</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-    <div class="sticky-nav">
-        <a href="/">🏠 Home</a>
-        <span class="divider">|</span>
-        <a href="/#dashboard-section" class="active">📊 Dashboard</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
-        <span class="divider">|</span>
-        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
-    </div>
+    {{ nav('✂️ Sub-Group', request.path) }}
     <!-- Loading Overlay -->
     <div id="loading-overlay">
         <div class="spinner"></div>

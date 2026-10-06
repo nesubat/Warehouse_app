@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
 <html>
 <head>
     <title>Warehouse Automation Suite</title>
@@ -6,24 +7,14 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-<!-- Consistent Top Navigation Bar -->
-    <div class="sticky-nav">
-        <!-- Notice there is no class="active" here anymore -->
-        <a href="/#home" id="nav-home">🏠 Home</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="/#dashboard-section" id="nav-dash">📊 Dashboard</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('address_book_page') }}">📇 Address Book</a>
-        <span class="divider" style="color: #ccc;">|</span>
-        <a href="{{ url_for('packing_specs_page') }}">📐 Packing Specs</a>
-    </div>
+{{ nav() }}
 
 <div class="container text-center">
     <div id="home">
         <h1>Packaging Automation Suite</h1>
         <p class="subtitle">Select a tool to begin processing your distributions.</p>
 
-        <div class="portal-grid" id="home">
+        <div class="portal-grid">
             <a href="/matrix" class="portal-card">
                 <div class="portal-icon">📊</div>
                 <div class="portal-title">1. Create Packing Sheets </div>
@@ -36,10 +27,16 @@
                 <div class="portal-desc">Upload raw labels and sort them perfectly based on Signature Code groups.</div>
             </a>
 
-            <a href="/packing-labels" class="portal-card">
+            <a href="{{ url_for('create_packing_labels') }}" class="portal-card labels-card">
                 <div class="portal-icon">🏷️</div>
                 <div class="portal-title">3. Generate Packing Labels</div>
                 <div class="portal-desc">Create custom A4 packing labels from your Excel data.</div>
+            </a>
+
+            <a href="{{ url_for('courier_import') }}" class="portal-card import-card">
+                <div class="portal-icon">🚚</div>
+                <div class="portal-title">4. Courier Import</div>
+                <div class="portal-desc">Make the courier CSV from an address list with pack columns 1, 2, 3 …</div>
             </a>
         </div>
     </div>
@@ -53,12 +50,16 @@
 
     <!-- THE LOOP MUST START HERE -->
     {% for project in projects %}
-        <div class="project-card" style="padding: 0;">
+        {% set colours = {'sheets': '#3498db', 'shuffler': '#e67e22', 'labels': '#8e44ad', 'import': '#16a085'} %}
+        {% set share = 100 / project.kinds|length %}
+        {# The left band: one colour per feature used, each an equal share of its length #}
+        <div class="project-card project-kind-{{ project.kinds[0] }}" style="padding: 0; --band: linear-gradient(to bottom{% for k in project.kinds %}, {{ colours[k] }} {{ share * loop.index0 }}% {{ share * loop.index }}%{% endfor %});">
             
             <!-- Top Section: Clickable Header -->
             <div class="project-header accordion-header">
                 <div>
-                    <h3 class="project-title" style="margin: 0;">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span></h3>
+                    <h3 class="project-title" style="margin: 0;">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span>
+                        {% for k in project.kinds %}<span class="project-feature project-feature-{{ k }}">{{ {'import': '🚚 Courier Import', 'labels': '🏷️ Packing Labels', 'shuffler': '🖨️ Labels Shuffled', 'sheets': '📊 Packing Sheets'}[k] }}</span>{% endfor %}</h3>
                     <div class="project-meta" style="margin-top: 5px;">
                         <span>Created: {{ project.date }}</span>
                     </div>
@@ -135,7 +136,9 @@
 
                 <!-- Action Bar: Sub-Group (or Stitch Labels for courier projects) & Delete -->
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    {% if project.csv_files %}
+                    {% if project.courier_only %}
+                    <span class="project-kind" title="Made with Courier Import: the courier CSV only">🚚 Courier Import</span>
+                    {% elif project.csv_files %}
                     {% if project.has_label_map %}
                     <a href="{{ url_for('stitch_page', project_name=project.name) }}" class="btn-action btn-stitch" title="Put the courier portal's labels onto these packing labels">🧵 Stitch Labels</a>
                     {% else %}
