@@ -10,6 +10,62 @@
     {% endfor %}
 </table>
 {% endmacro %}
+
+{% macro colmap_select(tab, it, m, hidden=false) %}
+<select id="cm-{{ tab }}-{{ it.field }}" name="colmap::{{ tab }}::{{ it.field }}" class="pl-colmap-select" data-auto="{{ it.auto }}"
+        data-auto-text="{{ it.auto_text }}" aria-label="Column for {{ it.label }}"{% if hidden %} hidden{% endif %}>
+    <option value="">{% if it.auto %}Auto: {{ it.auto_text }} ({{ it.auto }}){% else %}Auto: not found{% endif %}</option>
+    <option value="-"{% if it.chosen == '-' %} selected{% endif %}>Not used</option>
+    {% for letter, text in m.columns %}
+    <option value="{{ letter }}"{% if it.chosen == letter %} selected{% endif %}>{{ text }} ({{ letter }})</option>
+    {% endfor %}
+</select>
+{% endmacro %}
+
+{% macro colmap_panel(tab, m) %}
+{% if m %}
+{% set mapped = m['items']|selectattr('used')|list + m['items']|selectattr('chosen', 'equalto', '-')|list %}
+{% set remaining = m['items']|rejectattr('used')|rejectattr('chosen', 'equalto', '-')|list %}
+<div class="pl-colmap" data-tab="{{ tab }}" data-header-row="{{ m.header_row }}">
+    <div class="pl-colmap-head">
+        <strong>🧭 Column mapping</strong>
+        <span class="pl-colmap-note">header row {{ m.header_row }} · <span class="pl-key pl-key-auto">found by the rules</span> <span class="pl-key pl-key-hand">set by hand</span> · hover a field for its Excel header, click it to change</span>
+        <button type="button" class="pl-btn-small pl-btn-plain pl-colmap-reset">Auto-map all</button>
+    </div>
+    {% if not m.columns %}<p class="pl-colmap-empty">Row {{ m.header_row }} has no headers: check the Header Row number above.</p>{% endif %}
+    {# Mapped fields: chips, green when found by the rules, blue when set by hand; click to change #}
+    <div class="pl-colmap-chips">
+        {% for it in mapped %}
+        {% set state = 'off' if it.chosen == '-' else ('hand' if it.chosen else 'auto') %}
+        <span class="pl-colmap-item pl-chip-item pl-chip-{{ state }}">
+            <button type="button" class="pl-chip" title="{% if state == 'off' %}Not used — click to pick a column{% else %}Excel header: “{{ it.used_text }}” · cell {{ it.cell }} — click to change{% endif %}">
+                <span class="pl-chip-mark" aria-hidden="true">{{ '✓' if state == 'auto' else ('✎' if state == 'hand' else '⊘') }}</span>
+                <span class="pl-chip-field">{{ it.label }}</span>
+                <span class="pl-chip-cell">{{ 'not used' if state == 'off' else it.cell }}</span>
+            </button>
+            {{ colmap_select(tab, it, m, hidden=true) }}
+        </span>
+        {% endfor %}
+    </div>
+    {# Fields still without a column: one row each, the required ones first and red #}
+    {% if remaining %}
+    <p class="pl-colmap-sub">Still to map ({{ remaining|length }}){% if remaining|selectattr('required')|list %} — <strong class="pl-colmap-need">{{ remaining|selectattr('required')|list|length }} needed to generate</strong>{% endif %}</p>
+    <div class="pl-colmap-grid">
+        {% for it in remaining|sort(attribute='required', reverse=true) %}
+        <div class="pl-colmap-item pl-row-item{% if it.required %} pl-colmap-missing{% endif %}">
+            <label class="pl-colmap-field" for="cm-{{ tab }}-{{ it.field }}">{{ it.label }}{% if it.required %} *{% endif %}</label>
+            <span class="pl-colmap-arrow" aria-hidden="true">→</span>
+            {{ colmap_select(tab, it, m) }}
+            <span class="pl-colmap-cell" title="Cell of the header">{{ it.cell or '—' }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="pl-colmap-sub pl-colmap-done">✓ Every field has a column.</p>
+    {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -154,6 +210,7 @@
                     <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
                     {{ issue_table(bp.warnings, 'warning') }}
                     {% endif %}
+                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                 </div>
                 {% else %}
                 <div class="blueprint-card">
@@ -167,6 +224,7 @@
                     <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
                     {{ issue_table(bp.warnings, 'warning') }}
                     {% endif %}
+                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                 </div>
                 {% endif %}
             {% endfor %}
@@ -328,6 +386,7 @@
                     {% if courier.spec_gaps %}<p class="pl-spec-link"><a href="{{ url_for('packing_specs_page') }}" target="_blank" rel="noopener">📐 Open Packing Specs</a> in a new tab, fill in the sizes, then press "Auto-Map &amp; Update Previews" here.</p>{% endif %}
                     {% endif %}
 
+
                     {% if courier.missing %}
                     <p class="pl-missing-note" id="courier-missing-note"><strong>{{ courier.missing }} consignment{{ ' has' if courier.missing == 1 else 's have' }} no address</strong> (the file only gives the receiver name).
                         {{ 'It’s' if courier.missing == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-missing">No address</span>. Open ✏️ to pick one of the receiver's saved addresses or type it in, then Save. Without an address a consignment is left out of the courier CSV.</p>
@@ -341,7 +400,24 @@
                         <tbody>
                         {% for c in courier.consignments %}
                         {% set d = c.destination %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}" data-id="{{ c.id }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                        {% if c.group and c.group.first %}
+                        <tr class="pl-group-row{% if not c.group.similar %} pl-group-differs{% endif %}" data-group="{{ c.group.id }}">
+                            <td colspan="5">
+                                <div class="pl-group-head">
+                                    <span class="pl-group-title">🔀 <strong>{{ c.group.receiver }}</strong>: {{ c.group.size }} consignments at different addresses
+                                        <span class="pl-group-hint">{% if c.group.similar %}— they look like one place written differently{% else %}— check: some really differ{% endif %}</span>
+                                        {% if c.group.services|length > 1 %}<span class="pl-group-services" title="Merging gives them all the service of the address you keep">different services: {{ c.group.services|join(', ') }}</span>{% endif %}</span>
+                                    <label class="pl-group-keep-label">Keep
+                                        <select class="pl-group-keep" aria-label="Address to keep for {{ c.group.receiver }}">
+                                            {% for m in c.group.members %}{% if not m.no_address %}<option value="{{ loop.index0 }}">#{{ m.number }} {{ m.address }}</option>{% endif %}{% endfor %}
+                                        </select>
+                                    </label>
+                                    <button type="button" class="pl-btn-small pl-group-merge" data-group="{{ c.group.members|tojson|forceescape }}">Merge into one</button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-state="{{ d.state }}" data-original="{{ c.original_json }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -418,9 +494,19 @@
                 </div>
                 {% endif %}
 
+                <fieldset class="pl-csv-choice" id="pl-csv-choice">
+                    <legend>Courier CSV</legend>
+                    <div class="pl-csv-options">
+                        <label class="pl-csv-option"><input type="checkbox" name="courier_csv" value="open360">
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Open360 CSV</strong><small>TIG Open360 bulk upload</small></span></label>
+                        <label class="pl-csv-option"><input type="checkbox" name="courier_csv" value="openfreight">
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>OpenFreight CSV</strong><small>the older courier CSV, with Who Pays and Charge Account</small></span></label>
+                    </div>
+                    <span class="pl-csv-hint issue-detail">Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.</span>
+                </fieldset>
                 <div class="project-name-group">
                     <label class="project-name-label" for="project_name">Name this Project / Job:</label>
-                    <input type="text" id="project_name" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" required>
+                    <input type="text" id="project_name" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" maxlength="50" data-count required>
                 </div>
                 <p class="pl-generate-error" id="pl-generate-error" role="alert" hidden></p>
                 <button type="submit" name="generate" class="btn-generate pl-submit">Create Project & Generate PDF</button>
@@ -439,7 +525,7 @@
             <div class="success-actions actions-grid">
             {% for file in generated_files %}
             <a href="{{ url_for('download_file', folder_name=project_folder, filename=file) }}" class="tooltip-btn btn-action btn-download" data-title="{{ file }}">
-                {% if file.endswith('Open360.csv') %}🚚 Download Open360 CSV{% elif file.endswith('.csv') %}🚚 Download Courier CSV{% else %}📄 Download Label PDF{% endif %}<br>
+                {% if file.endswith('Open360.csv') %}🚚 Download Open360 CSV{% elif file.endswith('OpenFreight.csv') %}🚚 Download OpenFreight CSV{% elif file.endswith('.csv') %}🚚 Download Courier CSV{% else %}📄 Download Label PDF{% endif %}<br>
                 <span class="download-sub">{{ file[:25] }}{% if file|length > 25 %}...{% endif %}</span>
             </a>
             {% endfor %}

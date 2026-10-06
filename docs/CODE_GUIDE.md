@@ -97,7 +97,7 @@ These words appear everywhere in the code. If you're ever confused reading a fun
 | **Consignment** | All packs going to the **same delivery address**, whichever store they belong to. The courier treats them as one shipment. |
 | **Consignment reference** | Pre-filled from the distribution file's Job Number column (`job_series()` / `detect_series()`): strictly **J + 6 digits** at the start (`J477161-54` → `J477161`). Job numbers in any other format are ignored; if none match, the field starts empty and must be typed. When the file has several jobs, the most common one, with a warning. Editable in the preview; it is also the Open360 **Shipment Reference** on every row. |
 | **Item reference** | `Label <X> - <Store>`, the last CSV column. Printed on the courier label; it's the key that links a courier label to its packing label. |
-| **Label map** | `….labelmap.json`, saved next to the PDF: which PDF page each label is on, where it's headed, and which CSV row is its courier carton. For a future "stitch labels" tool. |
+| **Label map** | `….labelmap.json`, saved next to the PDF: which PDF page each label (each box) is on, where it's headed, its CSV row and its code (serial + job code, `01T1QWXK`). Stitch Labels uses it to put each courier label on its packing label. |
 | **Comparison key** | A simplified copy of a text value (lower-case, no punctuation, Street = St…) used to decide whether two spellings mean the same thing. |
 | **Service code** | The courier service for a consignment (e.g. `STEROAD · STARTRACK ROAD EXPRESS`), picked from a list. |
 | **Address book** | `data/address_book.db`: every clean delivery address the app has sent, plus the raw Excel spellings that led to each one (**aliases**), so they're filled in automatically next time. |
@@ -839,6 +839,10 @@ The address parts come **before** the store/receiver words, so `Receiver Address
 
 Dimensions: a `Dimension` column wins; otherwise `Width x Height`; otherwise whichever exists.
 
+**Column mapping by hand** (in the Data Previews). The columns found by their header names (`detect_columns()`) can be changed in each tab's preview card, in its **🧭 Column mapping** panel. Fields that have a column are **chips**: **green ✓** when the rules found it, **blue ✎** when it was set by hand, grey ⊘ when set to "Not used". Hovering a chip shows the Excel header it's matched to and that header's cell (`Excel header: "Installer?" · cell H2`); clicking it turns it into the list of columns to pick another. Only the fields **still to map** are listed as rows (field → column → cell, three to a line), the ones Generate needs first and in red. Each list offers *Auto* (what the rules found, or "not found"), *Not used*, and every header in the header row (`header_columns()`, read without loading the sheet); **Auto-map all** resets the tab. The choices go with Update Previews and Generate as `colmap::<tab>::<field>` (a column letter, or `-`), `_column_choices()` reads them and `apply_column_choices()` puts them on top of the found columns, so the preview, the checks and Generate all read the file the same way. When a required column can't be found, the error card says "Pick it in the Column mapping below", with the mapping right there. **They survive a refresh:** the page keeps them in this browser per file name and tab (localStorage, `script.js` section 18), and sends them with the first preview when the same file is scanned again.
+
+**Serials and tab dividers on the labels.** Generate passes each pack's serial (`serials`, e.g. `01T1`) and tab (`tabs`) to `generate_packing_labels()`. The serial goes before the store name on every page of the pack, continuation pages and every box of a multi-box pack included (`01T1. Blue Star Moorabbin`). Between the last label of one tab and the first of the next comes a **divider page** ("DIVIDER - NOT A LABEL", `TAB 2`, the tab's name and its serials `01T2 - 14T2`); there's none before the first tab. Dividers stay in the Complete Labels PDF, without a courier label.
+
 ### 9.3 Pack groups and merged cells
 
 `parse_packing_data(excel_path, header_row, sheet_name)` walks down from `header_row + 1` until the first empty Packing Spec.
@@ -858,6 +862,8 @@ A pack group looks like this:
   'label_no': 1, 'label_total': 1,          # added by assign_label_numbers()
 }
 ```
+
+**Similar addresses** (`similar_addresses()`): two address texts are probably one place written differently when the postcodes match, the street numbers don't contradict (12 vs 14 is another place; a shop number on one side only is fine; Shop 1040 vs Shop 2210 at one address are different shops), and the street and suburb words are close (`12 Smith St` ~ `12 Smith Street` ~ `Shop 1, 12 Smith St` ~ `12 Smyth St`; not `12 Jones St`, not another suburb). A store whose packs give different addresses is a **warning**, not an error ("written differently" when they look like one place, "differs" when they don't). In the consignment table, **one receiver's consignments at different addresses sit next to each other** (`_receiver_groups()` in app.py: the same store or installer name, ignoring capitals, spacing and punctuation, or one small typo apart; across all selected tabs), under a heading that says whether the addresses look like one place written differently or some really differ. Pick the address to **Keep** and **Merge into one**: it goes on all of them as edits (like ✏️) and the preview updates, so they become one consignment. A store's packs at addresses that really differ are a warning too (no longer an error), so they can be sorted out there.
 
 ### 9.4 Comparing text: the two keys
 
@@ -1257,9 +1263,9 @@ Each code type's **weight** and **item type** are set on the page (OB, CS and FP
 | Item Type | the spec's item type from the page |
 | No Items | always 1 (one row per pack) |
 
-### 10.4 The CSV row
+### 10.4 The OpenFreight CSV row
 
-One CSV row per pack, 44 columns matching the courier's import format (UTF-8 with a BOM, like the sample the courier provided):
+Written only when **OpenFreight** is chosen above the project name (see 10.12 for the choice; Open360's layout is in 10.12). One row per pack, 44 columns matching the courier's import format (UTF-8 with a BOM, like the sample the courier provided):
 
 | Column | Value |
 |---|---|
@@ -1269,11 +1275,12 @@ One CSV row per pack, 44 columns matching the courier's import format (UTF-8 wit
 | Authority To Leave Flag | `Y` when the address contained `ATL` |
 | Who Pays, Charge Account | from the page (Who Pays defaults to `S`) |
 | Service Code | the consignment's own pick, or the main Service Code |
-| Weight, Cubic, Item Type, L/W/H | from 10.3 |
+| No Items | the pack's boxes: 2 for `2 x OB170170170`, else 1 |
+| Weight, Cubic, Item Type, L/W/H | from 10.3; Weight and Cubic count every box |
 | Sender Name … Sender Email | blank: the portal uses the account's sender |
-| Reference (last column) | the **item reference**, `Label <X> - <Store>` |
+| Reference (last column) | the label's **Item Reference**, the same as Open360's: `01T1QWXK Store` (serial + the job's code + store, 10.12), so courier labels booked from either file stitch by code |
 
-The **consignment reference** comes from matching `^J\d+` in every job number and taking the most common (`J477161-54` → `J477161`); it's pre-filled and editable. The files are named `<reference> - <project>.csv` and `.labelmap.json`.
+The **consignment reference** is pre-filled from the distro's Job Numbers, strictly **J + 6 digits** at the start (`J477161-54` → `J477161`; the most common one when there are several), and is editable. The files are named `<reference> - <project> - OpenFreight.csv` and `<reference> - <project>.labelmap.json`.
 
 ### 10.5 Address warnings
 
@@ -1320,7 +1327,7 @@ All courier checks (required fields, known service codes) run **before** the pro
 
 ### 10.9 The label map JSON
 
-`<reference> - <project>.labelmap.json`, saved in the project folder for the future **Stitch Labels** tool and never shown in the app:
+`<reference> - <project>.labelmap.json`, saved in the project folder for **Stitch Labels** (10.13) and the address book's bulk update (10.11), never shown in the app:
 
 ```json
 {
@@ -1331,7 +1338,8 @@ All courier checks (required fields, known service codes) run **before** the pro
   "stores": {
     "Provision Clayton": [{
       "item_reference": "Label 1 - Provision Clayton", "label": 1, "of": 1,
-      "pdf_pages": [2], "courier_label_page": 2, "consignment": 2,
+      "open360_item_reference": "01T1QWXK Provision Clayton", "open360_code": "01T1QWXK",
+      "pdf_pages": [2], "courier_label_page": 2, "boxes": 1, "box_pages": [2], "consignment": 2,
       "headed_to": {"receiver": "Wilson Storage", "address": "68 Ricketts Road, ...", "installer": true},
       "csv_row": 3, "excel_rows": [5, 6], "job_numbers": ["J477161-03", "J477161-04"],
       "barcodes": ["J477161-03", "J477161-04 K1"]
@@ -1340,7 +1348,7 @@ All courier checks (required fields, known service codes) run **before** the pro
 }
 ```
 
-The **item reference** is the join key: it's printed on the courier label (the CSV's last column) and it's the key here, which leads to the PDF page and the courier region's position on it (x, y, width, height in mm from the top-left).
+Each pack's **`open360_code`** (serial + the job's code, `01T1QWXK`) is what Stitch Labels reads back off the courier label (it's in the Item Ref printed on it); it leads to the pack, its boxes' pages (`box_pages`, one per box of a `2 x` pack) and the courier region's position on them (x, y, width, height in mm from the top-left). The internal **item reference** (`Label 1 - Provision Clayton`) names the pack inside the app. `files.courier_csvs` lists the courier CSVs written (Open360 and / or OpenFreight).
 
 ### 10.10 The address book
 
@@ -1463,19 +1471,23 @@ So after a portal file confirms an address, the book holds one copy of it per re
 
 ---
 
+**Which courier CSVs** (chosen just above the project name for every job: **Open360**, **OpenFreight** or both; nothing is ticked until the user chooses, and Generate refuses without a choice, in the page and on the server, `script.js` section 19). Generate writes `… - Open360.csv` and / or `… - OpenFreight.csv` (`write_courier_csv()`, the older 44-column layout with Who Pays and Charge Account). **Both carry the same Item References** (`01T1QWXK Store`; OpenFreight's last *Reference* column), worked out once (`open360_item_references()`), so courier labels booked from either portal stitch by code with the same safety. In the OpenFreight CSV the first *Reference* column (the Consignment Reference) is filled only on the first row of each address, blank on the rows repeating it (in file order, across tabs), and a pack of several boxes is *No Items* 2, with the weight and cubic of both boxes. Generate stops if neither is ticked ("Fill in Courier CSV …"). The label map lists the files written (`files.courier_csvs`), and the report's page 1 says which were made.
+
+**A different service per consignment.** Each consignment (delivery address) can have its own service, or "Same as main". Every carton row of it carries that code in either CSV, the label map stores it, each is counted in the usage that orders the service lists, and stitching doesn't depend on it. The report's page 1 lists every service in use with its count (`Service: IPECX x2, BORDERP x1`). Merging one receiver's consignments (9.2's "different addresses" groups) gives the merged one **the service of the address kept**; when their services differed, the group heading says "different services: …" and Merge asks first. Still to confirm with the portal: whether Open360 splits a mix of services under one Shipment Reference as wanted, and whether other carriers' labels print the Item Ref (if not, they're matched by address on the matching page).
+
 ### 10.12 TIG Open360 bulk-upload CSV
 
-TIG's Open360 portal has its own 46-column bulk-upload template (`OPEN360_HEADER` in courier_export.py, copied exactly, including the spaces in front of some names). **Generate writes only `<reference> - <project> - Open360.csv`** as the courier file (the older 44-column courier CSV is no longer written; `write_courier_csv()` stays for older projects). It holds the finalised consignments (`open360_items()` → `write_open360_csv()`). Its **Shipment Reference** is the preview's **Consignment Reference** (one field; there is no separate Shipment Reference field). The label map records the file (`files.open360_csv`), the reference (`open360_shipment_reference`) and each label's `open360_item_reference`. For a project generated before this, `project_open360_items(project_dir)` rebuilds the rows from its courier CSV as last saved plus its label map.
+TIG's Open360 portal has its own 46-column bulk-upload template (`OPEN360_HEADER` in courier_export.py, copied exactly, including the spaces in front of some names). When **Open360** is chosen above the project name, **Generate writes `<reference> - <project> - Open360.csv`** (and the OpenFreight CSV of 10.4 too when that's chosen). It holds the finalised consignments (`open360_items()` → `write_open360_csv()`). Its **Shipment Reference** is the preview's **Consignment Reference** (one field; there is no separate Shipment Reference field). The label map records the file (`files.open360_csv`), the reference (`open360_shipment_reference`) and each label's `open360_item_reference`. For a project generated before this, `project_open360_items(project_dir)` rebuilds the rows from its courier CSV as last saved plus its label map.
 
 The format is locked to the file the portal accepted:
 
 - **One row per packing label, in the distribution file's order.** The portal joins a receiver's rows into one consignment itself: a test upload gave Wilson Storage's 6 cartons as items 1–6 of one consignment.
 - **Shipment Reference** = the reference, on every row.
-- **Item Reference** = `01-QWXK-L-1-Provision Clayton` (`open360_item_references()`):
-  - the row number, zero-padded to the number of rows so sorting the text keeps the file's order (`001` with 100+ rows; `numbering='shipment'` gives `01.1, 01.2 … 02.1` instead)
-  - a **unique code** of capital letters (`unique_codes()`): 4 letters, more once a file has so many rows that a repeat gets likely
-  - `L`, the label number and the store
-  It's printed as "Item Ref" on the courier label. Stitch Labels reads the code back, and the label map stores each label's `open360_item_reference` and `open360_code`.
+- **Item Reference** = `01T1QWXK Provision Clayton` (`open360_item_references()`):
+  - the label's **serial**: its count in its tab, zero-padded within the tab (`01…42`, `001` with 100+ packs), then `T` and the **tab** (`T1` is the first selected tab, `T2` the next one to the right, …). Generate works the serials out for every pack in the distribution file's order, packs left out of the CSV included, and prints the same serial on the packing label (`01T1. Provision Clayton`), so a courier label and its packing label can be checked against each other by eye. A pack left out of the CSV leaves a gap in the CSV's serials.
+  - the **job's code**: one random code of capital letters for the whole Generate (`unique_codes(1)`), the same on every row
+  - a space and the store
+  **Serial + job code (`01T1QWXK`) is the label's unique code**: the label map stores it as `open360_code`, and Stitch Labels reads it back (`find_code()` / `_tab_code()`; the capitals after the serial are tried from the longest down, so a store name the portal runs straight on doesn't get in). The job's code is what keeps labels safe: courier labels booked from another job's CSV, or from an earlier Generate of the same job (whose serials may have shifted), carry another code, so they're never placed on this job's packing labels; they're flagged, with the other project named (`codes_elsewhere()` knows both the full codes and the job codes). Projects generated with a code per label (`01T1QWXK` with QWXK per label) or the older `01-QWXK-L-1-Store` layout are still read. All selected tabs go into the **one** Open360 CSV. Sorting by Item Reference in the portal puts `01T1, 01T2, 02T1 …` together (the serial comes first).
 - **Internal Reference** is kept but empty.
 - **Printing order in the portal:** its sort options sort *shipments*, and it prints a shipment's labels together, last carton first, placing the shipment by its last carton's Item Reference. So labels follow the file's order exactly only when a receiver's cartons are next to each other in the file. Stitch Labels doesn't depend on the order.
 - **Item Quantity** and **Total Items** = the number of boxes on that row: 2 for a Packing Spec `2 X OB170170170` (`split_count()` in packing_specs.py; size and weight are those of one OB170170170), else 1. **Total Weight / Total Volume** = the whole consignment's, counting every box.
@@ -1495,6 +1507,13 @@ The format is locked to the file the portal accepted:
 - **Reported, not placed:** pages with no text (a scan), no Item Ref, or an unknown code, plus the same label twice (the first is used). Packing labels left without a courier label are listed.
 - **A code from another project** (`codes_elsewhere()` reads the other projects' label maps, only when needed) is named: "code of project Lux test 33 (booked from its Open360 CSV)". Every Generate makes new codes, so courier labels booked from one project's CSV don't match another project's packing labels; the report's page 1 sums it up ("42 labels of project Lux test 33: book this job from this project's own Open360 CSV, or match them by hand").
 
+**Packs of several boxes.** A Packing Spec with a count in front (`2 x OB170170170`, `2x OB…`, `2 xOB…`, `2 OB…`, `3 × CS…`; `2OB170170170` only when the rest is a formula code, so `3D Sign` stays one box: `split_count()` in packing_specs.py) is that many boxes. Generate draws **one full set of packing label pages per box**, each with a diagonal see-through **"BOX 1 OF 2"** watermark across the item grid (region C) and a **BOX 1 OF 2** chip beside LABEL / PAGE, so the packers make that many boxes. The Open360 CSV keeps one row for the pack with Item Quantity 2 (the portal prints a courier label per box, all with the same Item Ref code). The label map gives the pack `boxes` and `box_pages` (each box's first page); stitching treats each box as its own place for a courier label (`packing_slots()`, ids like `Label 1 - Store · box 2 of 2`): courier labels with the pack's code fill its boxes in turn, and only one more than the boxes is a duplicate.
+
+**Two steps: match, then stitch** (`plan_stitch()`, then `render_stitch()`). Pressing **🧵 Stitch Labels** reads the text of every courier label page of every PDF at once and matches it (codes, then the matches saved by hand) — nothing is drawn, so it takes a fraction of a second (0.11 s for the 44 real portal labels; 0.06 s for 200 pages). Then:
+- **Everything matches** (every courier label has its packing label, and every packing label that should get one has one): the Complete Labels PDF is drawn straight away and the page shows just **⬇ Download** and **📂 Open file** (opens it in the PDF viewer, `/open_local`).
+- **Something doesn't:** straight to the matching page; nothing is drawn. There, **💾 Save changes** keeps the pairs (`/stitch/<project>/match`, instant) and **✅ Finalise** draws the PDF once (`/stitch/<project>/finalise`, in the background behind an overlay), then offers Download and Open file. Finalise asks first whether courier labels still matching nothing go 4-up at the end or are left out.
+- **One Complete Labels file per project:** a new one replaces the earlier ones (`_remove_old_labels()`); one that's open in a PDF viewer and can't be deleted is named on the page. Adding courier label PDFs on the matching page removes the earlier Complete Labels (they're out of date) and matches again; if everything then matches, it's stitched straight away.
+
 **Placing** (`render_label()`, `place_label()`):
 - The courier label page is rendered as a **lossless 600 dpi grayscale PNG**: a 0.25 mm bar is 6 pixels wide, so Code 128 and QR codes stay scannable. The blank margin is cropped off, so a label in the corner of an A4 sheet isn't shrunk.
 - It's **turned so its text reads upright**, judged from the text's own direction plus the page's rotation flag. So a 4 × 6 label printed sideways on a landscape page comes back the right way up. A genuinely landscape label is then turned a quarter to fit the portrait courier region, instead of shrinking to its width.
@@ -1506,23 +1525,23 @@ The format is locked to the file the portal accepted:
 2. **Every packing label, in the packing labels' own order**, with its courier label where one was found. Matched and unmatched labels aren't grouped, so the pages follow the Packing Labels Only PDF one for one, after the report.
 3. **Courier labels that matched no packing label** (no Item Ref / Item Reference, or a code from another job), if chosen. They're printed 4-up on pages the size of the packing labels, with the same 4 mm margin round each quarter and dashed cut guides, in **cut-and-stack order** (`four_up_order()`). With P pages, the top-left quarters hold labels 1…P, top-right P+1…2P, then bottom-left and bottom-right. Cut the printed stack into quarters and put the piles together top-left, top-right, bottom-left, bottom-right, and the labels are back in file order.
 
-**Courier labels that still match nothing: added or left out?** The Stitch form asks ("Add them 4-up at the end" / "Leave them out"), and so does the matching page when you save with labels still unmatched. The report says which was chosen.
+**Courier labels that still match nothing: added or left out?** Finalise asks ("Add them 4-up at the end" / "Leave them out"). The report says which was chosen.
 
-**Matching by hand** (`/stitch/<project>/match`, [stitch_match.html](../templates/stitch_match.html), `script.js` section 16). After a stitch, **🔗 Match the rest by hand** opens:
+**Matching by hand** (`/stitch/<project>/match`, [stitch_match.html](../templates/stitch_match.html), `script.js` section 16). Opened straight from Stitch when something doesn't match (or **🔗 Continue matching** on the Stitch page). It lists every courier label the codes didn't place, including ones matched by hand before (`match_session()`: they come back as matched pairs, `matched_to`, and can be changed):
 - **Pairs** (top): each courier label sits **side by side** with its packing label (courier thumbnail on the left, click to zoom; packing label on the right), grouped by receiver and address ("N courier labels ↔ M packing labels · K to check"). The images are rendered on demand from the uploaded PDF (`/stitch/<project>/label/<n>.png`), so nothing extra is saved.
-- **Suggested pairs start already paired, to check** (`suggest_pairs()`). Each courier label's text is scored against the waiting consignments' addresses (`address_score()`: postcode, suburb, street numbers and receiver name). The clearly best address wins, and its packing labels are taken in order (Label 1, then Label 2). So an address with as many courier labels as packing labels is paired in order with no clicks. A pair to check has dashed amber boxes, a "suggested %" tag, a **✓** and a **✕**; in a test, all 12 were right.
+- **Suggested pairs start already paired, to check** (`suggest_pairs()`). Each courier label is scored against every waiting packing label (`pair_score()`): the **address printed on it** (`address_score()`: postcode, suburb, street numbers and receiver name) and, when it has an Item Ref, **the store in the Item Ref** (`ref_parts()` reads `42T1LCQK Blue Star Moorabbin`, `01-QWXK-L-1-Store` and `10 Label 2 - Store`; `_store_score()`, a store name the portal ran into the code included). Several stores' packs can go to one address (an installer such as Andrew Dalgleish taking Blue Star's and Eyedentity's packs), and the Item Ref says which store each courier label was booked for. Its serial (`42T1`) or label number (`L-2`, `Label 2`) adds a little, to tell one store's labels apart. Packing labels at one address for one store form a group; the clearly best group wins (by 0.12), and its packing label named by the serial / label number is taken first, else the next in label order. On the real labels of Lux test 36 stitched onto Lux test 37 (booked from the other job's CSV, so no code matches) this took the suggestions from 24 right and 18 wrong to all 42 right. A pair to check has dashed amber boxes, a "suggested %" tag, a **✓** and a **✕**.
 - **Courier cards** show the address printed on the label in **bold** and its **Item Ref in bold red** (the file and page are in the thumbnail's tooltip), with a short reason underneath.
 - **✓ confirms a pair**, where it is: the gap closes and the two boxes join into one green box (a CSS transition, the row changed in place, not re-drawn). The page then scrolls by exactly the distance from the clicked ✓ to the next ✓ to check, so it lands **under the pointer**: click, click, click in one spot. Focus goes to the next ✓ too, so Enter, Enter, … works from the keyboard. (The site sets `scroll-behavior: smooth`, so scrolls meant to be instant say `behavior: 'instant'`.) Hovering over a matched pair shows **↶ Undo**, which puts it back to check (or, for a pair made by hand, sends both labels back to Still to match). Motion is skipped for people who've asked their system for reduced motion.
 - **✓ Match all 100% (N)** (green, in the toolbar and beside the Pairs heading) confirms every suggestion that scored 100% at once, leaving the amber ones that need a look. At (0) it's greyed out, with a tooltip saying why.
 - **Still to match** (below): every courier label with no pair sits beside its **closest packing label still free** ("closest 60%"), with a **✓** to match them and **Other…** to pick a different packing label (closest addresses first, then all the others). `suggest_pairs()` gives each courier label up to 8 `candidates` ([item reference, score], every packing label of a place in label order); two courier labels never show the same packing label. After a ✓ there, the next row's ✓ is kept under the pointer. Packing labels that are nobody's closest are listed under **Other packing labels waiting** (store, "Label X of Y", Packing Spec, receiver and Attn, full address, Installer / Not-in-courier-CSV tags). All packing-label details come from the label map JSON, not from the packing labels PDF.
 - **Pairing by hand:** drag a courier label (from either area) onto any packing label, or click one and then the other; the new pair is matched straight away. A packing label holds one courier label, so dropping onto a paired one swaps it, and the old courier label returns to Still to match. **↺ Suggested pairs** puts back the suggestions whose labels are free; **Clear all pairs** splits everything.
 - **Search** narrows both areas. When the unpaired courier labels and packing labels shown are the same number, **Match these N in order** pairs them all at once (for a receiver the suggestions couldn't place).
-- **Save** sends every pair, matched or still to check, as `{courier page key: item reference}`, keeps it in `stitch_matches.json` and stitches again in a background thread into the next numbered Complete Labels file. A full-page overlay covers the page until it's done (a second click does nothing). The page asks `/stitch/<project>/status?wait=1`, which **waits** (up to 25 s, on a `threading.Event` set when the stitch finishes) before answering, so it's one request per stitch rather than one a second; those requests and the label pictures are also kept out of the terminal log (a filter on the `werkzeug` logger). Then it shows the result with a Download link. Adding courier label PDFs uses the same overlay.
+- **Save changes** sends every pair, matched or still to check, as `{courier page key: slot}`; for the labels on this page they replace what was saved before in `stitch_matches.json` (so a pair undone and saved is dropped). Nothing is stitched. **Finalise** sends them too, then stitches once in a background thread. A full-page overlay covers the page until it's done (a second click does nothing). The page asks `/stitch/<project>/status?wait=1`, which **waits** (up to 25 s, on a `threading.Event` set when the stitch finishes) before answering, so it's one request per stitch rather than one a second; those requests and the label pictures are also kept out of the terminal log (a filter on the `werkzeug` logger). Then it shows the result with a Download link. Adding courier label PDFs uses the same overlay.
 - **Matches are remembered.** A courier page is known by `page_key()`, a hash of its text (or of a small render, for a scanned page), so the same label in a re-downloaded PDF is matched again on the next stitch. What's left after each stitch is kept in `stitch_session.json`.
 
 **File names.**
 - Generate writes **`Packing Labels Only <n> - <job number> - <project> - <yymmdd_HHMM>.pdf`**.
-- Stitching writes **`Complete Labels <n> - <job number> - <project> - <yymmdd_HHMM>.pdf`** (`numbered_name()`), where *n* counts the files of that kind already in the folder, so every stitch keeps the earlier copies. The job number is the Consignment Reference.
+- Stitching writes **`Complete Labels <n> - <job number> - <project> - <yymmdd_HHMM>.pdf`** (`numbered_name()`) and removes the earlier ones, so the folder holds one. The job number is the Consignment Reference.
 - The dashboard and the Stitch page list files **newest first**.
 
 **The packing labels' own report** (page 1 of Packing Labels Only, `_generation_report()` in app.py) shows:
@@ -1538,7 +1557,16 @@ The format is locked to the file the portal accepted:
 
 The label map stores it (`project.report`, `project.report_pages`) and counts its pages in every page number.
 
-### 10.14 The log: what happened, step by step (`app_log.py`)
+**Project names are at most 50 characters** (`PROJECT_NAME_MAX`, `_project_name()` in app.py; `maxlength="50"` on the Distribution Mapper, Label Shuffler and Packing Labels boxes, with a "n / 50 characters" count, `script.js` section 20). The name is in the folder name and in every file name, and Excel can't open a file whose full path is longer than about 218 characters: at 100 characters a job's CSV path was 288 and wouldn't open; at 50 the longest path in a project is 216.
+
+### 10.14 Pages that survive a refresh
+
+Every upload page (Distribution Mapper, Label Shuffler, Packing Labels, Stitch Labels, Address Book update) keeps its place on a refresh:
+- **A page shown after a form post is kept** (`_show()` in app.py): its template and data go into `data/page_views/<id>.json` (kept 2 days) and the browser is sent to a plain GET of it, `?view=<id>` (a 303 redirect). Refreshing reopens the same page (`_kept_view()`) without sending the form again: nothing is uploaded, previewed, generated or stitched twice, and there's no "resend form?" prompt. Each post gets its own id, so pages never overwrite each other. Only full-page form posts do this: the pages' background calls (Save changes, Finalise, adding PDFs, the address and sender lookups, status checks) answer directly as before, and a form sent from a kept page posts normally (the `?view=` is ignored for posts).
+- **An upload isn't deleted by a refresh.** Leaving a page with an upload not yet used still asks for it to be deleted (discard-on-leave), but `_discard_later()` waits `DISCARD_GRACE` (2 minutes): a refresh comes straight back, and a page that shows the upload again cancels the deletion (`_keep()`).
+- **Files picked but not sent yet** (any upload box, `.dropzone-input`) are kept in this browser (IndexedDB, `script.js` section 8b) until the form is sent or the box is cleared, a day at most, and put back in the box after a refresh ("kept from before the refresh").
+
+### 10.15 The log: what happened, step by step (`app_log.py`)
 
 Every step of Packing Labels, the address book, Packing Specs and Stitch Labels writes a line to the log, so a run that went wrong can be traced.
 

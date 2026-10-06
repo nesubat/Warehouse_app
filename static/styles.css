@@ -1555,3 +1555,101 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 /* Packing Labels: what Generate still needs */
 .pl-page .pl-generate-error { background: #fdedec; border: 1px solid #f5b7b1; color: #922b21; border-radius: 6px; padding: 10px 14px; font-weight: 600; margin: 10px 0; }
 .pl-page .pl-missing { border-color: #c0392b !important; box-shadow: 0 0 0 3px rgba(192, 57, 43, .2); }
+
+/* Packing Labels preview: Column mapping, three columns of "field -> header -> cell" */
+.pl-colmap { margin-top: 14px; border: 1px solid #dfe6e9; border-radius: 8px; padding: 10px 12px; background: #fbfcfd; }
+.pl-colmap-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.pl-colmap-note { font-size: 12px; color: #7f8c8d; margin-right: auto; }
+.pl-colmap-empty { font-size: 13px; color: #c0392b; margin: 0 0 8px; }
+.pl-colmap-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 14px; }
+.pl-colmap-item { display: grid; grid-template-columns: 110px 14px minmax(0, 1fr) 44px; align-items: center; gap: 4px; font-size: 12.5px;
+  padding: 3px 6px; border-radius: 6px; }
+.pl-colmap-field { font-weight: 600; color: #2c3e50; }
+.pl-colmap-arrow { color: #95a5a6; text-align: center; }
+.pl-colmap-select { width: 100%; min-width: 0; font-size: 12px; padding: 3px 4px; border: 1px solid #ccd1d1; border-radius: 4px; background: #fff; }
+.pl-colmap-cell { font-family: Consolas, monospace; font-size: 12px; color: #2471a3; text-align: right; }
+.pl-colmap-hand { background: #eaf2fb; }
+.pl-colmap-missing { background: #fdedec; }
+.pl-colmap-missing .pl-colmap-field { color: #c0392b; }
+@media (max-width: 1000px) { .pl-colmap-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .pl-colmap-grid { grid-template-columns: 1fr; } }
+
+/* Consignments that look like one place */
+.pl-similar { border: 1px solid #f5cba7; background: #fef9f3; border-radius: 8px; padding: 10px 14px; margin: 10px 0 14px; }
+.pl-similar-title { margin: 0 0 8px; font-size: 13.5px; }
+.pl-similar-group { border: 1px solid #f0d9c0; border-radius: 6px; padding: 6px 10px 8px; margin: 0 0 8px; background: #fff; }
+.pl-similar-group legend { font-weight: 700; font-size: 13px; padding: 0 4px; }
+.pl-similar-option { display: block; font-size: 13px; margin: 3px 0; cursor: pointer; }
+.pl-similar-merge { margin-top: 6px; }
+
+/* Matching page: Finalise; Stitch page: the finished file */
+.sm-finalise { background: #1e8449; border-color: #1e8449; color: #fff; }
+.sm-finalise:disabled { background: #e8ece9; border-color: #d5dbd7; color: #7f8c8d; }
+.st-done { border: 1px solid #a9dfbf; background: #f2faf5; border-radius: 8px; padding: 12px 16px; }
+.st-file-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.st-open { margin-left: 8px; font-size: 12px; }
+
+/* Consignment table: one receiver's consignments at different addresses, side by side under a heading */
+.pl-page .pl-group-row td { background: #fef5e7; border-top: 2px solid #f0b27a; padding: 8px 10px; }
+.pl-page .pl-group-row.pl-group-differs td { background: #fdedec; border-top-color: #e6b0aa; }
+.pl-page .pl-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.pl-page .pl-group-title { margin-right: auto; }
+.pl-page .pl-group-hint { color: #7f8c8d; }
+.pl-page .pl-group-keep-label { font-size: 12px; font-weight: 600; color: #2c3e50; display: inline-flex; align-items: center; gap: 6px; }
+.pl-page .pl-group-keep { max-width: 360px; font-size: 12px; padding: 4px 6px; border: 1px solid #ccd1d1; border-radius: 4px; background: #fff; }
+.pl-page .pl-con-row.pl-in-group td:first-child { box-shadow: inset 4px 0 0 #f0b27a; }
+
+/* Column mapping, round 2: mapped fields as chips (green = found by the rules, blue = set by hand), only the
+   fields still to map as rows */
+.pl-colmap-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.pl-chip-item { display: inline-flex; align-items: center; }
+.pl-chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 16px; padding: 4px 10px; font-size: 12.5px; cursor: pointer;
+  border: 1.5px solid; background: #fff; line-height: 1.2; }
+.pl-chip:focus-visible { outline: 2px solid #3498db; outline-offset: 2px; }
+.pl-chip-mark { font-weight: 800; }
+.pl-chip-field { font-weight: 700; }
+.pl-chip-cell { font-family: Consolas, monospace; font-size: 11.5px; opacity: .85; }
+.pl-chip-auto .pl-chip { color: #1e8449; border-color: #82c99e; background: #eafaf1; }
+.pl-chip-auto .pl-chip:hover { background: #d5f5e3; }
+.pl-chip-hand .pl-chip { color: #1f5f99; border-color: #85b5e0; background: #eaf2fb; }
+.pl-chip-hand .pl-chip:hover { background: #d6e8f8; }
+.pl-chip-off .pl-chip { color: #7f8c8d; border-color: #ccd1d1; background: #f4f6f6; }
+.pl-chip-off .pl-chip-field { text-decoration: line-through; }
+.pl-chip-none .pl-chip { color: #c0392b; border-color: #e6b0aa; background: #fdedec; }
+.pl-chip-item .pl-colmap-select { width: auto; min-width: 220px; font-size: 12.5px; }
+.pl-colmap-sub { font-size: 12.5px; color: #2c3e50; margin: 4px 0 6px; font-weight: 600; }
+.pl-colmap-need { color: #c0392b; }
+.pl-colmap-done { color: #1e8449; }
+.pl-key { display: inline-block; font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 8px; border: 1px solid; }
+.pl-key-auto { color: #1e8449; border-color: #82c99e; background: #eafaf1; }
+.pl-key-hand { color: #1f5f99; border-color: #85b5e0; background: #eaf2fb; }
+.pl-row-item:not(.pl-colmap-missing) .pl-colmap-field { color: #7f8c8d; }
+
+/* Generate: which courier CSVs to make */
+.pl-page .pl-csv-choice { border: 1px solid #dfe6e9; border-radius: 8px; padding: 8px 14px 10px; margin: 0 0 12px; background: #fbfcfd; }
+.pl-page .pl-csv-choice legend { font-weight: 700; font-size: 14px; color: #2c3e50; padding: 0 6px; }
+.pl-page .pl-csv-choice label { display: block; font-size: 14px; margin: 4px 0; cursor: pointer; }
+.pl-page .pl-csv-choice.pl-missing { border-color: #c0392b; box-shadow: 0 0 0 3px rgba(192, 57, 43, .2); }
+.pl-page .pl-csv-hint { display: block; margin-top: 4px; }
+.pl-page .pl-group-services { margin-left: 8px; font-size: 11.5px; font-weight: 700; color: #9a6700; background: #fef5e7; border: 1px solid #f5cba7; border-radius: 8px; padding: 1px 7px; }
+
+/* Courier CSV choice as toggle buttons: rounded rectangles that light up green when chosen (real checkboxes inside,
+   so the keyboard, the form and the "choose one" check work as before) */
+.pl-page .pl-csv-options { display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 6px; }
+.pl-page .pl-csv-choice label.pl-csv-option { display: inline-flex; margin: 0; position: relative; }
+.pl-page .pl-csv-option input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.pl-page .pl-csv-btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border: 2px solid #ccd1d1; border-radius: 12px;
+  background: #fff; color: #2c3e50; cursor: pointer; transition: background-color .15s, border-color .15s, color .15s, box-shadow .15s; user-select: none; }
+.pl-page .pl-csv-btn strong { font-size: 14.5px; }
+.pl-page .pl-csv-btn small { font-size: 12px; color: #7f8c8d; }
+.pl-page .pl-csv-tick { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid #ccd1d1; color: transparent; font-size: 12px; font-weight: 800; flex: none; }
+.pl-page .pl-csv-btn:hover { border-color: #82c99e; background: #f4fbf7; }
+.pl-page .pl-csv-option input:checked + .pl-csv-btn { background: #1e8449; border-color: #1e8449; color: #fff; box-shadow: 0 2px 8px rgba(30, 132, 73, .3); }
+.pl-page .pl-csv-option input:checked + .pl-csv-btn small { color: #d5f5e3; }
+.pl-page .pl-csv-option input:checked + .pl-csv-btn .pl-csv-tick { background: #fff; border-color: #fff; color: #1e8449; }
+.pl-page .pl-csv-option input:focus-visible + .pl-csv-btn { outline: 3px solid #3498db; outline-offset: 2px; }
+
+/* Project name: characters used of the 50 allowed */
+.name-count { display: block; font-size: 11.5px; color: #7f8c8d; text-align: right; margin-top: 3px; }
+.name-count.name-count-full { color: #c0392b; font-weight: 700; }

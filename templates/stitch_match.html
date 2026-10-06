@@ -26,7 +26,7 @@
 
     <div id="loading-overlay" role="alert" aria-live="assertive">
         <div class="spinner"></div>
-        <div id="loading-text">Saving matches and stitching again…</div>
+        <div id="loading-text">Stitching the Complete Labels…</div>
         <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;" id="loading-sub">Rendering each courier label sharp enough to scan - a large job can take a minute.</p>
     </div>
 
@@ -36,16 +36,19 @@
          data-status-url="{{ url_for('stitch_match_status', project_name=project) }}"
          data-image-url="{{ url_for('stitch_label_image', project_name=project, index=0) }}"
          data-download-url="{{ url_for('download_file', folder_name=project, filename='__FILE__') }}"
-         data-add-url="{{ url_for('stitch_add_pdfs', project_name=project) }}">
+         data-add-url="{{ url_for('stitch_add_pdfs', project_name=project) }}"
+         data-finalise-url="{{ url_for('stitch_finalise', project_name=project) }}"
+         data-open-url="{{ url_for('open_local_file', folder_name=project, filename='__FILE__') }}">
         <h1>🔗 Match Courier Labels</h1>
-        <p class="ab-intro"><strong>{{ job }}</strong> · {{ project_label }}. These courier labels didn't match a packing label by their code. Each is paired with a packing label from the address printed on it, side by side; an address with as many courier labels as packing labels is paired in order. Check each pair: <strong>✓</strong> if it's right (the page moves on to the next one), <strong>✕</strong> if not, or <strong>Match all 100%</strong> for the sure ones. Drag a courier label onto a packing label (or click one, then the other) to pair it yourself. <strong>Save</strong> stitches again in the background into a new Complete Labels file, and remembers these matches for next time.</p>
+        <p class="ab-intro"><strong>{{ job }}</strong> · {{ project_label }}. These courier labels didn't match a packing label by their code. Each is paired with a packing label from the address printed on it, side by side; an address with as many courier labels as packing labels is paired in order. Check each pair: <strong>✓</strong> if it's right (the next one comes under your pointer), <strong>✕</strong> if not, or <strong>Match all 100%</strong> for the sure ones. Labels still to match sit beside their closest packing label, with a ✓ too. <strong>Save changes</strong> keeps the matches (nothing is stitched yet); <strong>Finalise</strong> stitches the Complete Labels PDF once, replacing the earlier one.</p>
 
         <div class="sm-toolbar">
             <input type="search" id="sm-search" class="ab-search" placeholder="Search receiver, suburb, postcode, store, label…" aria-label="Search labels" autocomplete="off">
             <button type="button" class="ab-btn sm-sure-btn" id="sm-sure">✓ Match all 100%</button>
             <button type="button" class="ab-btn ab-btn-plain" id="sm-restore" title="Put back every suggested pair">↺ Suggested pairs</button>
             <button type="button" class="ab-btn ab-btn-plain" id="sm-clear" title="Split every pair">Clear all pairs</button>
-            <button type="button" class="ab-btn" id="sm-save" disabled>Save matches</button>
+            <button type="button" class="ab-btn ab-btn-plain" id="sm-save" disabled title="Keep these matches; nothing is stitched yet">💾 Save changes</button>
+            <button type="button" class="ab-btn sm-finalise" id="sm-finalise" title="Stitch the Complete Labels PDF with these matches">✅ Finalise</button>
             <label class="ab-btn ab-btn-plain sm-add" title="Courier label PDFs downloaded later: stitched in with the ones already used">
                 ➕ Add courier label PDFs<input type="file" id="sm-add-files" accept=".pdf" multiple hidden>
             </label>

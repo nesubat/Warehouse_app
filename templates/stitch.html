@@ -26,59 +26,40 @@
 
     <div id="loading-overlay">
         <div class="spinner"></div>
-        <div id="loading-text">Stitching courier labels…</div>
-        <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;">Rendering each label sharp enough to scan - a large job can take a minute.</p>
+        <div id="loading-text">Reading and matching courier labels…</div>
+        <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;">When everything matches, the labels are stitched straight away - a large job can take a minute.</p>
     </div>
 
     <div class="container ab-page st-page">
         <h1>🧵 Stitch Labels</h1>
-        <p class="ab-intro">Puts each courier label from the courier portal's label PDF onto its packing label, in the courier label region. Each courier label is matched by the unique code in its <strong>Item Ref / Item Reference</strong> (e.g. <code>01-QWXK-L-1-Store</code>), so the order the portal prints them in doesn't matter. The PDF starts with a report, then the packing labels with their courier label, then those without one; courier labels that matched nothing are added 4-up at the end, in cut-and-stack order. Labels are placed as sharp images (600 dpi) so barcodes and QR codes still scan; portrait and landscape labels both fit.</p>
+        <p class="ab-intro">Puts each courier label from the courier portal's label PDF onto its packing label, in the courier label region. Every courier label is read first and matched by the unique code in its <strong>Item Ref / Item Reference</strong> (e.g. <code>01-QWXK-L-1-Store</code>), so the order the portal prints them in doesn't matter; a pack of several boxes (<code>2 x OB170170170</code>) takes one courier label per box. When everything matches, the Complete Labels PDF is made straight away. When something doesn't, you go straight to matching by hand, and the PDF is made once, when you press Finalise. Labels are placed as sharp images (600 dpi) so barcodes and QR codes still scan; portrait and landscape labels both fit.</p>
         <p class="st-project">Project: <strong>{{ project }}</strong></p>
 
         {% if error %}<p class="ps-error-banner" role="alert">{{ error }}</p>{% endif %}
 
         {% if info %}
-        <p class="st-facts">{{ info.packs }} packing label{{ '' if info.packs == 1 else 's' }} with a courier consignment{% if info.with_code %} · {{ info.with_code }} with a unique code{% else %} · <span class="st-warn">no unique codes (generated before codes existed): matching falls back to the Item Ref text</span>{% endif %}{% if info.left_out %} · {{ info.left_out }} not in the courier CSV (no courier label expected){% endif %}</p>
+        <p class="st-facts">{{ info.packs }} packing label{{ '' if info.packs == 1 else 's' }} with a courier consignment{% if info.boxed %} ({{ info.boxed }} pack{{ '' if info.boxed == 1 else 's' }} of several boxes, one label per box){% endif %}{% if info.with_code %} · {{ info.with_code }} with a unique code{% else %} · <span class="st-warn">no unique codes (generated before codes existed): matching falls back to the Item Ref text</span>{% endif %}{% if info.left_out %} · {{ info.left_out }} not in the courier CSV (no courier label expected){% endif %}</p>
 
         {% if report %}
-        <div class="st-result">
-            <h2 class="ps-heading">{{ '✅' if not report.unmatched and not report.without_label else '⚠️' }} {{ report.placed|length }} courier label{{ '' if report.placed|length == 1 else 's' }} placed</h2>
-            <p><a class="ab-btn" href="{{ url_for('download_file', folder_name=project, filename=info.latest) }}">⬇ Download {{ info.latest }}</a>
-               <a class="ab-btn ab-btn-plain" href="{{ url_for('open_local_file', folder_name=project, filename=info.latest) }}">📂 Open</a></p>
-
-            <ul class="st-groups">{% for g in report.groups %}<li>{{ g }}</li>{% endfor %}</ul>
-            {% if report.session.unmatched or report.session.waiting %}
-            <p class="st-match-cta"><a class="ab-btn" href="{{ url_for('stitch_match_page', project_name=project) }}">🔗 Match the rest by hand</a>
-                <span class="ps-hint">{{ report.session.unmatched|length }} courier label{{ '' if report.session.unmatched|length == 1 else 's' }} without a match ·
-                {{ report.session.waiting|length }} packing label{{ '' if report.session.waiting|length == 1 else 's' }} waiting{% if report.session.unmatched|selectattr('suggestion')|list %} · {{ report.session.unmatched|selectattr('suggestion')|list|length }} suggested pairs ready{% endif %}</span></p>
-            {% endif %}
-            {% if report.unmatched %}
-            <h3 class="av-section st-bad">Courier labels that matched no packing label ({{ report.unmatched|length }}) — printed 4-up at the end</h3>
-            <table class="ps-table st-table"><thead><tr><th>File</th><th>Page</th><th>Why</th><th>In the PDF</th></tr></thead><tbody>
-                {% for u in report.unmatched %}<tr><td>{{ u.file }}</td><td>{{ u.page or '—' }}</td><td>{{ u.reason }}</td><td>{{ u.four_up or '—' }}</td></tr>{% endfor %}
-            </tbody></table>
-            {% endif %}
-            {% if report.duplicates %}
-            <h3 class="av-section st-bad">Same label twice ({{ report.duplicates|length }}) — the first one was used</h3>
-            <table class="ps-table st-table"><thead><tr><th>File</th><th>Page</th><th>Item reference</th><th>Used</th></tr></thead><tbody>
-                {% for d in report.duplicates %}<tr><td>{{ d.file }}</td><td>{{ d.page }}</td><td>{{ d.item_reference }}</td><td>{{ d.first }}</td></tr>{% endfor %}
-            </tbody></table>
-            {% endif %}
-            {% if report.without_label %}
-            <h3 class="av-section st-bad">Packing labels without a courier label ({{ report.without_label|length }})</h3>
-            <p class="ps-hint">{{ report.without_label|join(' · ') }}</p>
-            {% endif %}
-
-            <h3 class="av-section">Placed</h3>
-            <table class="ps-table st-table"><thead><tr><th>Courier label</th><th>Packing label</th><th>Page</th><th>Matched by</th><th>Size</th></tr></thead><tbody>
-                {% for p in report.placed %}<tr><td>{{ p.file }} p{{ p.page }}</td><td>{{ p.item_reference }}</td><td>{{ p.packing_page }}</td>
-                    <td>{{ 'code ' ~ p.code if p.code else p.method }}</td><td>{{ p.scale_pct }}%</td></tr>{% endfor %}
-            </tbody></table>
+        {# Everything matched: no details needed, just the file #}
+        <div class="st-result st-done">
+            <h2 class="ps-heading">✅ All {{ report.placed|length }} courier label{{ '' if report.placed|length == 1 else 's' }} placed</h2>
+            <p class="st-file-actions">
+                <a class="ab-btn" href="{{ url_for('download_file', folder_name=project, filename=info.latest) }}">⬇ Download {{ info.latest }}</a>
+                <a class="ab-btn ab-btn-plain btn-file open" href="{{ url_for('open_local_file', folder_name=project, filename=info.latest) }}">📂 Open file</a>
+            </p>
+            {% if report.without_label %}<p class="ps-hint">Without a courier label (not in the courier CSV): {{ report.without_label|join(' · ') }}</p>{% endif %}
+            {% if report.duplicates %}<p class="ps-hint">{{ report.duplicates|length }} courier label{{ '' if report.duplicates|length == 1 else 's' }} came twice; the first was used (page 1 of the PDF lists them).</p>{% endif %}
+            {% if locked %}<p class="ps-hint st-warn">Still open in another program, so not removed: {{ locked|join(', ') }}. Close it and stitch again (or delete it) to keep one Complete Labels file.</p>{% endif %}
         </div>
+        {% elif info.matching %}
+        <p class="st-match-cta"><a class="ab-btn" href="{{ url_for('stitch_match_page', project_name=project) }}">🔗 Continue matching</a>
+            <span class="ps-hint">Some courier labels still need matching by hand. Nothing is stitched until you press Finalise there.</span></p>
         {% endif %}
         {% if info.stitched and not report %}
-        <p class="ps-saved">Stitched before (newest first) — stitching again makes a new numbered file:</p>
-        <ul class="st-list">{% for f in info.stitched %}<li><a href="{{ url_for('download_file', folder_name=project, filename=f) }}">{{ f }}</a></li>{% endfor %}</ul>
+        <p class="ps-saved">Complete Labels in this project:</p>
+        <ul class="st-list">{% for f in info.stitched %}<li><a href="{{ url_for('download_file', folder_name=project, filename=f) }}">{{ f }}</a>
+            <a class="btn-file open st-open" href="{{ url_for('open_local_file', folder_name=project, filename=f) }}">📂 Open</a></li>{% endfor %}</ul>
         {% endif %}
 
         <form method="POST" enctype="multipart/form-data" class="st-form" id="st-form">
@@ -100,12 +81,6 @@
                 {% endfor %}
             </fieldset>
             {% endif %}
-            <fieldset class="st-existing st-choice">
-                <legend>Courier labels that match no packing label</legend>
-                <label><input type="radio" name="unmatched" value="add" checked> Add them 4-up at the end of the PDF (cut-and-stack order)</label>
-                <label><input type="radio" name="unmatched" value="leave"> Leave them out of the PDF</label>
-                <span class="ps-hint">You can still match them by hand afterwards; you'll be asked again when you save.</span>
-            </fieldset>
             <p class="ps-error st-form-error" id="st-form-error" role="alert" hidden>Choose a courier label PDF first: upload one, or tick one already in this project.</p>
             <button type="submit" class="btn-generate" id="st-submit">🧵 Stitch Labels</button>
         </form>

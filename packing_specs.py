@@ -82,14 +82,29 @@ def split_dimensions(digits, count=3):
     return tuple(int(p) for p in best)
 
 
-_COUNT = re.compile(r'^\s*(\d{1,2})\s*[x×*]\s*([a-z].*)$', re.I)
+_COUNT_X = re.compile(r'^\s*(\d{1,2})\s*([x×*])(\s*)([a-z].*)$', re.I)  # '2 x OB…', '2x OB…', '2 xOB…', '2xOB…'
+_COUNT_SPACE = re.compile(r'^\s*(\d{1,2})\s+([a-z].*)$', re.I)        # '2 OB…', '2 A4 Box'
+_COUNT_JOINED = re.compile(r'^\s*(\d{1,2})([a-z].*)$', re.I)          # '2OB170170170'
 
 
 def split_count(spec):
-    """'2 X OB170170170' -> (2, 'OB170170170'): a box count written in front of the spec. Anything else -> (1, spec).
-    The spec after the count must start with a letter, so '420 x 296' stays a size."""
-    m = _COUNT.match(str(spec or ''))
-    return (int(m.group(1)), m.group(2).strip()) if m and int(m.group(1)) > 0 else (1, str(spec or '').strip())
+    """(boxes, spec): a box count written in front of the Packing Spec means that many boxes, each with its own
+    packing label. '2 X OB170170170', '2x OB170170170', '2 xOB170170170', '2 OB170170170' -> (2, 'OB170170170').
+    A count run straight into the spec ('2OB170170170') counts only when the rest is a formula code (OB, CS,
+    PALLET, FP), so a name like '3D Sign' stays one box. With an x, the spec after it must start a new word or be a
+    formula code, so '2 XL Box' is 2 of 'XL Box', not 2 of 'L Box'. The spec must start with a letter, so
+    '420 x 296' stays a size. Anything else -> (1, spec)."""
+    text = str(spec or '').strip()
+    m = _COUNT_X.match(text)
+    if m and int(m.group(1)) > 0 and (m.group(3) or m.group(2) in '×*' or parse_formula(m.group(4))):
+        return int(m.group(1)), m.group(4).strip()
+    m = _COUNT_SPACE.match(text)
+    if m and int(m.group(1)) > 0:
+        return int(m.group(1)), m.group(2).strip()
+    m = _COUNT_JOINED.match(text)
+    if m and int(m.group(1)) > 0 and parse_formula(m.group(2)):
+        return int(m.group(1)), m.group(2).strip()
+    return 1, text
 
 
 def parse_formula(spec, fp_third_size=None):

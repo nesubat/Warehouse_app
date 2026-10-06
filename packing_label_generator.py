@@ -202,6 +202,69 @@ def _header_field(header):
     return None
 
 
+# The columns the preview's Column mapping can set by hand: (field, label, required)
+MAPPABLE_FIELDS = (
+    ('packing_spec', 'Packing Spec', True), ('job_no', 'Job Number', True), ('install', 'Install', True),
+    ('store_name', 'Store / Receiver', False), ('qty', 'Quantity', False), ('desc', 'Description', False),
+    ('thumbnail', 'Thumbnail', False), ('dim_combined', 'Dimensions', False), ('dim_w', 'Width', False),
+    ('dim_h', 'Height', False), ('address_1', 'Address Line 1', False), ('address_2', 'Address Line 2', False),
+    ('suburb', 'Suburb', False), ('state', 'State', False), ('postcode', 'Postcode', False),
+    ('country', 'Country', False), ('material', 'Material', False), ('notes', 'Notes', False),
+)
+
+
+def detect_columns(headers):
+    """{field: column number} from the header row's cells [(column number, text)], by their names (_header_field).
+    A later matching column wins, but a 'Store'/'Retailer' column beats a 'Receiver'-type one."""
+    cols = {}
+    for col_idx, val in headers:
+        if not val:
+            continue
+        field = _header_field(str(val))
+        if not field:
+            continue
+        is_store = field == 'store_name' and ('store' in str(val).lower() or 'retailer' in str(val).lower())
+        if field == 'store_name' and not is_store and cols.get('_store_is_named'):
+            continue
+        cols[field] = col_idx
+        if is_store:
+            cols['_store_is_named'] = True
+    cols.pop('_store_is_named', None)
+    return cols
+
+
+def apply_column_choices(cols, choices):
+    """The auto-detected columns with the ones set by hand in the preview on top. choices: {field: column letter},
+    '-' for "not used", '' (or missing) for automatic."""
+    cols = dict(cols)
+    known = {f for f, _, _ in MAPPABLE_FIELDS}
+    for field, letter in (choices or {}).items():
+        letter = str(letter or '').strip().upper()
+        if field not in known or not letter:
+            continue
+        if letter == '-':
+            cols.pop(field, None)
+            continue
+        try:
+            cols[field] = column_index_from_string(letter)
+        except ValueError:
+            pass
+    return cols
+
+
+def header_columns(excel_path, header_row, sheet_name=None):
+    """The header row's cells for the preview's Column mapping: [(column letter, header text)], empty cells left
+    out. Read without loading the whole sheet."""
+    wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+    try:
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        row = next(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True), ()) if header_row >= 1 else ()
+        return [(get_column_letter(i), " ".join(str(v).split())) for i, v in enumerate(row, start=1)
+                if v is not None and str(v).strip()]
+    finally:
+        wb.close()
+
+
 class PackCheckError(ValueError):
     """Blocking problems found in the sheet; carries the structured issues for the preview table."""
     def __init__(self, issues, warnings):
@@ -239,6 +302,35 @@ def _address_key(text):
         STREET_TYPES.get(w, w) if i and words[i - 1].isalpha() else w
         for i, w in enumerate(words)
     )
+
+
+STATE_WORDS = {'vic', 'nsw', 'qld', 'sa', 'wa', 'tas', 'nt', 'act', 'victoria', 'queensland', 'tasmania', 'australia', 'au'}
+UNIT_WORDS = {'shop', 'unit', 'level', 'lvl', 'suite', 'lot', 'tenancy', 'kiosk', 'store', 'building', 'bldg', 'floor'}
+
+
+def similar_addresses(a, b):
+    """True when two address texts are probably one place spelled differently: '12 Smith St, Richmond VIC 3121' ~
+    '12 Smith Street Richmond 3121' ~ 'Shop 1, 12 Smith St, Richmond' ~ '12 Smyth St, Richmond VIC 3121'.
+    The postcodes must match (when both have one), the street numbers mustn't contradict (12 vs 14 is another
+    place; a shop number on one side only is fine), and the street and suburb words must be close (a typo or
+    two is fine, 'Smith' vs 'Jones' isn't)."""
+    from difflib import SequenceMatcher
+    def parts(text):
+        words = _address_key(text).split()
+        postcode = next((w for w in reversed(words) if re.fullmatch(r'\d{4}', w)), '')
+        numbers = {w for w in words if any(ch.isdigit() for ch in w) and w != postcode}
+        names = [w for w in words if w.isalpha() and w not in STATE_WORDS and w not in UNIT_WORDS
+                 and w not in STREET_TYPES.values()]
+        return postcode, numbers, " ".join(names)
+    pa, na, wa = parts(a)
+    pb, nb, wb = parts(b)
+    if pa and pb and pa != pb:
+        return False
+    if (na - nb) and (nb - na):
+        return False  # each has a number the other lacks: another street number or another shop
+    if not wa or not wb:
+        return False
+    return wa == wb or SequenceMatcher(None, wa, wb).ratio() >= 0.8
 
 
 def _distinct(rows, key):
@@ -321,8 +413,13 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
                     name = group[0]['store']
                     if install:
                         warnings.append(_issue(rows_text, col['address'], f"{name}: installer addresses differ", _variants(group, 'address_key', 'address')))
+                    elif all(similar_addresses(group[0]['address'], r['address']) for r in group[1:]):
+                        # The same place written differently: the consignment table offers to merge them into one
+                        warnings.append(_issue(rows_text, col['address'], f"{name}: store address written differently between packs "
+                                               f"- merge them into one in the consignment table", _variants(group, 'address_key', 'address')))
                     else:
-                        errors.append(_issue(rows_text, col['address'], f"{name}: store address differs between packs", _variants(group, 'address_key', 'address')))
+                        warnings.append(_issue(rows_text, col['address'], f"{name}: store address differs between packs - they're side by "
+                                               f"side in the consignment table: merge them there if they're one place", _variants(group, 'address_key', 'address')))
 
     # Neighbouring packs with the same spec and store usually mean the Packing Spec cells weren't merged.
     # No store column: the address (which then names the receiver) stands in for the store.
@@ -337,7 +434,9 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
     return errors, warnings
 
 
-def parse_packing_data(excel_path, header_row, sheet_name=None):
+def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
+    """columns: the preview's Column mapping, {field: column letter or '-'} on top of the columns found by their
+    header names (apply_column_choices)."""
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
     
@@ -369,21 +468,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
         except Exception:
             continue
 
-    cols = {}
-    for col_idx in range(1, ws.max_column + 1):
-        val = ws.cell(row=header_row, column=col_idx).value
-        if not val: continue
-        field = _header_field(str(val))
-        if not field:
-            continue
-        # As before, a later matching column wins; but a 'Store'/'Retailer' column beats a 'Receiver'-type one
-        is_store = field == 'store_name' and ('store' in str(val).lower() or 'retailer' in str(val).lower())
-        if field == 'store_name' and not is_store and cols.get('_store_is_named'):
-            continue
-        cols[field] = col_idx
-        if is_store:
-            cols['_store_is_named'] = True
-    cols.pop('_store_is_named', None)
+    cols = apply_column_choices(
+        detect_columns([(i, ws.cell(row=header_row, column=i).value) for i in range(1, ws.max_column + 1)]), columns)
 
     found_headers = {
         'Packing Spec': 'packing_spec' in cols,
@@ -400,11 +486,11 @@ def parse_packing_data(excel_path, header_row, sheet_name=None):
     }
 
     if 'packing_spec' not in cols:
-        raise ValueError(f"Could not find a 'Packing Spec' column in Row {header_row}.")
+        raise ValueError(f"Could not find a 'Packing Spec' column in Row {header_row}. Pick it in the Column mapping below.")
     if 'job_no' not in cols:
-        raise ValueError(f"Could not find a 'Job Number' column in Row {header_row}.")
+        raise ValueError(f"Could not find a 'Job Number' column in Row {header_row}. Pick it in the Column mapping below.")
     if 'install' not in cols:
-        raise ValueError(f"Could not find an 'Install' column in Row {header_row}. Add one: Y for packs going to an installer, N or blank for the store.")
+        raise ValueError(f"Could not find an 'Install' column in Row {header_row}. Pick it in the Column mapping below, or add one: Y for packs going to an installer, N or blank for the store.")
 
     def get_cell_info(row, col):
         for merged_range in ws.merged_cells.ranges:
@@ -863,7 +949,7 @@ def draw_report_pages(doc, report, at=0):
 
 
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
-                            report=None):
+                            report=None, serials=None, tabs=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
 
     addresses: {pack_key: {'address', 'receiver', 'contact', 'sent'}} as finalised in the consignment preview
@@ -871,7 +957,15 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     "Installer: <receiver> · Attn <contact>" line; any other pack whose
     receiver isn't the store (or has an Attn) gets "Deliver to: …". A pack left out of the courier CSV
     (sent=False) says so in the courier label region. A pack missing from addresses shows its Excel address.
-    report: the job report (draw_report_pages) put in front as page 1; the page numbers returned count it."""
+    report: the job report (draw_report_pages) put in front as page 1; the page numbers returned count it.
+    A Packing Spec with a box count in front ('2 x OB170170170', packing_specs.split_count) gets one full set of
+    pages per box, each with a diagonal "BOX 1 OF 2" watermark over the item grid (region C) and a box chip, so the
+    packers make that many boxes and each box gets its own courier label. 'copies' in the result lists each box's
+    pages: {pack_key: [[pages of box 1], [pages of box 2], ...]}.
+    serials: {pack_key: '01T1'}, the label's serial in its tab, written before the store name ('01T1. Blue Star
+    Moorabbin') on every page of the pack. tabs: {pack_key: (tab number, tab name)}; a divider page goes between
+    the labels of one tab and the next (none before the first tab)."""
+    from packing_specs import split_count
     addresses = addresses or {}
     doc = fitz.open()
     MM2PT = 2.83465
@@ -898,12 +992,53 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
 
     assign_label_numbers(pack_groups)
     assign_barcodes(pack_groups)
-    page_map = {}
+    page_map, copies = {}, {}
+    serials, tabs = serials or {}, tabs or {}
+
+    def divider(tab_no, tab_name):
+        """A page between two tabs' labels: the tab, its name and the serials that follow. Not a label."""
+        keys = [k for k in pack_groups if tabs.get(k, (None,))[0] == tab_no]
+        first, last = serials.get(keys[0], ''), serials.get(keys[-1], '')
+        page = doc.new_page(width=A4_W, height=A4_H)
+        frame = fitz.Rect(MARGIN * 3, MARGIN * 3, A4_W - MARGIN * 3, A4_H - MARGIN * 3)
+        page.draw_rect(frame, color=(0.2, 0.2, 0.2), width=1.5, dashes="[8 6] 0")
+        page.insert_text((frame.x0 + 16, frame.y0 + 28), "DIVIDER - NOT A LABEL", fontname="hebo", fontsize=12, color=(0.45, 0.45, 0.45))
+        lines = [(f"TAB {tab_no}", 120, (0, 0, 0)), (_latin(tab_name or ''), 40, (0.15, 0.15, 0.15)),
+                 (f"Labels {first} - {last}  ·  {len(keys)} pack{'s' if len(keys) != 1 else ''}" if first else '', 20, (0.3, 0.3, 0.3))]
+        y = frame.y0 + frame.height * 0.42
+        for text, size, colour in lines:
+            if not text:
+                continue
+            width = fitz.get_text_length(text, fontname="hebo", fontsize=size)
+            page.insert_text(((A4_W - width) / 2, y), text, fontname="hebo", fontsize=size, color=colour)
+            y += size * 1.25
+        return page
+
+    previous_tab = None
+
+    def watermark(page, area, box, boxes, spec):
+        """'BOX 1 OF 2' written diagonally across the item grid, see-through, so the cells stay readable."""
+        angle = math.degrees(math.atan2(area.height, area.width))
+        centre = fitz.Point((area.x0 + area.x1) / 2, (area.y0 + area.y1) / 2)
+        lines = ((f"BOX {box} OF {boxes}", min(96, area.width / 6.2)),
+                 (f"{boxes} BOXES: {spec} - ONE LABEL PER BOX", min(22, area.width / 30)))
+        for n, (text, size) in enumerate(lines):
+            width = fitz.get_text_length(text, fontname="hebo", fontsize=size)
+            # Both lines centred on the grid's centre along the diagonal, the second under the first
+            start = fitz.Point(centre.x - width / 2, centre.y + lines[0][1] * 0.35 + (0 if n == 0 else size * 1.9))
+            page.insert_text(start, text, fontname="hebo", fontsize=size, color=(0.78, 0.08, 0.08),
+                             fill_opacity=0.22, morph=(centre, fitz.Matrix(-angle)), overlay=True)
 
     for pack_key, group_data in pack_groups.items():
+        tab_no, tab_name = tabs.get(pack_key, (None, ''))
+        if tab_no is not None and previous_tab is not None and tab_no != previous_tab:
+            divider(tab_no, tab_name)
+        previous_tab = tab_no if tab_no is not None else previous_tab
         items = group_data['items']
         total_items = len(items)
         store = group_data['store_name']
+        # '01T1. Blue Star Moorabbin': the label's serial in its tab before the name, on every page of the pack
+        shown_name = f"{serials[pack_key]}. {store}" if serials.get(pack_key) else store
         spec = group_data.get('pack_spec_name', '')
         label_text = f"LABEL {group_data['label_no']} OF {group_data['label_total']}"
         info = addresses.get(pack_key) or {}
@@ -913,92 +1048,106 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         first_page = len(doc)
 
         total_pages = 1 if total_items <= FIRST_PAGE_CELLS else 1 + math.ceil((total_items - FIRST_PAGE_CELLS) / NEXT_PAGE_CELLS)
-        current_item_idx = 0
-        page_num = 1
+        boxes, one_box_spec = split_count(spec)
+        copies[pack_key] = []
+        for box in range(1, boxes + 1):
+            box_first_page = len(doc)
+            current_item_idx = 0
+            page_num = 1
 
-        while current_item_idx < total_items or (total_items == 0 and page_num == 1):
-            page = doc.new_page(width=A4_W, height=A4_H)
-            page_text = f"PAGE {page_num} OF {total_pages}"
+            while current_item_idx < total_items or (total_items == 0 and page_num == 1):
+                page = doc.new_page(width=A4_W, height=A4_H)
+                page_text = f"PAGE {page_num} OF {total_pages}"
 
-            if page_num == 1:
-                zone_a_rect = fitz.Rect(MARGIN, MARGIN, MARGIN + ZONE_A_W, MARGIN + ZONE_A_H)
-                page.draw_rect(zone_a_rect, color=(0.8, 0.8, 0.8), width=0.5, dashes="[3] 0")
-                if info.get('sent', True):
-                    page.insert_textbox(zone_a_rect, "Courier Label Region\n(107mm x 150mm)", fontsize=10, color=(0.6, 0.6, 0.6), align=1)
+                if page_num == 1:
+                    zone_a_rect = fitz.Rect(MARGIN, MARGIN, MARGIN + ZONE_A_W, MARGIN + ZONE_A_H)
+                    page.draw_rect(zone_a_rect, color=(0.8, 0.8, 0.8), width=0.5, dashes="[3] 0")
+                    if info.get('sent', True):
+                        page.insert_textbox(zone_a_rect, "Courier Label Region\n(107mm x 150mm)", fontsize=10, color=(0.6, 0.6, 0.6), align=1)
+                    else:
+                        # Left out of the courier CSV: no courier label will come for this box
+                        note = fitz.Rect(zone_a_rect.x0 + 10, zone_a_rect.y0 + zone_a_rect.height / 2 - 30, zone_a_rect.x1 - 10, zone_a_rect.y1)
+                        page.insert_textbox(note, "NOT IN COURIER CSV\nAddress incomplete: no courier label for this box",
+                                            fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
+
+                    zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
+                    y = _spec_panel(page, zone_b, spec) + 8
+
+                    if store and store.lower() != 'none':
+                        for line in _wrap(shown_name, "hebo", 13, zone_b.width)[:2]:
+                            page.insert_text((zone_b.x0, y + 12), line, fontname="hebo", fontsize=13)
+                            y += 13 * LINE
+
+                    # Who it's really going to, when that isn't the store itself (installers, Attn names)
+                    receiver, contact = _clean(info.get('receiver')), _clean(info.get('contact'))
+                    if installer or (receiver and _norm(receiver) != _norm(store)) or contact:
+                        to = ("Installer: " if installer else "Deliver to: ") + (receiver or store or '')
+                        to += f" · Attn {contact}" if contact else ''
+                        for line in _wrap(to, "hebo", 9.5, zone_b.width)[:2]:
+                            page.insert_text((zone_b.x0, y + 9.5), line, fontname="hebo", fontsize=9.5,
+                                             color=(0.75, 0.1, 0.1) if installer else (0, 0, 0))
+                            y += 9.5 * LINE
+
+                    address = info.get('address')
+                    if not address:
+                        addr_parts = [_clean(group_data.get(k)) for k in ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')]
+                        address = ", ".join(p for p in addr_parts if p)
+                    if address:
+                        address_lines = _wrap(address, "helv", 9, zone_b.width)
+                        room = int((zone_b.y1 - CHIP_H - 4 - y) // (9 * LINE))
+                        for line in address_lines[:max(0, min(3, room))]:
+                            page.insert_text((zone_b.x0, y + 9), line, fontname="helv", fontsize=9)
+                            y += 9 * LINE
+
+                    chip_y = zone_b.y1 - (11 * LINE + 8)
+                    chip = _counter_chip(page, zone_b.x0, chip_y, label_text)
+                    chip = _counter_chip(page, chip.x1 + 6, chip_y, page_text)
+                    if boxes > 1:
+                        _counter_chip(page, chip.x1 + 6, chip_y, f"BOX {box} OF {boxes}")
+
+                    grid_x0 = zone_a_rect.x1 + GAP
+                    cols = FIRST_COLS
                 else:
-                    # Left out of the courier CSV: no courier label will come for this box
-                    note = fitz.Rect(zone_a_rect.x0 + 10, zone_a_rect.y0 + zone_a_rect.height / 2 - 30, zone_a_rect.x1 - 10, zone_a_rect.y1)
-                    page.insert_textbox(note, "NOT IN COURIER CSV\nAddress incomplete: no courier label for this box",
-                                        fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
+                    footer_y = A4_H - MARGIN - CHIP_H
+                    x = MARGIN
+                    if store and store.lower() != 'none':
+                        page.insert_text((x, footer_y + 4 + 12 * 0.92), shown_name, fontname="hebo", fontsize=12)
+                        x += fitz.get_text_length(shown_name, fontname="hebo", fontsize=12) + 10
+                    chip = _counter_chip(page, x, footer_y, label_text)
+                    chip = _counter_chip(page, chip.x1 + 6, footer_y, page_text)
+                    if boxes > 1:
+                        _counter_chip(page, chip.x1 + 6, footer_y, f"BOX {box} OF {boxes}")
 
-                zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
-                y = _spec_panel(page, zone_b, spec) + 8
-
-                if store and store.lower() != 'none':
-                    for line in _wrap(store, "hebo", 13, zone_b.width)[:2]:
-                        page.insert_text((zone_b.x0, y + 12), line, fontname="hebo", fontsize=13)
-                        y += 13 * LINE
-
-                # Who it's really going to, when that isn't the store itself (installers, Attn names)
-                receiver, contact = _clean(info.get('receiver')), _clean(info.get('contact'))
-                if installer or (receiver and _norm(receiver) != _norm(store)) or contact:
-                    to = ("Installer: " if installer else "Deliver to: ") + (receiver or store or '')
-                    to += f" · Attn {contact}" if contact else ''
-                    for line in _wrap(to, "hebo", 9.5, zone_b.width)[:2]:
-                        page.insert_text((zone_b.x0, y + 9.5), line, fontname="hebo", fontsize=9.5,
-                                         color=(0.75, 0.1, 0.1) if installer else (0, 0, 0))
-                        y += 9.5 * LINE
-
-                address = info.get('address')
-                if not address:
-                    addr_parts = [_clean(group_data.get(k)) for k in ('address_1', 'address_2', 'suburb', 'state', 'postcode', 'country')]
-                    address = ", ".join(p for p in addr_parts if p)
-                if address:
-                    address_lines = _wrap(address, "helv", 9, zone_b.width)
-                    room = int((zone_b.y1 - CHIP_H - 4 - y) // (9 * LINE))
-                    for line in address_lines[:max(0, min(3, room))]:
-                        page.insert_text((zone_b.x0, y + 9), line, fontname="helv", fontsize=9)
-                        y += 9 * LINE
-
-                chip_y = zone_b.y1 - (11 * LINE + 8)
-                chip = _counter_chip(page, zone_b.x0, chip_y, label_text)
-                _counter_chip(page, chip.x1 + 6, chip_y, page_text)
-
-                grid_x0 = zone_a_rect.x1 + GAP
-                cols = FIRST_COLS
-            else:
-                footer_y = A4_H - MARGIN - CHIP_H
-                x = MARGIN
-                if store and store.lower() != 'none':
-                    page.insert_text((x, footer_y + 4 + 12 * 0.92), store, fontname="hebo", fontsize=12)
-                    x += fitz.get_text_length(store, fontname="hebo", fontsize=12) + 10
-                chip = _counter_chip(page, x, footer_y, label_text)
-                _counter_chip(page, chip.x1 + 6, footer_y, page_text)
-
-                grid_x0 = MARGIN
-                cols = NEXT_COLS
+                    grid_x0 = MARGIN
+                    cols = NEXT_COLS
 
 
-            for r in range(ROWS):
-                for c in range(cols):
-                    if current_item_idx >= total_items: break
-                    cx0 = grid_x0 + c * (CELL_W + GAP)
-                    cy0 = MARGIN + r * (CELL_H + GAP)
-                    cell = fitz.Rect(cx0, cy0, cx0 + CELL_W, cy0 + CELL_H)
-                    _round_rect(page, cell, CELL_RADIUS, color=(0, 0, 0), width=0.75)
-                    _draw_cell(page, items[current_item_idx], attribute_order, cell)
-                    current_item_idx += 1
-            page_num += 1
-            if total_items == 0: break
+                for r in range(ROWS):
+                    for c in range(cols):
+                        if current_item_idx >= total_items: break
+                        cx0 = grid_x0 + c * (CELL_W + GAP)
+                        cy0 = MARGIN + r * (CELL_H + GAP)
+                        cell = fitz.Rect(cx0, cy0, cx0 + CELL_W, cy0 + CELL_H)
+                        _round_rect(page, cell, CELL_RADIUS, color=(0, 0, 0), width=0.75)
+                        _draw_cell(page, items[current_item_idx], attribute_order, cell)
+                        current_item_idx += 1
+                if boxes > 1:  # region C: the item grid, right of the courier region on page 1, above the footer after
+                    grid = fitz.Rect(grid_x0, MARGIN, A4_W - MARGIN, A4_H - MARGIN - (0 if page_num == 1 else CHIP_H + GAP))
+                    watermark(page, grid, box, boxes, one_box_spec)
+                page_num += 1
+                if total_items == 0: break
+            copies[pack_key].append(list(range(box_first_page, len(doc))))
         page_map[pack_key] = list(range(first_page, len(doc)))
 
     report_pages = draw_report_pages(doc, report, at=0) if report else 0
     if report_pages:
         page_map = {k: [p + report_pages for p in v] for k, v in page_map.items()}
+        copies = {k: [[p + report_pages for p in box] for box in v] for k, v in copies.items()}
     doc.save(output_pdf_path)
     doc.close()
     return {
         'pages': page_map,
+        'copies': copies,
         'report_pages': report_pages,
         'page_size_mm': [round(A4_W / MM2PT, 1), round(A4_H / MM2PT, 1)],
         'courier_region_mm': {'x': round(MARGIN / MM2PT, 1), 'y': round(MARGIN / MM2PT, 1),

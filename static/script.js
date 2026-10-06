@@ -477,10 +477,32 @@ document.addEventListener("DOMContentLoaded", function() {
     // browser's native drag/drop-onto-input behavior already works. This just
     // adds the hover highlight, the "selected file" label underneath, and a
     // "Clear" button (shown once a file is picked) that empties the input.
+    // Files picked in an upload box survive a refresh: kept in this browser (IndexedDB) until the form is sent or
+    // the box is cleared (a day at most), and put back in the box when the page opens again.
+    const pickedFiles = (() => {
+        const db = () => new Promise((resolve, reject) => {
+            const req = indexedDB.open('warehouse-picked-files', 1);
+            req.onupgradeneeded = () => req.result.createObjectStore('files');
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+        const run = async (mode, work) => {
+            const store = (await db()).transaction('files', mode).objectStore('files');
+            return new Promise((resolve, reject) => { const req = work(store); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+        };
+        const safe = (p) => p.catch(() => undefined);  // private window / storage blocked: just don't keep them
+        return {
+            get: (key) => safe(run('readonly', (s) => s.get(key))),
+            set: (key, files) => safe(run('readwrite', (s) => s.put({ saved: Date.now(), files }, key))),
+            drop: (key) => safe(run('readwrite', (s) => s.delete(key))),
+        };
+    })();
+
     document.querySelectorAll('.dropzone').forEach(function(zone) {
         const input = zone.querySelector('.dropzone-input');
         const filenameEl = zone.querySelector('.dropzone-filename');
         if (!input) return;
+        const keepKey = `${location.pathname}|${input.name}`;
 
         const clearBtn = document.createElement('button');
         clearBtn.type = 'button';
@@ -518,11 +540,28 @@ document.addEventListener("DOMContentLoaded", function() {
             input.files = all.files;
         }
 
-        input.addEventListener('change', () => { keepAdding(); showFilename(); });
+        input.addEventListener('change', () => {
+            keepAdding(); showFilename();
+            if (input.files.length) pickedFiles.set(keepKey, [...input.files]); else pickedFiles.drop(keepKey);
+        });
         input.addEventListener('dragenter', () => zone.classList.add('dropzone-active'));
         input.addEventListener('dragleave', () => zone.classList.remove('dropzone-active'));
         input.addEventListener('drop', () => zone.classList.remove('dropzone-active'));
+        // Sent: nothing to keep (a check that stops the form runs first and leaves them kept)
+        if (input.form) input.form.addEventListener('submit', () => pickedFiles.drop(keepKey));
         showFilename();
+        // Picked before a refresh: put them back
+        if (!input.files.length) {
+            pickedFiles.get(keepKey).then((kept) => {
+                if (!kept || input.files.length || Date.now() - kept.saved > 86400000 || !(kept.files || []).length) return;
+                const all = new DataTransfer();
+                kept.files.forEach((f) => all.items.add(f));
+                input.files = all.files;
+                chosen = [...kept.files];
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                if (filenameEl) filenameEl.textContent += ' (kept from before the refresh)';
+            });
+        }
     });
 
     // =========================================
@@ -767,6 +806,10 @@ document.addEventListener('DOMContentLoaded', function () {
             row.hidden = !visible;
             if (!visible) row.nextElementSibling.hidden = true;
             if (visible) shown += 1;
+        });
+        // A group's heading goes with its rows
+        document.querySelectorAll('.pl-group-row').forEach((g) => {
+            g.hidden = rows.filter((r) => r.dataset.group === g.dataset.group).every((r) => r.hidden);
         });
         countLabel.textContent = shown === rows.length ? `${rows.length} consignments` : `Showing ${shown} of ${rows.length}`;
         applyBtn.textContent = shown === rows.length ? 'Apply to all' : `Apply to ${shown} shown`;
@@ -1200,6 +1243,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const packList = document.getElementById('sm-packs');
     const search = document.getElementById('sm-search');
     const saveBtn = document.getElementById('sm-save');
+    const finaliseBtn = document.getElementById('sm-finalise');
     const sureBtn = document.getElementById('sm-sure');
     const overlay = document.getElementById('loading-overlay');
     const status = document.getElementById('sm-status');
@@ -1228,8 +1272,8 @@ document.addEventListener('DOMContentLoaded', function () {
     let renderTimer = null;
 
     const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-    const packName = (w) => `${w.store} · Label ${w.label} of ${w.of}`;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : (/(s|x|ch|sh)$/.test(word) ? 'es' : 's')}`;
+    const packName = (w) => `${w.store} · Label ${w.label} of ${w.of}${w.boxes > 1 ? ` · box ${w.box} of ${w.boxes}` : ''}`;
     const courierOf = (ref) => Object.keys(pairs).find((k) => pairs[k] === ref);
     const say = (text, bad) => { status.textContent = text; status.classList.toggle('sm-status-bad', !!bad); };
     const placeKey = (w) => (w.not_in_csv ? 'none' : String(w.consignment));
@@ -1543,8 +1587,10 @@ document.addEventListener('DOMContentLoaded', function () {
             b.title = sures ? `Match the ${plural(sures, 'pair')} whose courier label address matched the packing label 100%`
                             : 'No pair to check matched 100% — check the amber ones with ✓ or ✕';
         });
-        saveBtn.disabled = (!n && !session.unmatched.length) || root.dataset.running === '1';
-        saveBtn.textContent = n ? `Save ${n} match${n === 1 ? '' : 'es'}` : (finished ? 'Saved' : 'Finish without matching');
+        saveBtn.disabled = finished || !session.unmatched.length || root.dataset.running === '1';
+        saveBtn.textContent = saved ? '💾 Saved' : `💾 Save changes (${plural(n, 'pair')})`;
+        finaliseBtn.disabled = finished || root.dataset.running === '1';
+        finaliseBtn.textContent = finished ? '✅ Finalised' : '✅ Finalise';
     }
 
     // Search shows the same number of courier and packing labels: pair them in order (courier labels in file order,
@@ -1588,11 +1634,29 @@ document.addEventListener('DOMContentLoaded', function () {
         ask.oncancel = (e) => { e.preventDefault(); done('cancel'); };
         ask.showModal();
     });
+    // Save changes: the pairs are kept (stitch_matches.json); nothing is stitched until Finalise
+    const post = async (url, body) => {
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not save.');
+        return data;
+    };
     saveBtn.addEventListener('click', async () => {
+        if (root.dataset.running === '1') return;
+        saveBtn.disabled = true;
+        try {
+            const data = await post(root.dataset.saveUrl, { matches: pairs });
+            saved = true;
+            say(`💾 Saved ${plural(data.saved, 'match')}. ` + (data.complete
+                ? 'Every courier label now has its packing label: press Finalise to stitch the Complete Labels.'
+                : `Still ${plural(data.unmatched, 'courier label')} without a packing label. Nothing is stitched until you press Finalise.`));
+        } catch (err) { say(err.message, true); }
+        render();
+    });
+    // Finalise: stitch once with these pairs, in the background behind the overlay
+    finaliseBtn.addEventListener('click', async () => {
         if (root.dataset.running === '1') return;   // one click only
-        const n = Object.keys(pairs).length;
-        const left = session.unmatched.length - n;
-        if (!n && !left) return;
+        const left = session.unmatched.length - Object.keys(pairs).length;
         let addUnmatched = true;
         if (left > 0) {
             const answer = await askUser(left);
@@ -1601,40 +1665,43 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (root.dataset.running === '1') return;
         root.dataset.running = '1'; render();
-        busy(n ? `Saving ${n} match${n === 1 ? '' : 'es'} and stitching again…` : 'Stitching again…');
-        say(n ? `Saving ${n} match${n === 1 ? '' : 'es'} and stitching again…` : 'Stitching again…');
+        busy('Stitching the Complete Labels…', 'Rendering each courier label sharp enough to scan - a large job can take a minute.');
+        say('Stitching the Complete Labels…');
         try {
-            const res = await fetch(root.dataset.saveUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ matches: pairs, add_unmatched: addUnmatched, finish: true }) });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.error || 'Could not save.');
+            await post(root.dataset.finaliseUrl, { matches: pairs, add_unmatched: addUnmatched });
             saved = true;
             poll();
         } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
     });
+    // The finished file: Download and Open file, nothing else to do on this page
+    function showResult(data) {
+        const link = root.dataset.downloadUrl.replace('__FILE__', encodeURIComponent(data.output));
+        status.replaceChildren(el('span', null, `✅ ${data.output}: ${plural(data.placed, 'courier label')} placed`
+            + (data.unmatched ? `, ${data.unmatched} unmatched${data.added_unmatched ? ' (4-up at the end)' : ' (left out)'}. ` : '. ')));
+        const a = el('a', 'ab-btn', '⬇ Download'); a.href = link;
+        const open = el('a', 'ab-btn ab-btn-plain btn-file open', '📂 Open file');
+        open.href = root.dataset.openUrl.replace('__FILE__', encodeURIComponent(data.output));
+        status.append(a, ' ', open);
+        if ((data.locked || []).length) status.append(el('div', 'ps-hint', `Still open in another program, so not removed: ${data.locked.join(', ')}.`));
+        status.classList.remove('sm-status-bad');
+        Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; });
+        session.unmatched = []; session.waiting = []; finished = true;
+        render();
+        status.scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'center' });
+    }
     async function poll() {
         try {
             // The server answers when the stitch is done (or after 25 s): one request at a time, not one a second
             const data = await (await fetch(`${root.dataset.statusUrl}?wait=1`)).json();
-            if (data.state === 'running') { say('Stitching again in the background…'); setTimeout(poll, 100); return; }
+            if (data.state === 'running') { setTimeout(poll, 100); return; }
             root.dataset.running = '';
             idle();
             if (data.state === 'error') { render(); say(data.error || 'Stitching failed.', true); return; }
-            const link = root.dataset.downloadUrl.replace('__FILE__', encodeURIComponent(data.output));
-            status.replaceChildren(el('span', null, `✅ Saved. ${data.output}: ${data.placed} courier labels placed, ${data.unmatched} still unmatched`
-                + (data.unmatched ? (data.added_unmatched ? ' (added 4-up at the end). ' : ' (left out). ') : '. ')));
-            const a = el('a', 'ab-btn', '⬇ Download'); a.href = link;
-            const again = el('a', 'ab-btn ab-btn-plain', 'Match the rest'); again.href = window.location.href;
-            status.append(a, ' ', again);
-            status.classList.remove('sm-status-bad');
-            // These labels are in the new file now: nothing left on this page until it's opened again
-            Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; });
-            session.unmatched = []; session.waiting = []; finished = true;
-            render();
-            status.scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'center' });
+            showResult(data);
         } catch (e) { setTimeout(poll, 2500); }
     }
-    // More courier label PDFs: uploaded, stitched in with the others in the background, then the page reloads
+    // More courier label PDFs: the earlier Complete Labels go, the matching is worked out again with them; when
+    // everything matches it's stitched straight away, else the page opens again with what's left
     document.getElementById('sm-add-files').addEventListener('change', async (e) => {
         const files = [...e.target.files];
         if (!files.length) return;
@@ -1642,29 +1709,36 @@ document.addEventListener('DOMContentLoaded', function () {
         const form = new FormData();
         files.forEach((f) => form.append('labels', f));
         root.dataset.running = '1'; render();
-        busy(`Adding ${plural(files.length, 'PDF')} and stitching again…`);
-        say(`Adding ${plural(files.length, 'PDF')} and stitching again…`);
+        busy(`Adding ${plural(files.length, 'PDF')} and matching again…`, 'Every courier label is read again with the new ones.');
         try {
             const res = await fetch(root.dataset.addUrl, { method: 'POST', body: form });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || 'Could not add the PDFs.');
             saved = true;
-            const waitDone = async () => {
-                const st = await (await fetch(`${root.dataset.statusUrl}?wait=1`)).json();
-                if (st.state === 'running') { setTimeout(waitDone, 100); return; }
-                if (st.state === 'error') { root.dataset.running = ''; idle(); render(); say(st.error || 'Stitching failed.', true); return; }
-                window.location.reload();  // the new leftovers
-            };
-            waitDone();
+            if (data.complete) { busy('Everything matches now: stitching the Complete Labels…'); poll(); }
+            else window.location.reload();  // what's left to match
         } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
         e.target.value = '';
     });
     window.addEventListener('beforeunload', (e) => { if (!saved && Object.keys(pairs).length) { e.preventDefault(); e.returnValue = ''; } });
-    restoreSuggestions();                 // suggested pairs start paired, ready to check
-    saved = !Object.keys(pairs).length;
+    // Matches saved earlier come back as matched pairs; the rest start as suggestions to check
+    session.unmatched.forEach((u) => {
+        if (u.matched_to && packs[u.matched_to] && !courierOf(u.matched_to)) {
+            pairs[u.key] = u.matched_to;
+            if (u.suggestion === u.matched_to) fromSuggestion[u.key] = true;
+        }
+    });
+    const savedBefore = Object.keys(pairs).length;
+    restoreSuggestions();
+    saved = Object.keys(pairs).length === savedBefore;
     render();
     if (!session.unmatched.length) say('Every courier label is matched. Nothing to do here.');
-    else if (Object.keys(pairs).length) say(`${plural(Object.keys(pairs).length, 'pair')} suggested from the addresses on the courier labels — ✓ each one (or Match all 100%), then Save.`);
+    else if (Object.keys(pairs).length) {
+        const fresh = Object.keys(pairs).length - savedBefore;
+        say([savedBefore ? `${plural(savedBefore, 'match')} saved earlier.` : '',
+             fresh ? `${plural(fresh, 'pair')} suggested from the addresses on the courier labels — ✓ each one (or Match all 100%).` : '',
+             'Then Finalise to stitch the Complete Labels.'].filter(Boolean).join(' '));
+    }
 });
 
 // =========================================
@@ -1698,5 +1772,166 @@ document.addEventListener('DOMContentLoaded', function () {
         button.textContent = '🧵 Stitch Labels';
         const overlay = document.getElementById('loading-overlay');
         if (overlay) overlay.style.display = '';
+    });
+});
+
+// =========================================
+// 18. COLUMN MAPPING AND SIMILAR ADDRESSES (packing labels preview)
+// =========================================
+// Column mapping: each field -> the distro header it's matched to -> that header's cell. Picking another column (or
+// "Not used") shows its cell straight away; Update Previews reads the file with it. What's picked is remembered in
+// this browser for the file and tab (localStorage), so it comes back after a refresh or when the same file is
+// scanned again: it's sent with the first preview of the file even before the mapping is on the page.
+document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('pl-form');
+    if (!form) return;
+    const KEY = 'pl_column_mapping';
+    const file = (form.querySelector('input[name="filename"]') || {}).value || '';
+    const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } };
+    const store = (all) => { try { localStorage.setItem(KEY, JSON.stringify(all)); } catch (e) { /* storage blocked */ } };
+
+    document.querySelectorAll('.pl-colmap').forEach((panel) => {
+        const row = panel.dataset.headerRow;
+        const letterOf = (select) => (select.value === '-' ? '' : (select.value || select.dataset.auto));
+        const headerOf = (select) => {
+            const letter = letterOf(select);
+            if (!letter) return '';
+            if (!select.value) return select.dataset.autoText;
+            return (select.selectedOptions[0].text || '').replace(/ \([A-Z]+\)$/, '');
+        };
+        // A row of a field still to map: its cell follows the pick
+        const showRow = (select) => {
+            const item = select.closest('.pl-colmap-item');
+            const letter = letterOf(select);
+            item.querySelector('.pl-colmap-cell').textContent = letter ? `${letter}${row}` : '—';
+            item.classList.toggle('pl-colmap-hand', !!select.value);
+        };
+        // A chip of a mapped field: green (found by the rules), blue (set by hand) or grey (not used)
+        const showChip = (select) => {
+            const item = select.closest('.pl-colmap-item');
+            const chip = item.querySelector('.pl-chip');
+            const letter = letterOf(select);
+            const state = select.value === '-' ? 'off' : (select.value ? 'hand' : 'auto');
+            item.classList.remove('pl-chip-auto', 'pl-chip-hand', 'pl-chip-off', 'pl-chip-none');
+            item.classList.add(letter || state === 'off' ? `pl-chip-${state}` : 'pl-chip-none');
+            chip.querySelector('.pl-chip-mark').textContent = !letter && state !== 'off' ? '!' : { auto: '✓', hand: '✎', off: '⊘' }[state];
+            chip.querySelector('.pl-chip-cell').textContent = state === 'off' ? 'not used' : (letter ? `${letter}${row}` : 'not found');
+            chip.title = letter ? `Excel header: “${headerOf(select)}” · cell ${letter}${row} — click to change` : 'No column — click to pick one';
+        };
+        panel.querySelectorAll('.pl-row-item .pl-colmap-select').forEach((select) => select.addEventListener('change', () => showRow(select)));
+        panel.querySelectorAll('.pl-chip-item').forEach((item) => {
+            const chip = item.querySelector('.pl-chip');
+            const select = item.querySelector('.pl-colmap-select');
+            const close = () => { select.hidden = true; chip.hidden = false; };
+            chip.addEventListener('click', () => { chip.hidden = true; select.hidden = false; select.focus(); });
+            select.addEventListener('change', () => { showChip(select); close(); chip.focus(); });
+            select.addEventListener('blur', close);
+            select.addEventListener('keydown', (e) => { if (e.key === 'Escape') { close(); chip.focus(); } });
+        });
+        panel.querySelector('.pl-colmap-reset').addEventListener('click', () => {
+            panel.querySelectorAll('.pl-colmap-select').forEach((select) => {
+                select.value = '';
+                if (select.closest('.pl-chip-item')) showChip(select); else showRow(select);
+            });
+        });
+    });
+
+    form.addEventListener('submit', () => {
+        if (!file) return;
+        const all = load();
+        const mine = all[file] || {};
+        const onPage = new Set();
+        form.querySelectorAll('.pl-colmap').forEach((panel) => {
+            const tab = panel.dataset.tab;
+            onPage.add(tab);
+            mine[tab] = {};
+            panel.querySelectorAll('.pl-colmap-select').forEach((select) => {
+                if (select.value) mine[tab][select.name.split('::')[2]] = select.value;
+            });
+            if (!Object.keys(mine[tab]).length) delete mine[tab];
+        });
+        // Tabs without the mapping on the page yet (the first preview of a file): send what was picked last time
+        form.querySelectorAll('input[name="all_tabs"]').forEach((input) => {
+            const tab = input.value;
+            if (onPage.has(tab) || !mine[tab]) return;
+            Object.entries(mine[tab]).forEach(([field, value]) => {
+                const hidden = document.createElement('input');
+                hidden.type = 'hidden'; hidden.name = `colmap::${tab}::${field}`; hidden.value = value;
+                form.appendChild(hidden);
+            });
+        });
+        if (Object.keys(mine).length) all[file] = mine; else delete all[file];
+        store(all);
+    });
+
+    // One receiver's consignments at different addresses sit next to each other under a heading: the address picked
+    // there goes on all of them (as an edit, like ✏️) and the preview is updated at once, so they become one
+    const editsField = document.getElementById('consignment-edits');
+    const preview = form.querySelector('button[name="preview"]');
+    document.querySelectorAll('.pl-group-merge').forEach((button) => {
+        button.addEventListener('click', () => {
+            if (!editsField || !preview) return;
+            const group = JSON.parse(button.dataset.group);
+            const picked = button.closest('.pl-group-head').querySelector('.pl-group-keep');
+            const keep = group[picked ? Number(picked.value) : 0];
+            // They become one consignment, so one service: the kept address's. Say so when theirs differed.
+            const services = [...new Set(group.map((m) => m.service_used).filter(Boolean))];
+            if (services.length > 1 && !confirm(`These consignments use different services: ${group.map((m) => `#${m.number} ${m.service_used}`).join(', ')}.\n\n`
+                + `Merged, they all go with the service of the address you keep (#${keep.number}: ${keep.service_used}). Merge?`)) return;
+            let edits = {};
+            try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
+            group.forEach((member) => member.sources.forEach((id) => {
+                edits[id] = { ...(edits[id] || {}), checked: true, ...keep.fields };
+                if (keep.service) edits[id].service_code = keep.service; else delete edits[id].service_code;  // '' = same as main
+            }));
+            editsField.value = JSON.stringify(edits);
+            button.disabled = true;
+            button.textContent = 'Merging…';
+            form.requestSubmit(preview);
+        });
+    });
+});
+
+// =========================================
+// 19. COURIER CSV CHOICE (packing labels preview)
+// =========================================
+// Open360, OpenFreight or both, just above the project name. Nothing is ticked: it's chosen for every job, and
+// Generate needs one (a message says so, like section 14's required boxes; the server refuses too).
+document.addEventListener('DOMContentLoaded', function () {
+    const box = document.getElementById('pl-csv-choice');
+    if (!box) return;
+    const ticks = [...box.querySelectorAll('input[name="courier_csv"]')];
+    ticks.forEach((t) => t.addEventListener('change', () => box.classList.remove('pl-missing')));
+    const form = box.closest('form');
+    form.addEventListener('submit', (e) => {
+        if (!e.submitter || e.submitter.name !== 'generate' || ticks.some((t) => t.checked)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        box.classList.add('pl-missing');
+        const error = document.getElementById('pl-generate-error');
+        if (error) { error.textContent = '⚠️ Choose the courier CSV to make: Open360, OpenFreight or both.'; error.hidden = false; }
+        box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, true);
+});
+
+// =========================================
+// 20. PROJECT NAME LENGTH
+// =========================================
+// Project names are at most 50 characters (they go into the folder and every file name, and Excel can't open a
+// file whose full path is too long). The box shows what's left as you type.
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('input[data-count][maxlength]').forEach((box) => {
+        const max = Number(box.maxLength);
+        const note = document.createElement('span');
+        note.className = 'name-count';
+        note.setAttribute('aria-live', 'polite');
+        box.insertAdjacentElement('afterend', note);
+        const show = () => {
+            const left = max - box.value.length;
+            note.textContent = `${box.value.length} / ${max} characters`;
+            note.classList.toggle('name-count-full', left <= 0);
+        };
+        box.addEventListener('input', show);
+        show();
     });
 });
