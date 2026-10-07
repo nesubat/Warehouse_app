@@ -1328,7 +1328,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // "Needs a look": only the addresses that don't match the official data (they're listed first anyway)
     const needsBtn = document.getElementById('ab-needs-look');
-    let needsOnly = false, checkingTimer = null;
+    let needsOnly = false;
     function showCount(n) {
         needsBtn.hidden = !n && !needsOnly;
         needsBtn.querySelector('span').textContent = `(${n})`;
@@ -1350,10 +1350,8 @@ document.addEventListener('DOMContentLoaded', function () {
             const res = await fetch(`/api/addresses?limit=${PAGE}&offset=${offset}&q=${encodeURIComponent(query)}${needsOnly ? '&needs=1' : ''}`, { signal: controller.signal });
             const data = await res.json();
             showCount(data.needs_look);
-            // Being checked against the official data in the background (after an update): look again shortly
-            clearTimeout(checkingTimer);
-            if (data.checking) { say('Checking the addresses against the official data…'); checkingTimer = setTimeout(() => load(true), 3000); }
-            else if (status.textContent.startsWith('Checking the addresses')) say('');
+            // Being checked against newly loaded official data: said once, no polling (refresh to see the results)
+            if (data.checking && reset) say('Checking the addresses against the newly loaded official data: refresh the page to see the results.');
             if (reset) body.replaceChildren();
             data.rows.forEach((entry) => body.append(rowFor(entry)));
             offset += data.rows.length;

@@ -1848,8 +1848,9 @@ _RECHECK_LOCK = threading.Lock()
 
 
 def recheck_book_async(reason):
-    """Checks, in the background, every address-book entry not yet checked against the current official data (or
-    changed since): after a reference update, a Generate, or when the Address Book page finds stale entries."""
+    """Checks, in the background, the address-book entries not yet checked against the current official data (or
+    changed since). Runs once after each update of the official data (every entry), and after a Generate or an import
+    (only the entries those just saved). Never on a timer, never just because a page was opened."""
     if not address_reference.available():
         return
     with _RECHECK_LOCK:
@@ -1896,8 +1897,7 @@ def api_addresses():
     query, offset = request.args.get('q', ''), request.args.get('offset', 0, type=int)
     rows, has_more = ADDRESS_BOOK.search(query, request.args.get('limit', 50, type=int), offset,
                                          needs_look=request.args.get('needs') == '1')
-    if not query and not offset:
-        recheck_book_async('address book opened')  # only entries not checked against the current data
+    # Nothing is checked from here: the book is checked once after each update of the official data
     return {'rows': rows, 'has_more': has_more, 'needs_look': ADDRESS_BOOK.needs_look_count(),
             'checking': RECHECK['running'], 'reference': address_reference.available()}
 
