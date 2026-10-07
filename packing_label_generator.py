@@ -4,6 +4,7 @@ import pandas as pd
 import openpyxl
 import io
 import math
+import base64
 import zipfile
 import xml.etree.ElementTree as ET
 import pymupdf as fitz
@@ -965,6 +966,75 @@ def draw_report_pages(doc, report, at=0):
     return len(pages)
 
 
+# Label page geometry (A4 landscape), shared by the PDF and the page's live cell preview (cell_preview)
+MM2PT = 2.83465
+MARGIN = 4 * MM2PT
+GAP = 2.5 * MM2PT
+CELL_RADIUS = 3 * MM2PT
+A4_W, A4_H = fitz.paper_size("a4-l")
+
+ZONE_A_W = 107 * MM2PT
+ZONE_A_H = 150 * MM2PT
+CHIP_H = 11 * LINE + 8
+ROWS = 3
+
+# One box size for every page: width from page 1's 4 columns beside the courier region,
+# height from the later pages, which lose the footer strip at the bottom
+FIRST_COLS = 4
+CELL_W = (A4_W - 2 * MARGIN - ZONE_A_W - GAP - (FIRST_COLS - 1) * GAP) / FIRST_COLS
+CELL_H = (A4_H - 2 * MARGIN - CHIP_H - GAP - (ROWS - 1) * GAP) / ROWS
+NEXT_COLS = int((A4_W - 2 * MARGIN + GAP) // (CELL_W + GAP))
+FIRST_PAGE_CELLS, NEXT_PAGE_CELLS = FIRST_COLS * ROWS, NEXT_COLS * ROWS
+
+
+def _thumb_data_url(data, max_px):
+    """An item image shrunk to fit max_px, as a JPEG data URL for the browser; None when it can't be read
+    (the PDF shows "Image Error" for those too). See-through parts go white, as they print on the label."""
+    from PIL import Image
+    try:
+        img = Image.open(io.BytesIO(data.getvalue()))
+        img.load()
+        img.thumbnail((max_px, max_px))
+        img = img.convert('RGBA')
+        flat = Image.new('RGB', img.size, (255, 255, 255))
+        flat.paste(img, mask=img.getchannel('A'))
+        buf = io.BytesIO()
+        flat.save(buf, 'JPEG', quality=85)
+        return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception:
+        return None
+
+
+def cell_preview(pack_groups, max_px=360):
+    """The first pack group's item cells for the page's live layout preview (script.js section 10). The browser
+    draws them with the same sizes and rules as _layout_cell/_draw_cell, so this hands it the cell size in pt and,
+    per item, its texts, barcode modules and images (small data URLs). Barcodes are given to every pack of the tab
+    first (assign_barcodes), as the PDF does, so the K numbers match. Only page 1's worth of cells is sent."""
+    if not pack_groups:
+        return None
+    assign_barcodes(pack_groups)
+    group = next(iter(pack_groups.values()))
+    items = []
+    for item in group['items'][:FIRST_PAGE_CELLS]:
+        barcode = item.get('barcode') or _clean(item.get('job_no'))
+        items.append({
+            **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'desc', 'dimension', 'material', 'install', 'notes')},
+            'barcode': barcode,
+            'modules': code128_modules(barcode, compact=True) if barcode else None,
+            'thumbnails': [_thumb_data_url(d, max_px) for d in item.get('thumbnails') or []],
+        })
+    return {
+        'cell_pt': [round(CELL_W, 2), round(CELL_H, 2)],
+        'radius_pt': round(CELL_RADIUS, 2),
+        'barcode_quiet': BARCODE_QUIET_MODULES,
+        'barcode_max_module': BARCODE_MAX_MODULE,
+        'store': group.get('store_name', ''),
+        'spec': group.get('pack_spec_name', ''),
+        'items': items,
+        'total_items': len(group['items']),
+    }
+
+
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
                             report=None, serials=None, tabs=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
@@ -985,24 +1055,6 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     from packing_specs import split_count
     addresses = addresses or {}
     doc = fitz.open()
-    MM2PT = 2.83465
-    MARGIN = 4 * MM2PT
-    GAP = 2.5 * MM2PT
-    CELL_RADIUS = 3 * MM2PT
-    A4_W, A4_H = fitz.paper_size("a4-l")
-
-    ZONE_A_W = 107 * MM2PT
-    ZONE_A_H = 150 * MM2PT
-    CHIP_H = 11 * LINE + 8
-    ROWS = 3
-
-    # One box size for every page: width from page 1's 4 columns beside the courier region,
-    # height from the later pages, which lose the footer strip at the bottom
-    FIRST_COLS = 4
-    CELL_W = (A4_W - 2 * MARGIN - ZONE_A_W - GAP - (FIRST_COLS - 1) * GAP) / FIRST_COLS
-    CELL_H = (A4_H - 2 * MARGIN - CHIP_H - GAP - (ROWS - 1) * GAP) / ROWS
-    NEXT_COLS = int((A4_W - 2 * MARGIN + GAP) // (CELL_W + GAP))
-    FIRST_PAGE_CELLS, NEXT_PAGE_CELLS = FIRST_COLS * ROWS, NEXT_COLS * ROWS
 
     if not attribute_order:
         attribute_order = ['thumbnail', 'desc', 'dimension', 'job_no', 'barcode', 'qty']

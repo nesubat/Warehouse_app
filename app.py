@@ -19,7 +19,7 @@ from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, ge
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import (parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
-                                     detect_columns, header_columns, similar_addresses)
+                                     detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from address_book import AddressBook, AddressBookError
 from address_import import build_review, apply_review, all_label_maps, ImportProblem
@@ -1798,6 +1798,7 @@ def _distribution_page(mode):
         log.info("  file saved %s; open in Excel: %s", file_note['saved_at'], excel or 'no')
         previews = []
         header_rows = {}  # each tab's header row as a number (a blank, 0 or text one is read as row 1)
+        first_tab_groups = None  # the first readable tab's packs: its first pack is the live cell preview
         for tab in selected_tabs:
             choices = _column_choices(request.form, tab, mode)
             try:
@@ -1817,7 +1818,9 @@ def _distribution_page(mode):
                               tab, header_row, total_packs, total_stores, last_row, len(warnings))
                 for w in warnings:
                     log.debug("    warning: %s", w)
-                
+                if first_tab_groups is None and pack_groups:
+                    first_tab_groups = pack_groups
+
                 previews.append({
                     'sheet_name': tab, 
                     'total_packs': total_packs, 
@@ -1901,8 +1904,15 @@ def _distribution_page(mode):
                 'service_options': options,
             }
 
+        preview_cells = None
+        if not courier_mode and first_tab_groups:
+            try:
+                preview_cells = cell_preview(first_tab_groups)
+            except Exception:
+                log.exception("  live cell preview could not be built")
+
         return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
-                               file_note=file_note)
+                               file_note=file_note, cell_preview=preview_cells)
 
     # Action: Generate Final PDF & Save to Project
     if 'generate' in request.form:

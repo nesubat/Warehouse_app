@@ -1128,13 +1128,33 @@ button:hover {
 .pl-page .pl-preview-hint { color: #7f8c8d; margin-bottom: 20px; }
 .pl-page .pl-metrics { margin-bottom: 5px; }
 
-/* Two-column layout configurator */
+/* Layout configurator: blocks pool | cell order | live preview. Comes after the tab cards and the courier check. */
 .pl-page .pl-configurator {
-    margin-top: 30px; display: grid; grid-template-columns: 1fr 1fr; background: #fdfdfd;
-    border: 1px solid #dcdde1; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    margin: 30px 0; display: grid; grid-template-columns: minmax(200px, 0.8fr) minmax(280px, 1fr) minmax(300px, 1.2fr);
+    background: #fdfdfd; border: 1px solid #dcdde1; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
 }
-.pl-page .pl-config-col { padding: 25px; }
+.pl-page .pl-config-col { padding: 25px; min-width: 0; }
 .pl-page .pl-config-col-right { background: #fff; }
+.pl-page .pl-config-col-preview { background: #f4f6f8; border-left: 1px solid #dcdde1; border-radius: 0 6px 6px 0; }
+@media (max-width: 1100px) {
+    .pl-page .pl-configurator { grid-template-columns: 1fr 1fr; }
+    .pl-page .pl-config-col-preview { grid-column: 1 / -1; border-left: none; border-top: 1px solid #dcdde1; border-radius: 0 0 6px 6px; }
+}
+@media (max-width: 700px) {
+    .pl-page .pl-configurator { grid-template-columns: 1fr; }
+}
+
+/* Live preview: one canvas per item box, the PDF cell's own proportions; it stays in view while blocks are dragged */
+.pl-page .pl-cell-preview {
+    position: sticky; top: 70px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; align-items: start;
+}
+.pl-page .pl-cell-preview canvas { width: 100%; height: auto; display: block; background: #fff; border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
+
+/* Dragging: the picked-up block fades; the others slide (script.js section 10) */
+.pl-page .sortable-item.is-dragging { opacity: 0.4; }
+.pl-page .drag-container { position: relative; }
 .pl-page .pl-config-title { margin-top: 0; margin-bottom: 5px; color: #2c3e50; }
 .pl-page .pl-config-label { color: #7f8c8d; font-size: 12px; margin-top: 10px; font-weight: bold; text-transform: uppercase; }
 .pl-page .pl-config-label-first { margin-top: 20px; }

@@ -211,13 +211,13 @@
                 {% set lock.has_error = true %}
                 <div class="blueprint-card blueprint-error">
                     <h4>❌ {{ bp.sheet_name }}</h4>
+                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                     <p class="issue-heading error">{{ bp.issues|length }} to fix before generating</p>
                     {{ issue_table(bp.issues, 'error') }}
                     {% if bp.warnings %}
                     <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
                     {{ issue_table(bp.warnings, 'warning') }}
                     {% endif %}
-                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                 </div>
                 {% else %}
                 <div class="blueprint-card">
@@ -228,11 +228,11 @@
                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
                         {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
                     </div>
+                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                     {% if bp.warnings %}
                     <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
                     {{ issue_table(bp.warnings, 'warning') }}
                     {% endif %}
-                    {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                 </div>
                 {% endif %}
             {% endfor %}
@@ -244,103 +244,10 @@
                 <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
             {% else %}
                 
-                {% if not courier_mode %}
-                <!-- 2-Column Seamless Visual Grid Configurator -->
-                <div class="pl-configurator">
-                    
-                    <!-- LEFT COLUMN: MAPPED HEADERS -->
-                    <div class="pl-config-col">
-                        <h4 class="pl-config-title">1. Mapped Headers</h4>
-                        
-                        <!-- Fixed Section -->
-                        <p class="pl-config-label pl-config-label-first">Page Info (Fixed Bottom-Left)</p>
-                        <div class="pl-fixed-badges">
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Packing Spec') %}found{% else %}missing{% endif %}">Packing Spec</span>
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Store Name') %}found{% else %}missing{% endif %}">Store Name</span>
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Address Info') %}found{% else %}missing{% endif %}">Address Info</span>
-                        </div>
-                        
-                        <!-- Draggable Available Section -->
-                        <p class="pl-config-label">Available Layout Blocks (Drag Right ➔)</p>
-                        <div id="mapped-headers-list" class="drag-container pl-headers-pool">
-                            
-                            <!-- INDIVIDUAL BLOCKS: Material, Install, Notes (if found and not default) -->
-                            {% if previews[0].found_headers.get('Material') %}
-                            <div class="sortable-item" draggable="true" data-id="material"><span class="badge-text">Material</span>
-                                <div class="cell-only-styling pl-cell-text">Material</div>
-                            </div>
-                            {% endif %}
-                            
-                            {% if previews[0].found_headers.get('Install') %}
-                            <div class="sortable-item" draggable="true" data-id="install"><span class="badge-text">Install</span>
-                                <div class="cell-only-styling pl-cell-install">Install</div>
-                            </div>
-                            {% endif %}
-                            
-                            {% if previews[0].found_headers.get('Notes') %}
-                            <div class="sortable-item" draggable="true" data-id="notes"><span class="badge-text">Notes</span>
-                                <div class="cell-only-styling pl-cell-text">Notes</div>
-                            </div>
-                            {% endif %}
-                            
-                        </div>
-                    </div>
-
-                    <!-- RIGHT COLUMN: CELL LAYOUT -->
-                    <div class="pl-config-col pl-config-col-right">
-                        <h4 class="pl-config-title">2. Customize Cell Layout</h4>
-                        <p class="pl-config-hint">Drag blocks up/down to set the order, or drag them back to the left to remove them from the cell.</p>
-                        
-                        <div id="attribute-list" class="drag-container">
-                            
-                            <!-- DEFAULT 5 SLOTS (Replaces with Empty Field if not found) -->
-                            {% if previews[0].found_headers.get('Thumbnail') %}
-                            <div class="sortable-item" draggable="true" data-id="thumbnail"><span class="badge-text">Thumbnail</span>
-                                <div class="cell-only-styling pl-cell-thumb">
-                                    <div class="pl-cell-thumb-box">📷 Image Thumbnail</div>
-                                </div>
-                            </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-
-                            {% if previews[0].found_headers.get('Description') %}
-                            <div class="sortable-item" draggable="true" data-id="desc"><span class="badge-text">Description</span>
-                                <div class="cell-only-styling pl-cell-desc">Description Text Goes Here</div>
-                            </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-
-                            {% if previews[0].found_headers.get('Dimensions') %}
-                            <div class="sortable-item" draggable="true" data-id="dimension"><span class="badge-text">Dimensions</span>
-                                <div class="cell-only-styling pl-cell-dim">Dimensions</div>
-                            </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-
-                            {% if previews[0].found_headers.get('Job Number') %}
-                            <div class="sortable-item" draggable="true" data-id="job_no"><span class="badge-text">Job Number</span>
-                                <div class="cell-only-styling pl-cell-job"><div class="pl-cell-job-bar">Job Number</div></div>
-                            </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-
-                            <div class="sortable-item" draggable="true" data-id="barcode"><span class="badge-text">Barcode</span>
-                                <div class="cell-only-styling pl-cell-barcode"><div class="pl-cell-barcode-bars" aria-hidden="true"></div><div class="pl-cell-barcode-text">J000000-00 K1</div></div>
-                            </div>
-
-                            {% if previews[0].found_headers.get('Quantity') %}
-                            <div class="sortable-item" draggable="true" data-id="qty"><span class="badge-text">Quantity</span>
-                                <div class="cell-only-styling pl-cell-qty">
-                                    <div class="pl-cell-qty-box">Quantity</div>
-                                </div>
-                            </div>
-                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-                            
-                        </div>
-                        <input type="hidden" name="attribute_order" id="attribute_order" value="">
-                    </div>
-                </div>
-                {% endif %}
 
                 {% if courier %}
                 <div class="pl-courier">
-                    <h4 class="pl-config-title">{{ 'Courier Consignments' if courier_mode else '3. Courier Consignments' }}</h4>
+                    <h4 class="pl-config-title">Courier Consignments</h4>
                     <p class="pl-config-hint">{{ courier.carton_count }} {{ 'items' if courier_mode else 'cartons' }} in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
                     <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
                     <input type="hidden" id="carton-weights" name="carton_weights" value="{{ courier.weights_json }}">
@@ -515,6 +422,119 @@
                     </table>
                 </div>
                 {% endif %}
+
+                {# Cell layout and its live preview: after the tab cards and the courier check (generation isn't locked here) #}
+                {% if not courier_mode %}
+                <!-- Cell layout configurator: blocks pool, cell order, live preview -->
+                <div class="pl-configurator">
+                    
+                    <!-- LEFT COLUMN: MAPPED HEADERS -->
+                    <div class="pl-config-col">
+                        <h4 class="pl-config-title">1. Mapped Headers</h4>
+                        
+                        <!-- Fixed Section -->
+                        <p class="pl-config-label pl-config-label-first">Page Info (Fixed Bottom-Left)</p>
+                        <div class="pl-fixed-badges">
+                            <span class="fixed-badge {% if previews[0].found_headers.get('Packing Spec') %}found{% else %}missing{% endif %}">Packing Spec</span>
+                            <span class="fixed-badge {% if previews[0].found_headers.get('Store Name') %}found{% else %}missing{% endif %}">Store Name</span>
+                            <span class="fixed-badge {% if previews[0].found_headers.get('Address Info') %}found{% else %}missing{% endif %}">Address Info</span>
+                        </div>
+                        
+                        <!-- Draggable Available Section -->
+                        <p class="pl-config-label">Available Layout Blocks (Drag Right ➔)</p>
+                        <div id="mapped-headers-list" class="drag-container pl-headers-pool">
+                            
+                            <!-- INDIVIDUAL BLOCKS: Material, Install, Notes (if found and not default) -->
+                            {% if previews[0].found_headers.get('Material') %}
+                            <div class="sortable-item" draggable="true" data-id="material"><span class="badge-text">Material</span>
+                                <div class="cell-only-styling pl-cell-text">Material</div>
+                            </div>
+                            {% endif %}
+                            
+                            {% if previews[0].found_headers.get('Install') %}
+                            <div class="sortable-item" draggable="true" data-id="install"><span class="badge-text">Install</span>
+                                <div class="cell-only-styling pl-cell-install">Install</div>
+                            </div>
+                            {% endif %}
+                            
+                            {% if previews[0].found_headers.get('Notes') %}
+                            <div class="sortable-item" draggable="true" data-id="notes"><span class="badge-text">Notes</span>
+                                <div class="cell-only-styling pl-cell-text">Notes</div>
+                            </div>
+                            {% endif %}
+                            
+                        </div>
+                    </div>
+
+                    <!-- RIGHT COLUMN: CELL LAYOUT -->
+                    <div class="pl-config-col pl-config-col-right">
+                        <h4 class="pl-config-title">2. Customize Cell Layout</h4>
+                        <p class="pl-config-hint">Drag blocks up/down to set the order, or drag them back to the left to remove them from the cell.</p>
+                        
+                        <div id="attribute-list" class="drag-container">
+                            
+                            <!-- DEFAULT 5 SLOTS (Replaces with Empty Field if not found) -->
+                            {% if previews[0].found_headers.get('Thumbnail') %}
+                            <div class="sortable-item" draggable="true" data-id="thumbnail"><span class="badge-text">Thumbnail</span>
+                                <div class="cell-only-styling pl-cell-thumb">
+                                    <div class="pl-cell-thumb-box">📷 Image Thumbnail</div>
+                                </div>
+                            </div>
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+
+                            {% if previews[0].found_headers.get('Description') %}
+                            <div class="sortable-item" draggable="true" data-id="desc"><span class="badge-text">Description</span>
+                                <div class="cell-only-styling pl-cell-desc">Description Text Goes Here</div>
+                            </div>
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+
+                            {% if previews[0].found_headers.get('Dimensions') %}
+                            <div class="sortable-item" draggable="true" data-id="dimension"><span class="badge-text">Dimensions</span>
+                                <div class="cell-only-styling pl-cell-dim">Dimensions</div>
+                            </div>
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+
+                            {% if previews[0].found_headers.get('Job Number') %}
+                            <div class="sortable-item" draggable="true" data-id="job_no"><span class="badge-text">Job Number</span>
+                                <div class="cell-only-styling pl-cell-job"><div class="pl-cell-job-bar">Job Number</div></div>
+                            </div>
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+
+                            <div class="sortable-item" draggable="true" data-id="barcode"><span class="badge-text">Barcode</span>
+                                <div class="cell-only-styling pl-cell-barcode"><div class="pl-cell-barcode-bars" aria-hidden="true"></div><div class="pl-cell-barcode-text">J000000-00 K1</div></div>
+                            </div>
+
+                            {% if previews[0].found_headers.get('Quantity') %}
+                            <div class="sortable-item" draggable="true" data-id="qty"><span class="badge-text">Quantity</span>
+                                <div class="cell-only-styling pl-cell-qty">
+                                    <div class="pl-cell-qty-box">Quantity</div>
+                                </div>
+                            </div>
+                            {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+                            
+                        </div>
+                        <input type="hidden" name="attribute_order" id="attribute_order" value="">
+                    </div>
+
+                    <!-- LIVE PREVIEW: the first package group's item boxes, redrawn as the blocks are dragged (script.js section 10) -->
+                    <div class="pl-config-col pl-config-col-preview">
+                        <h4 class="pl-config-title">3. Live Preview</h4>
+                        {% if cell_preview and cell_preview['items'] %}
+                        <p class="pl-config-hint">
+                            First package group: <strong>{{ cell_preview.store or 'No store name' }}</strong> · {{ cell_preview.spec }}.
+                            {% if cell_preview.total_items > cell_preview['items']|length %}Showing the first {{ cell_preview['items']|length }} of {{ cell_preview.total_items }} items (page 1).
+                            {% else %}{{ cell_preview.total_items }} item{{ 's' if cell_preview.total_items != 1 }}.{% endif %}
+                            Drawn to the same sizes as the PDF.
+                        </p>
+                        <div id="pl-cell-preview" class="pl-cell-preview" aria-label="Live preview of the item boxes"
+                             data-cells='{{ cell_preview|tojson }}'></div>
+                        {% else %}
+                        <p class="pl-config-hint">No items to preview in the first package group.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+
 
                 <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
                 <fieldset class="pl-csv-choice" id="pl-csv-choice">

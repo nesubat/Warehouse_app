@@ -1743,8 +1743,9 @@ One template, gated by which variables `app.py` passes — the same idea as `mat
 |---|---|
 | nothing | Requirements box + upload dropzone |
 | `tabs` | One card per tab with a Header Row Number input |
-| `previews` | Per-tab result: metrics and warnings, or the issue table (rendered by the `issue_table` macro at the top of the file) |
-| `previews` with no errors | The two-column layout editor (1. Mapped Headers / 2. Customize Cell Layout) |
+| `previews` | Per-tab card: metrics, the Column mapping, then its errors and warnings (the `issue_table` macro at the top of the file) |
+| `previews` with no errors | The layout editor (1. Mapped Headers / 2. Customize Cell Layout / 3. Live Preview), after the Courier Consignments and before the courier CSV choice |
+| `cell_preview` | The live preview's data (`packing_label_generator.cell_preview`): the first package group's items, in `data-cells` on `#pl-cell-preview` |
 | `courier` | 3. Courier Consignments: reference, Who Pays, Charge Account, Service Code dropdown + "Apply to shown", State and text filters, and the consignment table with ✏️ edit rows and a service-code dropdown per row |
 | `generation_complete=True` | Download buttons for the label PDF and the courier CSV |
 | `page_error` | A red "Could Not Process File" card |
@@ -1756,6 +1757,7 @@ One template, gated by which variables `app.py` passes — the same idea as `mat
 Things worth knowing:
 
 - **The layout editor** draws each block exactly as it will print (black job-number bar, boxed quantity…). Every block carries two looks: a short `.badge-text` name shown in the left "available" list, and a `.cell-only-styling` preview shown once dragged into the cell; CSS switches between them depending on which list the block is in. The final order travels in the hidden `attribute_order` field.
+- **The live preview** shows the first package group's real item boxes (its images, texts, barcode and quantity) as they'll print. `cell_preview()` sends the cell size in points (the same `CELL_W`/`CELL_H` module constants the PDF uses), each item's texts, barcode modules and images shrunk to small JPEG data URLs, page 1's worth of items at most. The browser draws each box on a `<canvas>` with the same rules as `_layout_cell`/`_draw_cell`, so if those change, change `cellPreview()` in `script.js` with them.
 - **No styles inside the template.** Every style lives in `styles.css` under `.pl-page` ([Section 13](#13-staticstylescss--the-look--feel)).
 - **No Jinja inside `<script>` tags.** Values JavaScript needs are written into HTML instead: `data-` attributes (`data-id`, `data-state`, `data-original` on each consignment row) and hidden inputs (`consignment_edits`). The page-leave cleanup reads `<div id="discard-on-leave" hidden data-url data-field data-value>`.
 - Every edit-row input has a stable `id` (`edit-<n>-<field>`) and a `<label for>`, and the per-row dropdowns have `aria-label`s, so the table works with a keyboard and screen readers.
@@ -1830,6 +1832,8 @@ input.addEventListener('dragleave', () => zone.classList.remove('dropzone-active
 **9. Duplicate Store Name Alert.** Notably declared **outside** the main `DOMContentLoaded` listener that wraps sections 1–8 — a small inconsistency in the file's history, but harmless since `DOMContentLoaded` listeners can be registered as many times as you like and all of them still fire. Its only job is calling `.showModal()` on the duplicate-store dialog the instant the page loads, if that dialog exists in the HTML at all.
 
 **10. Label Maker Drag and Drop Configurator** (`packing_labels.html`). Native HTML drag events on every `.sortable-item`. While dragging over a list, `getDragAfterElement()` finds the block whose vertical middle is just below the mouse and inserts the dragged block before it. When a drag ends, the order of `data-id`s in the right-hand list is written into the hidden `attribute_order` field (e.g. `thumbnail,desc,job_no,qty`); empty slots are filtered out on the server.
+
+To keep dragging smooth: a block only moves when its slot actually changes (`dragover` fires many times a second), the slot is worked out from `offsetTop` (which the slide animation's transforms don't move, so the slot can't flicker), and the other blocks slide into place with a short FLIP animation (`slideWhileMoving`). A `MutationObserver` on the cell list updates `attribute_order` and asks `cellPreview()` to redraw on every change, during a drag too; redraws are batched to one per animation frame.
 
 **11. Courier Consignments** (`packing_labels.html`). Keeps every change in one object, `edits`, keyed by consignment id, and writes it as JSON into the hidden `consignment_edits` field after every change:
 - **✏️** toggles the row's edit form; **Save** compares the form with the row's `data-original` values and stores only real changes (keeping any service code already chosen), updates the visible text, and shows the "Edited" tag. **Reset to Excel** refills the form with the original values. Enter saves and Escape closes, so pressing Enter never submits the whole page.

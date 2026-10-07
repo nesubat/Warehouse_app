@@ -627,62 +627,308 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 // =========================================
-// 10. LABEL MAKER DRAG AND DROP CONFIGURATOR
-// =========================================    
+// 10. LABEL MAKER DRAG AND DROP CONFIGURATOR + LIVE CELL PREVIEW
+// =========================================
+// The cell's blocks are dragged between #mapped-headers-list (not used) and #attribute-list (top to bottom
+// = the order on the label). The order goes to the server in #attribute_order. While a block is dragged,
+// the other blocks slide out of its way, and the live preview (#pl-cell-preview) redraws the first package
+// group's item boxes with the order as it stands - the same sizes and rules as the PDF
+// (packing_label_generator._layout_cell / _draw_cell), drawn on canvases so it keeps up with the mouse.
 document.addEventListener("DOMContentLoaded", function() {
     const layoutList = document.getElementById('attribute-list');
     const headersList = document.getElementById('mapped-headers-list');
     const hiddenInput = document.getElementById('attribute_order');
-    
-    if(!layoutList || !hiddenInput) return;
-    
-    const updateHiddenInput = () => {
-        const items = [...layoutList.querySelectorAll('.sortable-item')].map(item => item.getAttribute('data-id'));
-        hiddenInput.value = items.join(',');
-    };
+
+    if (!layoutList || !hiddenInput) return;
+    const lists = [layoutList, headersList].filter(Boolean);
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const currentOrder = () => [...layoutList.querySelectorAll(':scope > .sortable-item')].map(item => item.getAttribute('data-id'));
+    const updateHiddenInput = () => { hiddenInput.value = currentOrder().join(','); };
     updateHiddenInput();
+
+    const preview = cellPreview(() => currentOrder().filter(id => id && id !== 'empty'));
+
+    // Any change to the cell's blocks (a drag in progress included): keep the order and the preview up to date
+    new MutationObserver(() => { updateHiddenInput(); preview.schedule(); }).observe(layoutList, { childList: true });
 
     let draggedItem = null;
 
-    document.querySelectorAll('.sortable-item').forEach(item => {
+    lists.forEach(list => list.querySelectorAll(':scope > .sortable-item').forEach(item => {
         item.addEventListener('dragstart', function(e) {
             draggedItem = this;
-            setTimeout(() => this.style.opacity = '0.4', 0);
+            e.dataTransfer.effectAllowed = 'move';
+            try { e.dataTransfer.setData('text/plain', this.getAttribute('data-id') || ''); } catch (err) { /* Firefox needs data to start a drag */ }
+            // After the browser has taken its drag image (and only if the drag hasn't already ended)
+            requestAnimationFrame(() => { if (draggedItem === this) this.classList.add('is-dragging'); });
         });
-        item.addEventListener('dragend', function(e) {
-            this.style.opacity = '1';
+        item.addEventListener('dragend', function() {
+            this.classList.remove('is-dragging');
             draggedItem = null;
             updateHiddenInput();
+            preview.schedule();
         });
-    });
+    }));
 
-    document.querySelectorAll('.drag-container').forEach(container => {
-        container.addEventListener('dragover', function(e) {
+    lists.forEach(list => {
+        list.addEventListener('dragover', function(e) {
+            if (!draggedItem) return;
             e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
             const afterElement = getDragAfterElement(this, e.clientY);
-            if (draggedItem) {
-                if (afterElement == null) {
-                    this.appendChild(draggedItem);
-                } else {
-                    this.insertBefore(draggedItem, afterElement);
-                }
-            }
+            // Only move when the block's slot actually changes: dragover fires many times a second
+            const inPlace = draggedItem.parentNode === this &&
+                (afterElement ? draggedItem.nextElementSibling === afterElement : !draggedItem.nextElementSibling);
+            if (inPlace) return;
+            slideWhileMoving(() => afterElement ? this.insertBefore(draggedItem, afterElement) : this.appendChild(draggedItem));
         });
+        list.addEventListener('drop', function(e) { if (draggedItem) e.preventDefault(); });  // no navigating to the dropped text
     });
 
-    function getDragAfterElement(container, y) {
-        const draggableElements = [...container.querySelectorAll('.sortable-item:not([style*="opacity: 0.4"])')];
-        return draggableElements.reduce(function(closest, child) {
-            const box = child.getBoundingClientRect();
-            const offset = y - box.top - box.height / 2;
-            if (offset < 0 && offset > closest.offset) {
-                return { offset: offset, element: child };
-            } else {
-                return closest;
-            }
-        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    // The block the dragged one goes before, from the blocks' layout positions (offsetTop isn't moved by the
+    // slide animation's transforms, so a block mid-slide doesn't make the slot flicker back and forth)
+    function getDragAfterElement(container, clientY) {
+        const rect = container.getBoundingClientRect();
+        const y = clientY - rect.top - container.clientTop + container.scrollTop;
+        for (const child of container.querySelectorAll(':scope > .sortable-item')) {
+            if (child === draggedItem) continue;
+            if (y < child.offsetTop + child.offsetHeight / 2) return child;
+        }
+        return null;
+    }
+
+    // FLIP: note where the other blocks are, move the dragged block, then slide each one from its old place to its new one
+    function slideWhileMoving(move) {
+        const others = lists.flatMap(l => [...l.querySelectorAll(':scope > .sortable-item')]).filter(el => el !== draggedItem);
+        const before = new Map(others.map(el => [el, el.getBoundingClientRect().top]));
+        move();
+        if (reduceMotion) return;
+        others.forEach(el => {
+            if (!el.animate) return;
+            el.getAnimations().forEach(a => a.cancel());
+            const dy = before.get(el) - el.getBoundingClientRect().top;
+            if (Math.abs(dy) < 1) return;
+            el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+                       { duration: 160, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)' });
+        });
     }
 });
+
+// The live cell preview: draws each item box of the first package group (#pl-cell-preview's data-cells, from
+// packing_label_generator.cell_preview) on its own canvas, in PDF points, following _layout_cell and
+// _draw_cell line for line. getOrder() gives the blocks top to bottom. Returns { schedule }: redraws once
+// on the next animation frame however often it's asked.
+function cellPreview(getOrder) {
+    const box = document.getElementById('pl-cell-preview');
+    let data = null;
+    try { data = box ? JSON.parse(box.dataset.cells || 'null') : null; } catch (e) { data = null; }
+    if (!box || !data || !data.items || !data.items.length) return { schedule: () => {} };
+
+    const [CW, CH] = data.cell_pt;
+    const LINE = 1.2;
+    const FONT = 'Helvetica, Arial, sans-serif';  // the PDF's helv/hebo; Arial has the same letter widths
+    const TEXT_STYLES = {  // packing_label_generator.TEXT_STYLES: base size, bold, colour
+        desc: [9, false, '#000'], dimension: [9, true, '#000'], material: [9, false, '#000'],
+        install: [9, true, 'rgb(204,0,0)'], notes: [9, false, '#000'],
+    };
+
+    let frame = 0;
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; render(); }); };
+
+    // Each item's images, loaded once; a picture that can't be read shows "Image Error", as in the PDF
+    const images = data.items.map(item => (item.thumbnails || []).map(src => {
+        const img = { el: null, failed: !src };
+        if (src) {
+            img.el = new Image();
+            img.el.onload = schedule;
+            img.el.onerror = () => { img.failed = true; schedule(); };
+            img.el.src = src;
+        }
+        return img;
+    }));
+    const canvases = data.items.map((item, i) => {
+        const canvas = document.createElement('canvas');
+        canvas.setAttribute('role', 'img');
+        canvas.setAttribute('aria-label', `Item ${i + 1}: ${item.job_no || 'no job number'}`);
+        box.appendChild(canvas);
+        return canvas;
+    });
+
+    function setFont(ctx, bold, size) { ctx.font = `${bold ? 'bold ' : ''}${size}px ${FONT}`; }
+
+    // _wrap: words onto lines no wider than width; a word too long for a line is cut
+    function wrap(ctx, text, bold, size, width) {
+        setFont(ctx, bold, size);
+        const w = s => ctx.measureText(s).width;
+        const lines = [];
+        for (const paragraph of String(text).split(/\r\n|\r|\n/)) {
+            let line = '';
+            for (let word of paragraph.split(/\s+/).filter(Boolean)) {
+                while (w(word) > width) {
+                    let cut = word.length;
+                    while (cut > 1 && w(word.slice(0, cut)) > width) cut--;
+                    if (line) { lines.push(line); line = ''; }
+                    lines.push(word.slice(0, cut));
+                    word = word.slice(cut);
+                }
+                const candidate = `${line} ${word}`.trim();
+                if (line && w(candidate) > width) { lines.push(line); line = word; }
+                else line = candidate;
+            }
+            if (line) lines.push(line);
+        }
+        return lines;
+    }
+
+    // _draw_lines: each line centred between x0 and x1
+    function drawLines(ctx, lines, x0, x1, y, bold, size, colour) {
+        setFont(ctx, bold, size);
+        ctx.fillStyle = colour;
+        ctx.textBaseline = 'alphabetic';
+        for (const line of lines) {
+            const lw = ctx.measureText(line).width;
+            ctx.fillText(line, x0 + (x1 - x0 - lw) / 2, y + size * 0.92);
+            y += size * LINE;
+        }
+    }
+
+    function roundRect(ctx, x0, y0, x1, y1, r) {
+        r = Math.min(r, (x1 - x0) / 2, (y1 - y0) / 2);
+        ctx.beginPath();
+        ctx.moveTo(x0 + r, y0);
+        ctx.arcTo(x1, y0, x1, y1, r);
+        ctx.arcTo(x1, y1, x0, y1, r);
+        ctx.arcTo(x0, y1, x0, y0, r);
+        ctx.arcTo(x0, y0, x1, y0, r);
+        ctx.closePath();
+    }
+
+    // _layout_cell: stacks the blocks top-down and returns the height used; draws only when draw is true
+    function layout(ctx, item, imgs, order, textScale, thumbScale, draw) {
+        const pad = 4, x0 = pad, x1 = CW - pad, innerW = x1 - x0, gap = 3 * textScale;
+        let y = pad;
+        for (const attr of order) {
+            if (attr === 'thumbnail') {
+                if (!imgs.length) continue;
+                const h = CH * 0.35 * thumbScale;
+                if (draw) {
+                    // One image: centred, 70% of the box width. Several: share the full width, up to 3 a row
+                    const n = imgs.length, perRow = Math.min(n, 3), rows = Math.ceil(n / perRow);
+                    const areaW = n === 1 ? CW * 0.7 : innerW;
+                    const ax = (CW - areaW) / 2;
+                    const slotW = (areaW - (perRow - 1) * 2) / perRow;
+                    const slotH = (h - (rows - 1) * 2) / rows;
+                    imgs.forEach((img, i) => {
+                        const sx = ax + (i % perRow) * (slotW + 2);
+                        const sy = y + Math.floor(i / perRow) * (slotH + 2);
+                        if (img.failed) {
+                            setFont(ctx, false, 8);
+                            ctx.fillStyle = '#000';
+                            const tw = ctx.measureText('Image Error').width;
+                            ctx.fillText('Image Error', sx + (slotW - tw) / 2, sy + 8);
+                        } else if (img.el && img.el.complete && img.el.naturalWidth) {
+                            const s = Math.min(slotW / img.el.naturalWidth, slotH / img.el.naturalHeight);
+                            const w = img.el.naturalWidth * s, ih = img.el.naturalHeight * s;
+                            ctx.drawImage(img.el, sx + (slotW - w) / 2, sy + (slotH - ih) / 2, w, ih);
+                        }
+                    });
+                }
+                y += h + gap;
+            } else if (attr === 'job_no') {
+                if (!item.job_no) continue;
+                const size = 14 * textScale;
+                const lines = wrap(ctx, item.job_no, true, size, innerW - 4);
+                const h = lines.length * size * LINE + 6 * textScale;
+                if (draw) {
+                    roundRect(ctx, 3, y, CW - 3, y + h, 3);
+                    ctx.fillStyle = '#000';
+                    ctx.fill();
+                    drawLines(ctx, lines, x0, x1, y + 3 * textScale, true, size, '#fff');
+                }
+                y += h + gap;
+            } else if (attr === 'barcode') {
+                const modules = item.modules;
+                if (!modules) continue;
+                // Code 128 needs blank modules either side; the bars get as wide as the box allows
+                const moduleW = Math.min(data.barcode_max_module, innerW / (modules.length + 2 * data.barcode_quiet));
+                const barH = 22 * textScale, size = 6.5 * textScale;
+                const h = barH + 2 + size * LINE;
+                if (draw) {
+                    const bx = (CW - modules.length * moduleW) / 2;
+                    ctx.fillStyle = '#000';
+                    let runStart = -1;
+                    for (let i = 0; i <= modules.length; i++) {
+                        const bar = i < modules.length && modules[i] === '1';
+                        if (bar && runStart < 0) runStart = i;
+                        else if (!bar && runStart >= 0) { ctx.fillRect(bx + runStart * moduleW, y, (i - runStart) * moduleW, barH); runStart = -1; }
+                    }
+                    drawLines(ctx, [item.barcode], x0, x1, y + barH + 2, false, size, '#000');
+                }
+                y += h + gap;
+            } else if (attr === 'qty') {
+                if (!item.qty) continue;
+                const size = 20 * textScale, border = 2.5 * textScale;
+                const lines = wrap(ctx, item.qty, true, size, innerW - 2 * border - 8);
+                setFont(ctx, true, size);
+                const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
+                const boxW = Math.min(innerW, Math.max(70 * textScale, widest + 16 * textScale));
+                const h = lines.length * size * LINE + 6 * textScale;
+                if (draw) {
+                    const bx0 = (CW - boxW) / 2, half = border / 2;
+                    ctx.lineWidth = border;
+                    ctx.strokeStyle = '#000';
+                    ctx.strokeRect(bx0 + half, y + half, boxW - border, h - border);
+                    drawLines(ctx, lines, bx0, bx0 + boxW, y + 3 * textScale, true, size, '#000');
+                }
+                y += h + gap;
+            } else if (TEXT_STYLES[attr]) {
+                const val = item[attr];
+                if (!val) continue;
+                const [base, bold, colour] = TEXT_STYLES[attr];
+                const size = base * textScale;
+                const lines = wrap(ctx, val, bold, size, innerW);
+                if (draw) drawLines(ctx, lines, x0, x1, y, bold, size, colour);
+                y += lines.length * size * LINE + gap;
+            }
+        }
+        return y - gap + pad;
+    }
+
+    // _draw_cell: shrink the text first (down to 65%), then the images, until the whole stack fits the box
+    function drawCell(ctx, item, imgs, order) {
+        let textScale = 1, thumbScale = 1;
+        for (let step = 0; step <= 70; step++) {
+            const s = 1 - step * 0.01;
+            textScale = Math.max(s, 0.65);
+            thumbScale = s >= 0.65 ? 1 : s / 0.65;
+            if (layout(ctx, item, imgs, order, textScale, thumbScale, false) <= CH) break;
+        }
+        layout(ctx, item, imgs, order, textScale, thumbScale, true);
+        roundRect(ctx, 0.375, 0.375, CW - 0.375, CH - 0.375, data.radius_pt);
+        ctx.lineWidth = 0.75;
+        ctx.strokeStyle = '#000';
+        ctx.stroke();
+    }
+
+    function render() {
+        const order = getOrder();
+        const dpr = window.devicePixelRatio || 1;
+        canvases.forEach((canvas, i) => {
+            const cssW = canvas.clientWidth || 160;
+            const pxW = Math.round(cssW * dpr), pxH = Math.round(cssW * CH / CW * dpr);
+            if (canvas.width !== pxW || canvas.height !== pxH) { canvas.width = pxW; canvas.height = pxH; }
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, pxW, pxH);
+            ctx.setTransform(pxW / CW, 0, 0, pxW / CW, 0, 0);  // draw in PDF points
+            drawCell(ctx, data.items[i], images[i], order);
+        });
+    }
+
+    if (window.ResizeObserver) new ResizeObserver(schedule).observe(box);
+    schedule();
+    return { schedule };
+}
 // =========================================
 // 11. COURIER CONSIGNMENTS (packing labels preview)
 // =========================================
