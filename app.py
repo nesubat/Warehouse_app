@@ -18,7 +18,7 @@ from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
 from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
-from packing_label_generator import (parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
+from packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from address_book import AddressBook, AddressBookError
@@ -27,6 +27,9 @@ from address_match import suggestions as closest_addresses, name_score
 from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
 from courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
     FIELD_NAMES as IMPORT_FIELD_NAMES
+import address_reference
+import data_transfer
+from address_book import one_line as address_one_line
 from label_stitcher import plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label
 import threading
 from collections import Counter
@@ -389,7 +392,7 @@ def newest_first(folder, names):
 
 
 def _generation_report(job, project, shipment_reference, sheet_warnings, courier_warnings,
-                       all_cartons, cartons, consignments, by_number, service, sender, csv_formats=None):
+                       all_cartons, cartons, consignments, by_number, service, sender, csv_formats=None, ref_issues=None):
     """The job report on page 1 of the packing labels: job number, project, and what needs a look while preparing
     labels (draw_report_pages). Read before Generate saves the new addresses to the address book."""
     def receiver(c):
@@ -411,6 +414,8 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
          'items': [f"{x['item_reference']} ({x['packing_spec']}) - {receiver(by_number[x['consignment']])}" for x in left_out]},
         {'title': "No size saved for the packing spec - dimensions blank in the CSV", 'level': 'warn',
          'items': [f"{x['item_reference']}: {x['packing_spec']}" for x in no_size]},
+        {'title': "Don't match the official address data (G-NAF / LINZ) - check before dispatch", 'level': 'warn',
+         'items': list(ref_issues or [])},
         {'title': "New to the address book - check before dispatch", 'level': 'warn',
          'items': [f"#{c['number']} {receiver(c)} - {one_line(c['destination'])}" for c in new_addresses]},
         {'title': "Courier checks", 'level': 'warn', 'items': [w for w in courier_warnings if not w.startswith(own)]},
@@ -1514,6 +1519,39 @@ def _closest(address, cache=None):
             for s in closest_addresses(address, ADDRESS_BOOK.candidates(address, cache))]
 
 
+def _same_place(a, b):
+    """Two addresses are the same place as the address book compares them (capitals, spacing, St = Street …)."""
+    pick = lambda x: {k: str((x or {}).get(k) or '') for k in ('line1', 'line2', 'suburb', 'state', 'postcode')}
+    return _address_key(one_line(pick(a))) == _address_key(one_line(pick(b)))
+
+
+def _reference_for(dest, edit=None, here=None):
+    """What the official address data says about a consignment address, after the address book has had its say:
+      verified  an address-book entry here was verified by the courier portal: nothing more is checked
+      kept      the user chose to keep this exact address as is (in this preview, or before in the book)
+      ok / note / mismatch / none   address_reference.assess(), with 'soft' when the address is saved in the book
+                (not verified): the official data's view is then only a note, the book's address may well be right"""
+    if not address_reference.available() or not (dest.get('postcode') or dest.get('suburb')):
+        return {'level': 'none', 'message': '', 'fields': {}, 'options': []}
+    try:
+        here = ADDRESS_BOOK.at_address(dest) if here is None else here
+    except Exception as e:
+        log_book.warning("Address book read failed while checking %s: %s", one_line(dest), e)
+        here = []
+    if any(e.get('verified_at') for e in here):
+        return {'level': 'verified', 'message': 'Verified by the courier portal', 'fields': {}, 'options': []}
+    keep = (edit or {}).get('ref_keep')
+    if any(e['ref']['status'] == 'kept' for e in here) or (isinstance(keep, dict) and _same_place(keep, dest)):
+        return {'level': 'kept', 'message': 'Kept as is', 'fields': {}, 'options': []}
+    try:
+        r = address_reference.assess(dest)
+    except Exception as e:
+        log_book.exception("Official address check failed for %s: %s", one_line(dest), e)
+        return {'level': 'none', 'message': '', 'fields': {}, 'options': []}
+    return {'level': r['level'], 'message': r['message'], 'fields': r['fields'], 'options': r['options'],
+            'country': r.get('country', ''), 'soft': bool(here)}
+
+
 def _check_against_book(consignments, edits):
     """Sets each consignment's 'book' status for the preview:
       book       filled in from the address book (a spelling it learned)
@@ -1557,8 +1595,18 @@ def _check_against_book(consignments, edits):
         except Exception as e:
             log_book.exception("Address book check failed for #%s: %s", c.get('number'), e)
             c['book'] = 'checked'  # don't flag every row because the book couldn't be read
-    # No address first, then not in the book; otherwise keep consignment order
-    return sorted(consignments, key=lambda c: {'missing': 0, 'unverified': 1}.get(c['book'], 2))
+    # The official address data: book entries first (a verified one settles it), then the reference
+    started = time.perf_counter()
+    for c in consignments:
+        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['book'] == 'missing'
+                    else _reference_for(c['destination'], edits.get(c['id'], {})))
+    if address_reference.available():
+        levels = Counter(c['ref']['level'] + ('-saved' if c['ref'].get('soft') else '') for c in consignments)
+        log_book.info("  official address data: %s in %.2fs", ", ".join(f"{k} {v}" for k, v in sorted(levels.items())),
+                      time.perf_counter() - started)
+    # No address first, then not in the book, then not matching the official data; otherwise consignment order
+    rank = lambda c: {'missing': 0, 'unverified': 1}.get(c['book'], 3 if c['ref']['level'] != 'mismatch' or c['ref'].get('soft') else 2)
+    return sorted(consignments, key=rank)
 
 
 @app.route('/address-book/update', methods=['GET', 'POST'])
@@ -1647,12 +1695,261 @@ def address_book_page():
     return render_template('address_book.html', total=ADDRESS_BOOK.count())
 
 
+# --- BACK UP OR MOVE THE APP'S DATA (data_transfer.py) ---
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+TRANSFER_UPLOADS = os.path.join(DATA_DIR, 'transfer_uploads')
+
+
+@app.route('/data-transfer')
+def data_transfer_page():
+    """Export any of the address book, packing specs and settings as one zip, or import such a zip."""
+    kept = _kept_view()  # an import's next step or result, reopened on refresh
+    if kept:
+        return kept
+    return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK))
+
+
+@app.route('/data-transfer/export', methods=['POST'])
+def data_transfer_export():
+    chosen = request.form.getlist('item')
+    try:
+        data, manifest = data_transfer.export_zip(DATA_DIR, ADDRESS_BOOK, chosen)
+    except data_transfer.TransferError as e:
+        return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK), error=str(e))
+    log_book.info("Data export: %s", ", ".join(manifest['items']))
+    return send_file(io.BytesIO(data), as_attachment=True, mimetype='application/zip',
+                     download_name=f"warehouse-data-{datetime.now():%Y%m%d-%H%M}.zip")
+
+
+@app.route('/data-transfer/import', methods=['POST'])
+def data_transfer_import():
+    """Step 1: an exported zip is uploaded and its contents listed. Step 2 ('apply'): the parts chosen are taken."""
+    here = data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK)
+    os.makedirs(TRANSFER_UPLOADS, exist_ok=True)
+    if 'apply' not in request.form:
+        upload = request.files.get('file')
+        if not upload or not upload.filename:
+            return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error="Choose the exported zip (warehouse-data-….zip).")
+        data = upload.read()
+        try:
+            manifest, items = data_transfer.describe_zip(data)
+        except data_transfer.TransferError as e:
+            return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error=str(e))
+        token = secrets.token_urlsafe(10)
+        with open(os.path.join(TRANSFER_UPLOADS, f"{token}.zip"), 'wb') as f:
+            f.write(data)
+        # Uploads not imported within a day go
+        for name in os.listdir(TRANSFER_UPLOADS):
+            path = os.path.join(TRANSFER_UPLOADS, name)
+            if time.time() - os.path.getmtime(path) > 86400:
+                os.remove(path)
+        return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, incoming=items, token=token, filename=upload.filename,
+                     exported_at=manifest.get('exported_at', '').replace('T', ' '))
+    token = request.form.get('token', '')
+    path = os.path.join(TRANSFER_UPLOADS, f"{os.path.basename(token)}.zip")
+    if not re.fullmatch(r'[\w-]{8,40}', token) or not os.path.exists(path):
+        return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error="That upload is no longer available: choose the zip again.")
+    # Each chosen item's mode; an item with only one way to import (settings: replace) needs no choice
+    choices = {k: request.form.get(f'mode_{k}') or data_transfer.ITEMS[k][3][0]
+               for k in request.form.getlist('item') if k in data_transfer.ITEMS}
+    try:
+        with open(path, 'rb') as f:
+            result = data_transfer.import_zip(f.read(), choices, DATA_DIR, ADDRESS_BOOK, SPEC_STORE)
+    except data_transfer.TransferError as e:
+        return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error=str(e))
+    except Exception as e:
+        log_book.exception("Data import failed")
+        return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error=f"The import failed: {e}. Nothing after the failure was changed; "
+                                                           f"a copy of the data from before is in data/backups.")
+    os.remove(path)
+    log_book.info("Data import: %s (backup %s)", result['done'], result['backup'])
+    recheck_book_async('import')  # imported addresses checked against the official data
+    return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK), done=result['done'],
+                 backup=os.path.relpath(result['backup'], BASE_DIR))
+
+
+@app.route('/address-data')
+def address_data_page():
+    """Official address data (G-NAF for Australia, LINZ for New Zealand): what's loaded, updates, a lookup tester."""
+    return render_template('address_data.html', au=address_reference.loaded_info('AU'), nz=address_reference.loaded_info('NZ'),
+                           due=address_reference.reminder(), settings=address_reference.load_settings(),
+                           job=address_reference.job_status(), remind_days=address_reference.REMIND_DAYS)
+
+
+@app.route('/api/address-data/key', methods=['POST'])
+def api_address_data_key():
+    """Saves the LINZ API key (kept in data/address_reference.json, on this computer only)."""
+    key = str((request.get_json(silent=True) or {}).get('linz_key', '')).strip()
+    address_reference.save_settings({'linz_key': key})
+    log_book.info("Address data: LINZ API key %s", "saved" if key else "removed")
+    return {'saved': bool(key)}
+
+
+@app.route('/api/address-data/updates')
+def api_address_data_updates():
+    """What the sources have now against what's loaded (only when the user asks)."""
+    return address_reference.check_updates()
+
+
+@app.route('/api/address-data/load', methods=['POST'])
+def api_address_data_load():
+    """Downloads and loads a country's data in the background ({'country': 'AU' or 'NZ'})."""
+    country = str((request.get_json(silent=True) or {}).get('country', '')).upper()
+    if country not in ('AU', 'NZ'):
+        return {'error': 'Choose AU or NZ.'}, 400
+    address_reference.close_all()
+    error = address_reference.start(country, log_book, on_done=lambda: recheck_book_async(f'{country} data updated'))
+    log_book.info("Address data: load %s %s", country, error or "started")
+    return ({'error': error}, 409) if error else {'started': country}
+
+
+@app.route('/api/address-data/status')
+def api_address_data_status():
+    job = address_reference.job_status()
+    if job.get('state') in ('done', 'failed'):
+        job['au'], job['nz'] = address_reference.loaded_info('AU'), address_reference.loaded_info('NZ')
+    return job
+
+
+@app.route('/api/address-data/lookup')
+def api_address_data_lookup():
+    """Checks one address against the official data: suburb + postcode + state, street, number."""
+    return address_reference.check_address({k: request.args.get(k, '') for k in
+                                            ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')})
+
+
+@app.route('/api/address-data/check-book', methods=['POST'])
+def api_address_data_check_book():
+    """Every address-book entry checked against the official data: counts per result and each entry's result."""
+    started = time.perf_counter()
+    rows, offset = [], 0
+    while True:
+        page, more = ADDRESS_BOOK.search('', 200, offset)
+        rows += page
+        offset += len(page)
+        if not more or not page:
+            break
+    results = []
+    for e in rows:
+        r = address_reference.check_address(e)
+        ADDRESS_BOOK.set_reference(e['id'], address_reference.assess(e))  # the book's own check, kept up to date
+        results.append({'id': e['id'], 'receiver': e['receiver'], 'address': address_one_line(e),
+                        'status': r['status'], 'country': r['country'], 'ms': r['ms'],
+                        'checks': r['checks'], 'suggestions': r['suggestions']})
+    counts = Counter(r['status'] for r in results)
+    took = time.perf_counter() - started
+    log_book.info("Address data: checked %d address-book entries in %.2fs: %s", len(results), took, dict(counts))
+    return {'results': results, 'counts': counts, 'seconds': round(took, 2),
+            'average_ms': round(sum(r['ms'] for r in results) / len(results), 1) if results else 0}
+
+
+RECHECK = {'running': False, 'done': 0, 'reason': ''}
+_RECHECK_LOCK = threading.Lock()
+
+
+def recheck_book_async(reason):
+    """Checks, in the background, every address-book entry not yet checked against the current official data (or
+    changed since): after a reference update, a Generate, or when the Address Book page finds stale entries."""
+    if not address_reference.available():
+        return
+    with _RECHECK_LOCK:
+        if RECHECK['running']:
+            return
+        RECHECK.update(running=True, done=0, reason=reason)
+    book = ADDRESS_BOOK
+
+    def work():
+        started, seen = time.perf_counter(), set()
+        try:
+            version = address_reference.data_version()
+            while True:
+                batch = [e for e in book.stale_for_reference(version, 500) if e['id'] not in seen]
+                if not batch:
+                    break
+                for e in batch:
+                    seen.add(e['id'])
+                    book.set_reference(e['id'], address_reference.assess(e))
+                    RECHECK['done'] += 1
+            if RECHECK['done']:
+                log_book.info("Address book checked against the official data (%s): %d entries in %.1fs, %d need a look",
+                              reason, RECHECK['done'], time.perf_counter() - started, book.needs_look_count())
+        except Exception as e:
+            log_book.exception("Address book check against the official data failed: %s", e)
+        finally:
+            RECHECK['running'] = False
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _check_entry(row):
+    """An entry just added or changed: checked against the official data straight away."""
+    if address_reference.available() and isinstance(row, dict) and row.get('id'):
+        try:
+            ADDRESS_BOOK.set_reference(row['id'], address_reference.assess(row))
+            return ADDRESS_BOOK.get(row['id'])
+        except Exception as e:
+            log_book.exception("Official address check failed for #%s: %s", row.get('id'), e)
+    return row
+
+
 @app.route('/api/addresses')
 def api_addresses():
-    rows, has_more = ADDRESS_BOOK.search(request.args.get('q', ''),
-                                         request.args.get('limit', 50, type=int),
-                                         request.args.get('offset', 0, type=int))
-    return {'rows': rows, 'has_more': has_more}
+    query, offset = request.args.get('q', ''), request.args.get('offset', 0, type=int)
+    rows, has_more = ADDRESS_BOOK.search(query, request.args.get('limit', 50, type=int), offset,
+                                         needs_look=request.args.get('needs') == '1')
+    if not query and not offset:
+        recheck_book_async('address book opened')  # only entries not checked against the current data
+    return {'rows': rows, 'has_more': has_more, 'needs_look': ADDRESS_BOOK.needs_look_count(),
+            'checking': RECHECK['running'], 'reference': address_reference.available()}
+
+
+@app.route('/api/addresses/<int:address_id>/keep', methods=['POST'])
+def api_address_keep(address_id):
+    """Keep this address as is: the official data's mismatch stops being flagged until the address changes."""
+    if not ADDRESS_BOOK.keep_as_is(address_id):
+        return {'error': 'That address no longer exists.'}, 404
+    log_book.info("Address #%s kept as is despite the official data", address_id)
+    return ADDRESS_BOOK.get(address_id)
+
+
+@app.route('/api/address-data/assess', methods=['POST'])
+def api_address_data_assess():
+    """One consignment address checked again after an edit in the preview ({'address', 'keep'})."""
+    data = request.get_json(silent=True) or {}
+    address = {k: str((data.get('address') or {}).get(k) or '') for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}
+    return _reference_for(address, {'ref_keep': data.get('keep')})
+
+
+@app.route('/api/address-data/complete')
+def api_address_data_complete():
+    """Suggestions for one address field as it's typed: saved addresses the courier verified first, then other saved
+    addresses (both as whole addresses), then the official data for that field."""
+    field = request.args.get('field', '')
+    value = request.args.get('value', '').strip()
+    ctx = {k: request.args.get(k, '') for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}
+    out = []
+    if field in ('line1', 'line2', 'suburb', 'postcode') and len(value) >= 2:
+        try:
+            rows = ADDRESS_BOOK.search(value, 30)[0]
+        except Exception:
+            rows = []
+        typed = _norm(value)
+        rows = [r for r in rows if typed in _norm(r.get(field)) or _norm(r.get(field)).startswith(typed)]
+        seen = set()
+        for verified in (True, False):
+            n = 0
+            for r in rows:
+                key = _address_key(r['address'])
+                if bool(r.get('verified_at')) != verified or key in seen or n >= 3:
+                    continue
+                seen.add(key)
+                n += 1
+                out.append({'source': 'verified' if verified else 'saved', 'label': r['address'] + (f", {r['country']}" if r['country'] != 'AU' else ''),
+                            'detail': r['receiver'], 'fields': {k: r[k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}})
+    try:
+        out += [{**o, 'source': 'official'} for o in address_reference.complete(field, value, ctx)]
+    except Exception as e:
+        log_book.warning("Official suggestions failed for %s=%r: %s", field, value, e)
+    return {'options': out[:10]}
 
 
 def _export_values(form):
@@ -1685,7 +1982,7 @@ def api_address_create():
     try:
         row = ADDRESS_BOOK.create(request.get_json(silent=True) or {})
         log_book.info("Address added #%s: %s", row.get('id'), row.get('receiver'))
-        return row, 201
+        return _check_entry(row), 201
     except AddressBookError as e:
         log_book.warning("Address not added: %s", e)
         return {'error': str(e)}, 400
@@ -1696,7 +1993,7 @@ def api_address_update(address_id):
     try:
         row = ADDRESS_BOOK.update(address_id, request.get_json(silent=True) or {})
         log_book.info("Address #%s updated: %s", address_id, row.get('receiver') if isinstance(row, dict) else row)
-        return row
+        return _check_entry(row)
     except AddressBookError as e:
         log_book.warning("Address #%s not updated: %s", address_id, e)
         return {'error': str(e)}, 400
@@ -1894,6 +2191,8 @@ def _distribution_page(mode):
                 'weights_json': json.dumps(weights),
                 'spec_gaps': any(x['spec_kind'] in ('unknown', 'incomplete') for x in cartons),
                 'unverified': sum(c['book'] == 'unverified' for c in consignments),
+                'ref_mismatch': sum(c['ref']['level'] == 'mismatch' and not c['ref'].get('soft') for c in consignments),
+                'ref_loaded': address_reference.available(),
                 'missing': sum(c['book'] == 'missing' for c in consignments),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
@@ -2026,8 +2325,14 @@ def _distribution_page(mode):
                     label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
                                                       'sent': not c.get('no_address')}
                 shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
+                ref_issues = []
+                for c in consignments:
+                    r = _reference_for(c['destination'], _consignment_edits(request.form).get(c['id'], {}))
+                    if r['level'] == 'mismatch':
+                        ref_issues.append(f"#{c['number']} {c['destination']['receiver']} - {one_line(c['destination'])}: {r['message']}")
                 report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
-                                            all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats)
+                                            all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
+                                            ref_issues)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
                     page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
                                                     serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
@@ -2074,6 +2379,15 @@ def _distribution_page(mode):
             try:
                 ADDRESS_BOOK.record_used([(c['destination'], [x['source_id'] for x in c['cartons']]) for c in consignments])
                 log_book.info("Address book: %d consignment address(es) saved / marked used", len(consignments))
+                # Kept as is in the preview despite the official data: the book remembers, so it isn't flagged again
+                edits = _consignment_edits(request.form)
+                kept = [c for c in consignments if isinstance(edits.get(c['id'], {}).get('ref_keep'), dict)
+                        and _same_place(edits[c['id']]['ref_keep'], c['destination'])]
+                for c in kept:
+                    ADDRESS_BOOK.keep_address_as_is(c['destination'])
+                if kept:
+                    log_book.info("Address book: %d address(es) kept as is despite the official data", len(kept))
+                recheck_book_async('generate')
             except Exception as e:
                 log_book.exception("Could not update the address book after Generate: %s", e)
 

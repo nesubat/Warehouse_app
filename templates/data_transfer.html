@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Back Up &amp; Move Data</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    {{ nav('💾 Back Up & Move', url_for('data_transfer_page')) }}
+
+    <div class="container dt-page" id="data-transfer">
+        <h1>💾 Back Up &amp; Move Data</h1>
+        <p class="ab-intro">Your address book, packing specs and settings live in this copy's <code>data</code> folder, which isn't part of the code (git leaves it out). Export them to a zip to keep a backup or to set up another copy of the app, and import that zip there. Choose one thing or all of them.</p>
+
+        {% if error %}<div class="blueprint-card blueprint-error"><p class="pl-page-error-text">{{ error }}</p></div>{% endif %}
+
+        {% if done %}
+        <div class="success-box dt-done">
+            <h3>✅ Imported</h3>
+            <ul>{% for label, what in done %}<li><strong>{{ label }}:</strong> {{ what }}</li>{% endfor %}</ul>
+            <p class="issue-detail">A copy of what was here before is in <code>{{ backup }}</code>. Imported addresses are being checked against the official address data.</p>
+        </div>
+        {% endif %}
+
+        <div class="dt-cards">
+            <form class="dt-card" method="POST" action="{{ url_for('data_transfer_export') }}" id="dt-export">
+                <h2>⬇ Export</h2>
+                <p class="issue-detail">Saved as <code>warehouse-data-&lt;date&gt;.zip</code> in your downloads.</p>
+                <label class="dt-all"><input type="checkbox" id="dt-export-all"> <strong>Everything</strong></label>
+                {% for it in here %}
+                <label class="dt-item{% if not it.present %} dt-absent{% endif %}">
+                    <input type="checkbox" name="item" value="{{ it.key }}"{% if not it.present %} disabled{% endif %}>
+                    <span><strong>{{ it.label }}</strong> <span class="dt-summary">— {{ it.summary }}</span><br><span class="issue-detail">{{ it.about }}</span></span>
+                </label>
+                {% endfor %}
+                <p class="dt-note issue-detail">Not included: the official address data (G-NAF / LINZ, about 200 MB). Load it again on the <a href="{{ url_for('address_data_page') }}">📍 Address Data</a> page of the other copy. The Address data settings include your LINZ API key: keep that zip private.</p>
+                <p class="dt-error" role="alert" hidden>Choose at least one thing to export.</p>
+                <button type="submit" class="ab-btn">Export</button>
+            </form>
+
+            <div class="dt-card">
+                <h2>⬆ Import</h2>
+                {% if incoming %}
+                <form method="POST" action="{{ url_for('data_transfer_import') }}" id="dt-import">
+                    <input type="hidden" name="apply" value="1">
+                    <input type="hidden" name="token" value="{{ token }}">
+                    <p><strong>{{ filename }}</strong>{% if exported_at %} <span class="issue-detail">· exported {{ exported_at }}</span>{% endif %}</p>
+                    <label class="dt-all"><input type="checkbox" id="dt-import-all"> <strong>Everything in it</strong></label>
+                    {% for it in incoming %}
+                    <div class="dt-item">
+                        <label><input type="checkbox" name="item" value="{{ it.key }}">
+                            <span><strong>{{ it.label }}</strong> <span class="dt-summary">— {{ it.summary }}</span></span></label>
+                        {% if it.modes|length > 1 %}
+                        <span class="dt-modes">
+                            <label><input type="radio" name="mode_{{ it.key }}" value="merge" checked> Merge <span class="issue-detail">(add what's missing here)</span></label>
+                            <label><input type="radio" name="mode_{{ it.key }}" value="replace"> Replace <span class="issue-detail">(only the zip's)</span></label>
+                        </span>
+                        {% else %}
+                        <input type="hidden" name="mode_{{ it.key }}" value="replace"><span class="dt-modes issue-detail">Replaces the one here</span>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                    <p class="dt-error" role="alert" hidden>Choose at least one thing to import.</p>
+                    <button type="submit" class="ab-btn">Import the chosen</button>
+                    <a href="{{ url_for('data_transfer_page') }}" class="ab-btn ab-btn-plain">Cancel</a>
+                    <p class="issue-detail">Before anything changes, the current files are copied to <code>data/backups</code>.</p>
+                </form>
+                {% else %}
+                <form method="POST" action="{{ url_for('data_transfer_import') }}" enctype="multipart/form-data">
+                    <p class="issue-detail">Choose a zip exported from this app (here or on another computer). Its contents are shown next, to choose from.</p>
+                    <div class="dropzone">
+                        <div class="dropzone-content">
+                            <div class="dropzone-icon">📦</div>
+                            <p class="dropzone-text">Drag &amp; drop the exported zip here</p>
+                            <p class="dropzone-subtext">or click to browse — warehouse-data-….zip</p>
+                            <p class="dropzone-filename"></p>
+                        </div>
+                        <input type="file" name="file" class="dropzone-input" accept=".zip" required>
+                    </div>
+                    <button type="submit" class="ab-btn">Show what's in it</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

@@ -19,6 +19,9 @@
             <input type="search" id="ab-search" class="ab-search" placeholder="Search receiver, contact, street, suburb or postcode…" aria-label="Search the address book" autocomplete="off" autofocus>
             <button type="button" id="ab-add" class="ab-btn">+ Add address</button>
             <a href="{{ url_for('bulk_update_addresses') }}" class="ab-btn ab-btn-plain" title="Add the courier portal's CSV of verified addresses">⬆ Update in bulk</a>
+            <button type="button" id="ab-needs-look" class="ab-btn ab-btn-plain ab-needs-look" aria-pressed="false" hidden title="Show only the addresses that don't match the official address data">⚠ Needs a look <span></span></button>
+            <a href="{{ url_for('data_transfer_page') }}" class="ab-btn ab-btn-plain" title="Export or import the address book, packing specs and settings">💾 Back up &amp; move</a>
+            <a href="{{ url_for('address_data_page') }}" class="ab-btn ab-btn-plain" title="Official suburbs, postcodes and streets for AU (G-NAF) and NZ (LINZ)">📍 Address Data</a>
         </div>
         <div class="ab-meta">
             <span id="ab-summary"></span>
@@ -65,6 +68,7 @@
                 <div class="ab-edit-actions">
                     <button type="button" class="ab-btn ab-save">Save</button>
                     <button type="button" class="ab-btn ab-btn-plain ab-cancel">Cancel</button>
+                    <button type="button" class="ab-btn ab-btn-plain ab-clear" title="Empty the address fields (receiver and contact stay)">Clear address</button>
                     <span class="ab-hint">Enter saves · Esc cancels · Receiver, Address Line 1 and Postcode are required</span>
                 </div>
             </td>

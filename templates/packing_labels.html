@@ -72,6 +72,7 @@
 </div>
 {% endif %}
 {% endmacro %}
+{% macro address_parts(d) %}{% set parts = [] %}{% for f in ['line1', 'line2', 'suburb', 'state', 'postcode'] %}{% if d[f] %}{% set _ = parts.append(f) %}{% endif %}{% endfor %}{% if d.country and d.country != 'AU' %}{% set _ = parts.append('country') %}{% endif %}{% for f in parts %}<span class="pl-af" data-f="{{ f }}">{{ d[f] }}</span>{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -312,6 +313,10 @@
                     <p class="pl-check-note" id="courier-check-note"><strong>{{ courier.unverified }} {{ 'address isn’t' if courier.unverified == 1 else 'addresses aren’t' }} in the address book yet.</strong>
                         {{ 'It’s' if courier.unverified == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-check">Check address</span>. Open ✏️ to compare with the closest saved addresses, then Save.</p>
                     {% endif %}
+                    {% if courier.ref_loaded %}
+                    <p class="pl-ref-note" id="courier-ref-note"{% if not courier.ref_mismatch %} hidden{% endif %}><strong>{{ courier.ref_mismatch }}</strong>
+                        <span>{{ 'address doesn’t' if courier.ref_mismatch == 1 else 'addresses don’t' }}</span> match the official address data (G-NAF / LINZ): the part that differs is underlined in amber, with a suggestion to apply in one click, or Keep as is.</p>
+                    {% endif %}
                     <table class="pl-courier-table">
                         <thead><tr><th>#</th><th>Receiver</th><th>Address · Items</th><th>Service Code</th></tr></thead>
                         <tbody>
@@ -334,7 +339,7 @@
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -349,7 +354,8 @@
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
                             <td class="pl-address-cell">
-                                <div class="pl-show-address">{% if c.address %}{{ c.address }}{% if d.country and d.country != 'AU' %}, {{ d.country }}{% endif %}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
+                                <div class="pl-show-address">{% if c.address %}{{ address_parts(d) }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
+                                <div class="pl-ref" aria-live="polite"></div>
                                 <div class="pl-items-label">Items <span class="pl-items-count">{{ c.cartons|length }}</span></div>
                                 <div class="pl-items">{% for x in c.cartons %}
                                 <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
@@ -414,6 +420,7 @@
                                     <button type="button" class="pl-btn-small pl-edit-save">Save</button>
                                     <button type="button" class="pl-btn-small pl-btn-plain pl-edit-cancel">Cancel</button>
                                     <button type="button" class="pl-btn-small pl-btn-plain pl-edit-reset">Reset to Excel</button>
+                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-clear" title="Empty the address fields (receiver and contact stay)">Clear address</button>
                                 </div>
                             </td>
                         </tr>

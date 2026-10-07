@@ -958,8 +958,7 @@ document.addEventListener('DOMContentLoaded', function () {
         row.querySelector('.pl-show-contact').textContent = d.contact ? 'Attn ' + d.contact : '';
         row.querySelector('.pl-show-atl').hidden = !d.authority_to_leave;
         const country = (d.country || 'AU').toUpperCase();
-        row.querySelector('.pl-show-address').textContent =
-            [d.line1, d.line2, d.suburb, d.state, d.postcode, country !== 'AU' ? country : ''].filter(Boolean).join(', ');
+        renderAddressParts(row.querySelector('.pl-show-address'), d);
         row.dataset.state = (d.state || '').toUpperCase();
         row.dataset.country = country;
         document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
@@ -1025,8 +1024,44 @@ document.addEventListener('DOMContentLoaded', function () {
             if (d.postcode) markAddressed(row);
             close();
             applyFilters();
+            PL_REF.recheck(row, changed ? d : original, edits[id] && edits[id].ref_keep);
         });
         editRow.querySelector('.pl-edit-cancel').addEventListener('click', close);
+
+        // A suggestion from the official address data applied in one click: an edit like ✏️ Save, counted as checked
+        row.addEventListener('pl-ref-use', (e) => {
+            const d = { ...current(), ...e.detail.fields };
+            if ('suburb' in e.detail.fields) d.suburb = (d.suburb || '').toUpperCase();
+            const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
+            edits[id] = { ...keep, checked: true, ...d };
+            tidy(id);
+            show(row, d);
+            row.querySelector('.pl-tag-edited').hidden = false;
+            row.querySelector('.pl-tag-book').hidden = true;
+            markChecked(row);
+            if (d.postcode) markAddressed(row);
+            applyFilters();
+            PL_REF.recheck(row, d, null);
+        });
+        // Keep as is: this exact address stops being flagged (the address book remembers it on Generate)
+        row.addEventListener('pl-ref-keep', () => {
+            const d = current();
+            editOf(id).ref_keep = Object.fromEntries(['line1', 'line2', 'suburb', 'state', 'postcode'].map((k) => [k, d[k] || '']));
+            save();
+            PL_REF.render(row, { level: 'kept', message: 'Kept as is', fields: {}, options: [] });
+        });
+        // Clear: the address fields only; receiver and contact stay
+        editRow.querySelector('.pl-edit-clear').addEventListener('click', () => {
+            ['line1', 'line2', 'suburb', 'state', 'postcode', 'country'].forEach((k) => {
+                const input = editRow.querySelector(`[data-field="${k}"]`);
+                if (input) input.value = '';
+            });
+            const first = editRow.querySelector('[data-field="line1"]');
+            first.focus();
+            first.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        // Suggestions while typing: verified saved addresses, then other saved ones, then the official data
+        attachFieldSuggest(editRow);
 
         // Closest saved addresses: clicking one fills the form; typing in any field re-ranks the list
         const closest = attachClosest(editRow, (entry) => fill(editRow, entry), () => read(editRow));
@@ -1238,19 +1273,87 @@ document.addEventListener('DOMContentLoaded', function () {
             who.append(v);
         }
         if (entry.contact) { const c = document.createElement('div'); c.className = 'ab-detail'; c.textContent = `Attn ${entry.contact}`; who.append(c); }
-        tr.append(actions, who, cell([entry.line1, entry.line2].filter(Boolean).join(', ')), cell(entry.suburb),
-                  cell(entry.state), cell(entry.postcode), cell(entry.country), cell(entry.authority_to_leave ? 'Y' : ''),
-                  cell(entry.use_count, 'ab-num'), cell(when(entry.last_used_at)));
+        const cells = { line1: cell([entry.line1, entry.line2].filter(Boolean).join(', ')), suburb: cell(entry.suburb),
+                        state: cell(entry.state), postcode: cell(entry.postcode), country: cell(entry.country) };
+        tr.append(actions, who, cells.line1, cells.suburb, cells.state, cells.postcode, cells.country,
+                  cell(entry.authority_to_leave ? 'Y' : ''), cell(entry.use_count, 'ab-num'), cell(when(entry.last_used_at)));
+        showReference(tr, entry, cells);
         return tr;
     }
+
+    // The official address data's check of an entry: the cells that differ underlined in amber, the reason and one-click
+    // fixes under the address, Keep as is. An entry the courier portal verified isn't flagged.
+    function showReference(tr, entry, cells) {
+        const ref = entry.ref || {};
+        const flagged = ref.status === 'mismatch' && !entry.verified_at;
+        tr.classList.toggle('ab-needs-look-row', flagged);
+        Object.entries(ref.fields || {}).forEach(([field, f]) => {
+            const td = cells[field === 'line2' ? 'line1' : field];
+            if (!td || entry.verified_at) return;
+            td.classList.add(`ab-flag-${f.level}`);
+            td.title = f.text;
+        });
+        if (!flagged && ref.status !== 'note') return;
+        const box = document.createElement('div');
+        box.className = flagged ? 'ab-ref ab-ref-bad' : 'ab-ref ab-ref-note';
+        const text = document.createElement('span');
+        text.textContent = (flagged ? '⚠ ' : 'ⓘ ') + ref.message;
+        box.append(text);
+        if (flagged) {
+            (ref.options || []).forEach((o) => {
+                const b = document.createElement('button');
+                b.type = 'button'; b.className = 'ab-btn ab-btn-small'; b.textContent = `Use ${o.label}`;
+                b.title = 'Change this entry to the official suburb, state and postcode';
+                b.addEventListener('click', async () => {
+                    const r = await send(`/api/addresses/${entry.id}`, 'PUT', { ...entry, ...o.fields });
+                    if (!r.ok) { say(r.error, true); return; }
+                    const fresh = rowFor(r.entry); fresh.classList.add('ab-flash'); tr.replaceWith(fresh);
+                    say(`Saved ${r.entry.receiver}.`); refreshCount();
+                });
+                box.append(b);
+            });
+            const keep = document.createElement('button');
+            keep.type = 'button'; keep.className = 'ab-btn ab-btn-small ab-btn-plain'; keep.textContent = 'Keep as is';
+            keep.title = 'This address is right: stop flagging it (until it changes)';
+            keep.addEventListener('click', async () => {
+                const r = await send(`/api/addresses/${entry.id}/keep`, 'POST');
+                if (!r.ok) { say(r.error, true); return; }
+                const fresh = rowFor(r.entry); tr.replaceWith(fresh);
+                say(`Kept ${r.entry.receiver} as is.`); refreshCount();
+            });
+            box.append(keep);
+        }
+        cells.line1.append(box);
+    }
+
+    // "Needs a look": only the addresses that don't match the official data (they're listed first anyway)
+    const needsBtn = document.getElementById('ab-needs-look');
+    let needsOnly = false, checkingTimer = null;
+    function showCount(n) {
+        needsBtn.hidden = !n && !needsOnly;
+        needsBtn.querySelector('span').textContent = `(${n})`;
+    }
+    async function refreshCount() {
+        try { showCount((await (await fetch('/api/addresses?limit=1&q=%20')).json()).needs_look); } catch (e) { /* not important */ }
+    }
+    needsBtn.addEventListener('click', () => {
+        needsOnly = !needsOnly;
+        needsBtn.setAttribute('aria-pressed', String(needsOnly));
+        load(true);
+    });
 
     async function load(reset) {
         if (reset) offset = 0;
         if (controller) controller.abort();
         controller = new AbortController();
         try {
-            const res = await fetch(`/api/addresses?limit=${PAGE}&offset=${offset}&q=${encodeURIComponent(query)}`, { signal: controller.signal });
+            const res = await fetch(`/api/addresses?limit=${PAGE}&offset=${offset}&q=${encodeURIComponent(query)}${needsOnly ? '&needs=1' : ''}`, { signal: controller.signal });
             const data = await res.json();
+            showCount(data.needs_look);
+            // Being checked against the official data in the background (after an update): look again shortly
+            clearTimeout(checkingTimer);
+            if (data.checking) { say('Checking the addresses against the official data…'); checkingTimer = setTimeout(() => load(true), 3000); }
+            else if (status.textContent.startsWith('Checking the addresses')) say('');
             if (reset) body.replaceChildren();
             data.rows.forEach((entry) => body.append(rowFor(entry)));
             offset += data.rows.length;
@@ -1258,7 +1361,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const shown = body.querySelectorAll('.ab-row').length;
             summary.textContent = query
                 ? (shown ? `${shown}${data.has_more ? '+' : ''} matching` : 'No matches')
-                : (total ? `${total.toLocaleString()} addresses · most recently used first` : 'No addresses yet. They are added automatically each time you generate packing labels, or use "Add address".');
+                : (total ? `${total.toLocaleString()} addresses · ${data.needs_look ? 'needing a look first, then ' : ''}most recently used first` : 'No addresses yet. They are added automatically each time you generate packing labels, or use "Add address".');
         } catch (err) {
             if (err.name !== 'AbortError') say('Could not load addresses. Is the app still running?', true);
         }
@@ -1289,6 +1392,12 @@ document.addEventListener('DOMContentLoaded', function () {
         };
         tr.querySelector('.ab-save').addEventListener('click', save);
         tr.querySelector('.ab-cancel').addEventListener('click', onCancel);
+        // Clear: the address fields only (receiver and contact stay); suggestions while typing
+        tr.querySelector('.ab-clear').addEventListener('click', () => {
+            ['line1', 'line2', 'suburb', 'state', 'postcode', 'country'].forEach((k) => { tr.querySelector(`[data-field="${k}"]`).value = ''; });
+            tr.querySelector('[data-field="line1"]').focus();
+        });
+        attachFieldSuggest(tr);
         tr.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); save(); }
             if (e.key === 'Escape') onCancel();
@@ -2275,5 +2384,338 @@ document.addEventListener('DOMContentLoaded', function () {
             fill(await (await fetch(panel.dataset.defaultsUrl)).json());
             status.textContent = 'Back to the saved defaults.';
         } catch (e) { status.textContent = 'Could not read the defaults.'; }
+    });
+});
+
+// =========================================
+// 22. ADDRESS DATA (address_data.html)
+// =========================================
+// Official address data: check for updates, download & load one country in the background (progress polled every 2s),
+// the LINZ key, a lookup tester and a check of the whole address book.
+document.addEventListener('DOMContentLoaded', function () {
+    const page = document.getElementById('address-data');
+    if (!page) return;
+    const $ = (id) => document.getElementById(id);
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const ICON = { true: '✓', false: '✕', null: 'ℹ' };
+    const STATUS = { verified: '✅ Verified', locality: '🟢 Suburb, postcode and state agree', mismatch: '⚠️ Doesn’t match',
+                     unknown: '❓ Not found', no_data: '— No data loaded' };
+
+    // Progress of a download / load
+    let polling = null;
+    function showJob(job) {
+        const box = $('ad-progress');
+        if (!job || !job.state || job.state === 'idle') { box.hidden = true; return; }
+        box.hidden = false;
+        box.dataset.state = job.state;
+        $('ad-step').textContent = `${job.country}: ${job.state === 'failed' ? 'Failed' : job.step || ''}`;
+        $('ad-count').textContent = job.total ? `${Number(job.done).toLocaleString()} / ${Number(job.total).toLocaleString()} ${job.unit}`
+                                              : (job.done ? `${Number(job.done).toLocaleString()} ${job.unit}` : '');
+        $('ad-bar').style.width = job.total ? `${Math.min(100, (100 * job.done) / job.total)}%` : (job.state === 'running' ? '100%' : '0');
+        $('ad-bar').classList.toggle('ad-bar-busy', job.state === 'running' && !job.total);
+        $('ad-message').textContent = job.message || '';
+        page.querySelectorAll('[data-load]').forEach((b) => { b.disabled = job.state === 'running'; });
+    }
+    async function poll() {
+        try {
+            const job = await (await fetch('/api/address-data/status')).json();
+            showJob(job);
+            if (job.state === 'running') { polling = setTimeout(poll, 2000); return; }
+            if (job.state === 'done') setTimeout(() => location.reload(), 1500);  // show the new counts
+        } catch (e) { polling = setTimeout(poll, 5000); }
+    }
+    let job = {};
+    try { job = JSON.parse(page.dataset.job || '{}'); } catch (e) { job = {}; }
+    showJob(job);
+    if (job.state === 'running') poll();
+
+    page.querySelectorAll('[data-load]').forEach((button) => button.addEventListener('click', async () => {
+        const country = button.dataset.load;
+        if (!confirm(country === 'AU' ? 'Download G-NAF (about 1.9 GB) and load it? It takes a while; the current data stays in use until it’s done.'
+                                      : 'Download the LINZ NZ addresses and load them? The current data stays in use until it’s done.')) return;
+        const res = await fetch('/api/address-data/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ country }) });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        clearTimeout(polling); poll();
+    }));
+
+    $('ad-check-updates').addEventListener('click', async (e) => {
+        const button = e.currentTarget;
+        button.disabled = true; button.textContent = 'Checking…';
+        try {
+            const data = await (await fetch('/api/address-data/updates')).json();
+            Object.entries(data).forEach(([c, r]) => {
+                const el = page.querySelector(`.ad-card[data-country="${c}"] [data-latest]`);
+                if (!el) return;
+                el.textContent = r.error ? `Couldn't check: ${r.error}`
+                    : r.newer ? `🆕 ${c === 'AU' ? `Newer release: ${r.latest} (${r.size_mb} MB)` : 'Worth refreshing: LINZ updates every week'}${r.loaded ? '' : ' (not loaded yet)'}`
+                              : `✓ Up to date (${r.latest})`;
+                el.classList.toggle('ad-newer', !!r.newer);
+            });
+            $('ad-last-checked').textContent = 'Last checked just now';
+        } catch (err) { alert('Could not check for updates.'); }
+        button.disabled = false; button.textContent = '🔄 Check for updates';
+    });
+
+    $('ad-key-save').addEventListener('click', async () => {
+        const res = await fetch('/api/address-data/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ linz_key: $('ad-linz-key').value }) });
+        $('ad-key-status').textContent = (await res.json()).saved ? '✓ Saved' : 'Removed';
+    });
+
+    function renderResult(r) {
+        return `<div class="ad-status ad-status-${r.status}">${STATUS[r.status] || r.status} <span class="issue-detail">${esc(r.country)} · ${r.ms} ms</span></div>`
+            + `<ul class="ad-checks">${r.checks.map((c) => `<li class="ad-check-${c.ok}"><span>${ICON[c.ok]}</span> <strong>${esc(c.what)}:</strong> ${esc(c.text)}</li>`).join('')}</ul>`
+            + (r.suggestions.length ? `<div class="issue-detail">Did you mean: ${r.suggestions.map((s) => esc([s.suburb, s.state, s.postcode].filter(Boolean).join(' '))).join(' · ')}</div>` : '');
+    }
+    $('ad-lookup').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const q = new URLSearchParams(new FormData(e.target));
+        const r = await (await fetch(`/api/address-data/lookup?${q}`)).json();
+        $('ad-result').innerHTML = renderResult(r);
+        $('ad-result').hidden = false;
+    });
+
+    $('ad-check-book').addEventListener('click', async (e) => {
+        const button = e.currentTarget;
+        button.disabled = true; button.textContent = 'Checking…';
+        try {
+            const data = await (await fetch('/api/address-data/check-book', { method: 'POST' })).json();
+            const order = ['mismatch', 'unknown', 'locality', 'verified', 'no_data'];
+            const rows = data.results.sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
+            $('ad-book-result').innerHTML =
+                `<p><strong>${rows.length} addresses in ${data.seconds}s</strong> (${data.average_ms} ms each): `
+                + order.filter((s) => data.counts[s]).map((s) => `${STATUS[s]} ${data.counts[s]}`).join(' · ') + '</p>'
+                + '<table class="ad-book-table"><thead><tr><th>Receiver</th><th>Address</th><th>Result</th></tr></thead><tbody>'
+                + rows.map((r) => `<tr><td>${esc(r.receiver)}</td><td>${esc(r.address)}</td><td>${renderResult(r)}</td></tr>`).join('')
+                + '</tbody></table>';
+            $('ad-book-result').hidden = false;
+        } catch (err) { alert('Could not check the address book.'); }
+        button.disabled = false; button.textContent = 'Check all saved addresses';
+    });
+});
+
+// =========================================
+// 23. OFFICIAL ADDRESS DATA IN THE PREVIEW AND THE FORMS
+// =========================================
+// renderAddressParts: a consignment's address as one span per part (line1, line2, suburb, state, postcode, country), so
+// a mismatch with the official data underlines only the part that's wrong.
+function renderAddressParts(el, d) {
+    const country = (d.country || 'AU').toUpperCase();
+    const parts = ['line1', 'line2', 'suburb', 'state', 'postcode'].filter((k) => d[k]);
+    if (country !== 'AU') parts.push('country');
+    el.replaceChildren();
+    parts.forEach((k, i) => {
+        const span = document.createElement('span');
+        span.className = 'pl-af';
+        span.dataset.f = k;
+        span.textContent = k === 'country' ? country : d[k];
+        el.append(span);
+        if (i < parts.length - 1) el.append(', ');
+    });
+}
+
+// PL_REF: what the official address data says about each consignment (the server works it out with the preview and
+// again after an edit). Soft on purpose:
+//   mismatch  the part that differs underlined in amber; under the address the reason, "Use …" fixes and Keep as is
+//             (only a grey note when the address is saved in the address book: the book's address may well be right)
+//   note      the street isn't on record: a grey line, no buttons (the official data lags new streets and centres)
+//   ok        a small ✓ after the address; a number not on record only shows when hovering the street
+const PL_REF = (() => {
+    const refNote = () => document.getElementById('courier-ref-note');
+    function count() {
+        const note = refNote();
+        if (!note) return;
+        const n = [...document.querySelectorAll('.pl-con-row')].filter((r) => r.dataset.refLevel === 'mismatch' && r.dataset.refSoft !== 'true').length;
+        note.hidden = !n;
+        note.querySelector('strong').textContent = n;
+        note.querySelector('span').textContent = n === 1 ? 'address doesn’t' : 'addresses don’t';
+    }
+    function button(text, cls, title, onClick) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = `pl-btn-small ${cls}`; b.textContent = text; b.title = title;
+        b.addEventListener('click', onClick);
+        return b;
+    }
+    function render(row, ref) {
+        ref = ref || {};
+        row.dataset.refLevel = ref.level || 'none';
+        row.dataset.refSoft = String(!!ref.soft);
+        const address = row.querySelector('.pl-show-address');
+        const box = row.querySelector('.pl-ref');
+        if (!address || !box) return;
+        address.querySelectorAll('.pl-af').forEach((span) => { span.className = 'pl-af'; span.removeAttribute('title'); });
+        address.querySelectorAll('.pl-ref-ok').forEach((x) => x.remove());
+        box.replaceChildren();
+        box.className = 'pl-ref';
+        const flag = ref.level === 'mismatch' ? (ref.soft ? 'soft' : 'bad') : null;
+        Object.entries(ref.fields || {}).forEach(([field, f]) => {
+            let span = address.querySelector(`.pl-af[data-f="${field}"]`) || (field === 'line1' && address.querySelector('.pl-af[data-f="line2"]'));
+            if (!span && field === 'country') {  // AU isn't shown: add it, to have something to underline
+                address.append(', ');
+                span = document.createElement('span');
+                span.className = 'pl-af'; span.dataset.f = 'country'; span.textContent = row.dataset.country || 'AU';
+                address.append(span);
+            }
+            if (!span) return;
+            const level = f.level === 'bad' ? (flag === 'soft' ? 'soft' : 'bad') : f.level;
+            span.classList.add(`pl-af-${level}`);
+            span.title = f.text;
+        });
+        if (ref.level === 'ok' || ref.level === 'verified') {
+            const ok = document.createElement('span');
+            ok.className = 'pl-ref-ok';
+            ok.textContent = ' ✓';
+            ok.title = ref.level === 'verified' ? 'Verified by the courier portal' : 'Matches the official address data';
+            address.append(ok);
+        }
+        if (flag) {
+            box.classList.add(flag === 'bad' ? 'pl-ref-bad' : 'pl-ref-soft');
+            const text = document.createElement('span');
+            text.className = 'pl-ref-text';
+            text.textContent = (flag === 'bad' ? '⚠ ' : 'Official data: ') + ref.message;
+            box.append(text);
+            (ref.options || []).forEach((o) => box.append(button(`Use ${o.label}`, '', 'Apply this to the address (like ✏️ Save)',
+                () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: o.fields } })))));
+            box.append(button('Keep as is', 'pl-btn-plain', 'This address is right: stop flagging it',
+                () => row.dispatchEvent(new CustomEvent('pl-ref-keep'))));
+        } else if (ref.level === 'note') {
+            box.classList.add('pl-ref-note');
+            box.textContent = `ⓘ ${ref.message}`;
+        } else if (ref.level === 'kept') {
+            box.classList.add('pl-ref-note');
+            box.textContent = 'Kept as is (official data differs)';
+        }
+        count();
+    }
+    let timers = new WeakMap();
+    function recheck(row, d, keep) {
+        clearTimeout(timers.get(row));
+        timers.set(row, setTimeout(async () => {
+            try {
+                const res = await fetch('/api/address-data/assess', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: d, keep: keep || null }) });
+                render(row, await res.json());
+            } catch (e) { /* leave it as it was */ }
+        }, 150));
+    }
+    return { render, recheck, count };
+})();
+
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.pl-con-row[data-ref]').forEach((row) => {
+        let ref = {};
+        try { ref = JSON.parse(row.dataset.ref || '{}'); } catch (e) { ref = {}; }
+        PL_REF.render(row, ref);
+    });
+});
+
+// attachFieldSuggest: suggestions under an address field while it's typed in (the ✏️ form, the Address Book editor).
+// Saved addresses the courier verified first, then other saved addresses (as whole addresses), then the official data
+// for that field (a suburb fills suburb, state and postcode; a street fills the line; with no suburb yet, a whole
+// address). ↑ ↓ to move, Enter to pick, Esc to close. Picking fills the fields and re-ranks "Closest saved addresses".
+function attachFieldSuggest(container) {
+    const FIELDS = ['line1', 'line2', 'suburb', 'state', 'postcode', 'country'];
+    const inputs = Object.fromEntries(FIELDS.map((k) => [k, container.querySelector(`[data-field="${k}"]`)]).filter(([, el]) => el));
+    const SOURCE = { verified: '✓ Verified', saved: 'Saved', official: 'Official' };
+    let menu = null, items = [], active = -1, timer = null, controller = null, applying = false;
+
+    const close = () => { if (menu) menu.remove(); menu = null; items = []; active = -1; };
+    const read = () => Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()]));
+    function apply(option) {
+        applying = true;
+        Object.entries(option.fields).forEach(([k, v]) => {
+            const el = inputs[k];
+            if (!el) return;
+            el.value = ['suburb', 'state', 'country'].includes(k) ? String(v || '').toUpperCase() : (v || '');
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        applying = false;
+        close();
+    }
+    function highlight(i) {
+        active = i;
+        items.forEach((el, n) => el.classList.toggle('af-active', n === i));
+        if (items[i]) items[i].scrollIntoView({ block: 'nearest' });
+    }
+    function show(input, options) {
+        close();
+        if (!options.length || document.activeElement !== input) return;
+        menu = document.createElement('div');
+        menu.className = 'af-menu';
+        menu.setAttribute('role', 'listbox');
+        options.forEach((o) => {
+            const el = document.createElement('div');
+            el.className = `af-item af-${o.source}`;
+            el.setAttribute('role', 'option');
+            const label = document.createElement('span'); label.className = 'af-label'; label.textContent = o.label;
+            const detail = document.createElement('span'); detail.className = 'af-detail'; detail.textContent = o.detail || '';
+            const source = document.createElement('span'); source.className = 'af-source'; source.textContent = SOURCE[o.source] || '';
+            el.append(label, detail, source);
+            el.addEventListener('mousedown', (e) => { e.preventDefault(); apply(o); });  // before the field loses focus
+            menu.append(el);
+            items.push(el);
+        });
+        const box = input.getBoundingClientRect();
+        menu.style.left = `${box.left + window.scrollX}px`;
+        menu.style.top = `${box.bottom + window.scrollY + 2}px`;
+        menu.style.minWidth = `${Math.max(box.width, 260)}px`;
+        document.body.append(menu);
+        menu._options = options;
+    }
+    Object.entries(inputs).forEach(([field, input]) => {
+        input.setAttribute('autocomplete', 'off');
+        input.addEventListener('input', () => {
+            if (applying) return;
+            clearTimeout(timer);
+            const value = input.value.trim();
+            if (!value && field !== 'state' && field !== 'country') { close(); return; }
+            timer = setTimeout(async () => {
+                if (controller) controller.abort();
+                controller = new AbortController();
+                const params = new URLSearchParams({ field, value, ...read() });
+                try {
+                    const res = await fetch(`/api/address-data/complete?${params}`, { signal: controller.signal });
+                    show(input, (await res.json()).options || []);
+                } catch (e) { /* aborted by a newer keystroke, or offline */ }
+            }, 180);
+        });
+        input.addEventListener('keydown', (e) => {
+            if (!menu) return;
+            if (e.key === 'ArrowDown') { e.preventDefault(); highlight(Math.min(items.length - 1, active + 1)); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(Math.max(0, active - 1)); }
+            else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopPropagation(); apply(menu._options[active]); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+        });
+        input.addEventListener('blur', () => setTimeout(close, 150));
+    });
+    window.addEventListener('scroll', close, { passive: true });
+}
+
+// =========================================
+// 24. BACK UP & MOVE DATA (data_transfer.html)
+// =========================================
+// "Everything" ticks every item of its list; sending with nothing ticked says so instead of going to the server.
+document.addEventListener('DOMContentLoaded', function () {
+    [['dt-export', 'dt-export-all'], ['dt-import', 'dt-import-all']].forEach(([formId, allId]) => {
+        const form = document.getElementById(formId);
+        const all = document.getElementById(allId);
+        if (!form || !all) return;
+        const boxes = [...form.querySelectorAll('input[name="item"]:not(:disabled)')];
+        const error = form.querySelector('.dt-error');
+        all.addEventListener('change', () => boxes.forEach((b) => { b.checked = all.checked; }));
+        boxes.forEach((b) => b.addEventListener('change', () => {
+            all.checked = boxes.every((x) => x.checked);
+            if (error) error.hidden = true;
+        }));
+        form.addEventListener('submit', (e) => {
+            if (boxes.some((b) => b.checked)) {
+                // An export is a download: the page stays, so the loading overlay mustn't stay up
+                if (formId === 'dt-export') setTimeout(() => { const o = document.getElementById('loading-overlay'); if (o) o.style.display = 'none'; }, 50);
+                return;
+            }
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (error) error.hidden = false;
+        }, true);
     });
 });

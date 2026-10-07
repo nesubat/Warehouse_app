@@ -12,6 +12,7 @@ loaded) and stays fast at hundreds of thousands of rows. Everything goes through
 moving to a cloud database later means replacing this one file.
 """
 import heapq
+import json
 import os
 import sqlite3
 import threading
@@ -120,6 +121,10 @@ def _match_query(text):
     return " AND ".join(parts)
 
 
+# An entry worth a look: it disagrees with the official address data, the courier portal hasn't verified it, and the
+# user hasn't chosen to keep this exact address as is
+NEEDS_LOOK = "(ref_status = 'mismatch' AND verified_at IS NULL AND ref_kept != address_key)"
+
 # Column weights for ranking: receiver and street lines count most, then suburb/postcode.
 CROWDED_SHORTLIST = 30  # in a postcode with more entries than near()'s limit, how many to score in full
 RANK = "bm25(addresses_fts, 4.0, 1.0, 3.0, 1.0, 2.0, 0.5, 2.0)"
@@ -133,8 +138,17 @@ class AddressBook:
         with self._connect() as db:
             db.executescript(SCHEMA)
             # Added after the first release: when an address was confirmed by the courier portal
-            if 'verified_at' not in {c[1] for c in db.execute("PRAGMA table_info(addresses)")}:
+            have = {c[1] for c in db.execute("PRAGMA table_info(addresses)")}
+            if 'verified_at' not in have:
                 db.execute("ALTER TABLE addresses ADD COLUMN verified_at REAL")
+            # Added with the official address data (address_reference.py): each entry's last check against it.
+            # ref_status: 'ok', 'note' (street not on record), 'mismatch', 'none'; ref_kept: the address_key the user
+            # chose to keep as is despite a mismatch (a later change to the address asks again)
+            for column, kind in (('ref_status', "TEXT NOT NULL DEFAULT ''"), ('ref_detail', "TEXT NOT NULL DEFAULT ''"),
+                                 ('ref_version', "TEXT NOT NULL DEFAULT ''"), ('ref_checked_at', 'REAL'),
+                                 ('ref_kept', "TEXT NOT NULL DEFAULT ''")):
+                if column not in have:
+                    db.execute(f"ALTER TABLE addresses ADD COLUMN {column} {kind}")
         self._add_contact_key()
         with self._connect() as db:
             self._pad_short_postcodes(db)
@@ -203,13 +217,30 @@ class AddressBook:
         d = {k: r[k] for k in ('id',) + TEXT_FIELDS + ('use_count', 'last_used_at', 'updated_at', 'verified_at')}
         d['authority_to_leave'] = bool(r['authority_to_leave'])
         d['address'] = one_line(d)
+        d['ref'] = AddressBook._ref(r)
         return d
+
+    @staticmethod
+    def _ref(r):
+        """The entry's last check against the official address data: {'status', 'message', 'fields', 'options',
+        'stale'}. status 'kept' when the user chose to keep this exact address as is."""
+        keys = r.keys()
+        if 'ref_status' not in keys or not r['ref_status']:
+            return {'status': '', 'message': '', 'fields': {}, 'options': [], 'version': ''}
+        try:
+            detail = json.loads(r['ref_detail'] or '{}')
+        except ValueError:
+            detail = {}
+        status = 'kept' if r['ref_kept'] and r['ref_kept'] == r['address_key'] else r['ref_status']
+        return {'status': status, 'message': detail.get('message', ''), 'fields': detail.get('fields', {}),
+                'options': detail.get('options', []), 'version': r['ref_version']}
 
     # ---------- reading ----------
 
-    def search(self, query='', limit=50, offset=0):
-        """Best matches first (closeness, then most used). An empty query lists the most recently used.
-        Returns (rows, has_more) without counting every match, so typing stays fast at any size."""
+    def search(self, query='', limit=50, offset=0, needs_look=False):
+        """Best matches first (closeness, then most used). An empty query lists the addresses that disagree with the
+        official data first, then the most recently used (needs_look: only those). Returns (rows, has_more) without
+        counting every match, so typing stays fast at any size."""
         limit, offset = max(1, min(int(limit), 200)), max(0, int(offset))
         db = self._connect()
         match = _match_query(query)
@@ -224,9 +255,44 @@ class AddressBook:
                    f"WHERE addresses_fts MATCH ? ORDER BY {RANK}, a.use_count DESC LIMIT ? OFFSET ?")
             rows = db.execute(sql, (match, limit + 1, offset)).fetchall()
         else:
-            sql = "SELECT * FROM addresses ORDER BY last_used_at DESC, updated_at DESC LIMIT ? OFFSET ?"
+            # Addresses that disagree with the official data come first (not ones the courier verified or the user kept)
+            sql = (f"SELECT * FROM addresses {'WHERE ' + NEEDS_LOOK if needs_look else ''} "
+                   f"ORDER BY {NEEDS_LOOK} DESC, last_used_at DESC, updated_at DESC LIMIT ? OFFSET ?")
             rows = db.execute(sql, (limit + 1, offset)).fetchall()
         return [self._row(r) for r in rows[:limit]], len(rows) > limit
+
+    def needs_look_count(self):
+        return self._connect().execute(f"SELECT COUNT(*) FROM addresses WHERE {NEEDS_LOOK}").fetchone()[0]
+
+    # ---------- the official address data's checks ----------
+
+    def stale_for_reference(self, version, limit=500):
+        """Entries not yet checked against this version of the official data, or changed since their check."""
+        rows = self._connect().execute(
+            "SELECT * FROM addresses WHERE ref_version != ? OR ref_checked_at IS NULL OR ref_checked_at < updated_at "
+            "LIMIT ?", (version, limit)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def set_reference(self, address_id, assessment):
+        """Stores an entry's check against the official data (address_reference.assess)."""
+        detail = json.dumps({k: assessment.get(k) for k in ('message', 'fields', 'options')})
+        db = self._connect()
+        with db:
+            db.execute("UPDATE addresses SET ref_status = ?, ref_detail = ?, ref_version = ?, ref_checked_at = ? WHERE id = ?",
+                       (assessment.get('level', ''), detail, assessment.get('version', ''), time.time(), address_id))
+
+    def keep_as_is(self, address_id):
+        """The user keeps this exact address despite the official data: it stops being flagged until it changes."""
+        db = self._connect()
+        with db:
+            return db.execute("UPDATE addresses SET ref_kept = address_key WHERE id = ?", (address_id,)).rowcount > 0
+
+    def keep_address_as_is(self, address):
+        """Every entry saved at this exact address is kept as is (from the consignment preview's Keep as is)."""
+        db = self._connect()
+        with db:
+            return db.execute("UPDATE addresses SET ref_kept = address_key WHERE address_key = ?",
+                              (_keys(_clean({**address, 'receiver': address.get('receiver') or '-'}))[0],)).rowcount
 
     def get(self, address_id):
         r = self._connect().execute("SELECT * FROM addresses WHERE id = ?", (address_id,)).fetchone()

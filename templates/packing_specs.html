@@ -13,7 +13,8 @@
 
     <div class="container ab-page ps-page" id="packing-specs">
         <h1>📐 Packing Specs</h1>
-        <p class="ab-intro">The size, weight and item type the courier CSV uses for each Packing Spec. Codes like OB, CS, Pallet and FP carry their size in the code; every other spec (A4 box, P7 jiffy bag…) uses the values saved here. Changes apply to the next preview or Generate. Weights are where each carton starts in the preview, where they can be changed for one job.</p>
+        <p class="ab-intro">The size, weight and item type the courier CSV uses for each Packing Spec. Codes like OB, CS, Pallet and FP carry their size in the code; every other spec (A4 box, P7 jiffy bag…) uses the values saved here. Changes apply to the next preview or Generate. Weights are where each carton starts in the preview, where they can be changed for one job.
+            <a href="{{ url_for('data_transfer_page') }}">💾 Back up or move</a> these specs to another copy of the app.</p>
 
         {% if saved %}<p class="ps-saved" role="status">✅ Saved. The next preview uses these values.</p>{% endif %}
         {% if errors %}<p class="ps-error-banner" role="alert">Nothing was saved: fix the {{ errors|length }} highlighted {{ 'row' if errors|length == 1 else 'rows' }} below.</p>{% endif %}

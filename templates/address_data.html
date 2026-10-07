@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Address Data</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    {{ nav(active='book') }}
+
+    {% macro source_card(code, title, info, source_text) %}
+    <div class="ad-card" data-country="{{ code }}">
+        <div class="ad-card-head">
+            <h3>{{ title }}</h3>
+            <span class="ad-badge {{ 'ad-badge-ok' if info else 'ad-badge-none' }}">{{ 'Loaded' if info else 'Not loaded' }}</span>
+        </div>
+        <p class="ad-source">{{ source_text|safe }}</p>
+        {% if info %}
+        <dl class="ad-facts">
+            <dt>Version</dt><dd>{{ info.version }}</dd>
+            <dt>Loaded</dt><dd>{{ info.loaded_at.replace('T', ' ') }}</dd>
+            <dt>Suburbs / localities</dt><dd>{{ '{:,}'.format(info.counts.locality or 0) }}</dd>
+            {% if code == 'AU' %}<dt>Postcodes</dt><dd>{{ '{:,}'.format(info.counts.postcodes or 0) }}</dd>{% endif %}
+            <dt>Streets</dt><dd>{{ '{:,}'.format(info.counts.street or 0) }}</dd>
+            <dt>Street numbers</dt><dd>{{ '{:,}'.format(info.counts.number or 0) }}</dd>
+            <dt>On disk</dt><dd>{{ info.size_mb }} MB</dd>
+        </dl>
+        {% endif %}
+        <p class="ad-latest issue-detail" data-latest></p>
+        <button type="button" class="ab-btn" data-load="{{ code }}">{{ 'Download & load again' if info else 'Download & load' }}</button>
+    </div>
+    {% endmacro %}
+
+    <div class="container ad-page" id="address-data" data-job="{{ job|tojson|forceescape }}">
+        <h1>📍 Address Data</h1>
+        <p class="ab-intro">Official suburbs, postcodes, streets and street numbers for Australia and New Zealand, kept on this computer, to check delivery addresses against. Nothing updates on its own: check for updates when you choose (a reminder shows after {{ remind_days }} days).</p>
+        <p><a href="{{ url_for('address_book_page') }}" class="nav-link">← Address Book</a></p>
+
+        {% if due %}
+        <div class="warning-box ad-reminder">
+            {% for c, age in due %}{{ c }}: {% if age is none %}not loaded yet{% else %}loaded {{ age }} days ago{% endif %}{{ '; ' if not loop.last }}{% endfor %}.
+            Check for updates when it suits you.
+        </div>
+        {% endif %}
+
+        <div class="ad-toolbar">
+            <button type="button" class="ab-btn ab-btn-plain" id="ad-check-updates">🔄 Check for updates</button>
+            <span class="issue-detail" id="ad-last-checked">{% if settings.last_checked %}Last checked {{ settings.last_checked.replace('T', ' ') }}{% else %}Not checked yet{% endif %}</span>
+        </div>
+
+        <div class="ad-progress" id="ad-progress" hidden>
+            <div class="ad-progress-text"><strong id="ad-step"></strong> <span id="ad-count"></span></div>
+            <div class="ad-bar"><div class="ad-bar-fill" id="ad-bar"></div></div>
+            <div class="issue-detail" id="ad-message"></div>
+        </div>
+
+        <div class="ad-cards">
+            {{ source_card('AU', '🇦🇺 Australia — G-NAF', au, 'Geoscape G-NAF from <a href="https://data.gov.au/data/dataset/geocoded-national-address-file-g-naf" target="_blank" rel="noopener">data.gov.au</a> (CC BY 4.0), released every 3 months. About 1.9 GB to download; the zip is kept until a newer release replaces it.') }}
+            {{ source_card('NZ', '🇳🇿 New Zealand — LINZ', nz, 'LINZ NZ Addresses from <a href="https://data.linz.govt.nz/" target="_blank" rel="noopener">data.linz.govt.nz</a> (CC BY 4.0), updated weekly. Needs a free LINZ API key. LINZ has no postcodes, so NZ postcodes aren\'t checked.') }}
+        </div>
+
+        <div class="ad-key">
+            <label for="ad-linz-key"><strong>LINZ API key</strong> <span class="issue-detail">— data.linz.govt.nz → sign in → My account → API keys → Create (tick "Query layer data")</span></label>
+            <div class="ad-key-row">
+                <input type="password" id="ad-linz-key" value="{{ settings.linz_key or '' }}" autocomplete="off" placeholder="Paste your LINZ key">
+                <button type="button" class="ab-btn ab-btn-plain" id="ad-key-save">Save key</button>
+                <span class="issue-detail" id="ad-key-status" role="status"></span>
+            </div>
+        </div>
+
+        <h2 class="ad-h2">🔎 Try a lookup</h2>
+        <form class="ad-lookup" id="ad-lookup">
+            <label>Address line 1<input name="line1" placeholder="68 Ricketts Road"></label>
+            <label>Address line 2<input name="line2"></label>
+            <label>Suburb<input name="suburb" placeholder="Mount Waverley"></label>
+            <label>State<input name="state" placeholder="VIC" maxlength="3"></label>
+            <label>Postcode<input name="postcode" placeholder="3149" maxlength="4"></label>
+            <label>Country<input name="country" placeholder="AU / NZ (blank: both)" maxlength="11"></label>
+            <button type="submit" class="ab-btn">Check</button>
+        </form>
+        <div class="ad-result" id="ad-result" hidden></div>
+
+        <h2 class="ad-h2">📇 Check the whole address book</h2>
+        <p class="issue-detail">Runs every saved address through the lookup and shows how each came out, and how long it took.</p>
+        <button type="button" class="ab-btn ab-btn-plain" id="ad-check-book">Check {{ 'all' }} saved addresses</button>
+        <div id="ad-book-result" hidden></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
