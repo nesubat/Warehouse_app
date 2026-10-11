@@ -2,7 +2,7 @@
 
 The **Warehouse Automation Suite** is a robust, local Flask-based web application designed to automate complex warehouse packaging and distribution workflows. It streamlines the process of calculating item allocations, generating iterative packing sheets, sorting PDF shipping labels based on dynamic signature codes, and producing printable packing labels with a ready-to-import courier consignment file.
 
-📖 **How the code works:** see the [Code Guide](docs/CODE_GUIDE.md) — every file explained in plain language, plus the full rules the Packing Labels tool applies.
+📖 **How the code works:** see the [Code Guide](docs/CODE_GUIDE.md) — every file explained in plain language, plus the full rules the Generate Labels tool applies.
 
 ---
 
@@ -25,7 +25,7 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **Safe Duplicate Handling:** If the Signature Links file has duplicate store names, nothing is deleted — open the file, fix it, and click "Recheck File" to continue instantly, without re-uploading.
 *   **Audit Report:** Every shuffled PDF starts with a report page listing any missing/unmatched stores (grouped by code, auto-laid-out into columns) and flagging any code group where a store name repeated unexpectedly, so a mis-sorted batch is never silently trusted.
 
-### 4. 🏷️ Packing Labels & Courier CSV (Label Maker for Vertical Distribution)
+### 4. 🏷️ Generate Labels & Courier CSV (Label Maker for Vertical Distribution)
 *   **One Label per Box:** Each merged **Packing Spec** cell becomes one A4-landscape packing label: a 107 × 150 mm space for the courier label, the Packing Spec in a bold black panel, the store and address, `LABEL X OF Y` / `PAGE X OF Y` counters, and one rounded box per item.
 *   **Barcodes:** Every item box carries a Code 128 barcode of its job number. A job number used on several rows gets one kind per row — `J477161-26 K1`, `K2`, `K3`… in reading order, K1 being its first row in the first tab — the same idea as the Distribution Mapper's divider barcodes.
 *   **Drag-and-Drop Cell Layout:** Choose the order of image, description, dimensions, job number, quantity, material, install and notes inside each box. Each block keeps its own style wherever it's placed, and text wraps and shrinks so nothing ever spills outside the box.
@@ -51,12 +51,21 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **Store, Receiver and Attn (both tools):** a Store Name column names the label and the Item Reference, a Receiver Name column is who the courier delivers to, and an Attn column is the contact; they can be the same or different. No Receiver Name: the receiver comes from the address cell, else it's the store. No Store Name: the receiver's name stands in for it.
 *   **Items under the address:** in the consignment table each consignment's items (Item Reference, spec, size, weight box) sit under its address, three to a row, with the address in a larger font.
 
+### 4b. 🏷️ Generate Labels: Horizontal (Label Maker for Horizontal Distribution)
+*   **Same page, other layout:** Generate Labels → **Horizontal**, for files with a row per store and a column per item, packs under merged headers (the Packing Sheets layout).
+*   **Packing-sheet codes as headers:** the "Code for Pack …" columns Packing Sheets adds (and Sub-Group's "Code for pack 1: 1-5") are read like job numbers, each store's code in its cell. No code column: codes come from the Signature Links file, else are worked out exactly as Packing Sheets does.
+*   **Signature Links as the plugin:** Packing Sheets now writes a **Label Plugin** tab into the Signature Links file (rows, store column, packs, stock columns per tab). Upload it with the distribution file (e.g. from the shared drive) and the tabs and header rows fill themselves in; its codes are checked against the file and its installer barcodes go on the dividers. The Label Shuffler skips the tab.
+*   **Packing-sheet order:** an audit page per pack (labels, boxes, codes and units to check against the packing sheet, where the codes came from, and anything to check), then code A, B, C … with the Label Shuffler's divider sheet before each (switchable), stores in sheet order. Standard A4 packing labels.
+*   **Code boxes on every label:** each pack's packing-sheet code is its own item box, first on the label: the code column's header ("Code for Pack 2", or a sub-group's "Code for pack 2: 1-2") where a job number goes, and the store's code (A, B, C …) where the quantity goes. No barcode, and never counted as units.
+*   **Item Reference:** the store's number in its tab, T + the tab, P + the pack: `03T1P2 Chadstone`, in the labels, both courier CSVs and the label map, so Stitch Labels matches by it.
+*   **Checks:** quantities that aren't numbers, packs marked x with quantities, codes that no longer match the quantities or the Signature Links file, units on no label, TOTAL row differences — each with its Excel row and column; errors lock Generate.
+
 ### 5. 🚚 Courier Import (Generate Courier Import File)
 *   **The courier CSV straight from an address list**, no packing labels: one row per store / receiver with its address, and one column per pack group headed **1, 2, 3 …** (or P1, P2 …). Each store's cell under a pack holds that pack's Packing Spec (`OB600100100`, `Box`, `2 x OB600100100` for two boxes).
 *   **x / X (or blank) under a pack:** that store doesn't get that pack; it isn't counted for it.
 *   **Not pack columns:** numbered columns that hold only numbers (item quantities), and a number heading several columns at once (a merged cell over a pack's items).
 *   **Item Reference:** `T<tab>P<pack> Store`, e.g. `T1P2 Corio Village` = pack 2 of the first selected tab for Corio Village. Open360's Item Reference and OpenFreight's Reference both carry it.
-*   **Same page and steps as Packing Labels:** tabs and header rows, Column mapping (address columns plus Attn, Address 3 and one chip per pack column, with a row to add another pack column by hand), the consignment table with the address book, ✏️ edits (country and service too), merging one receiver's addresses, a service per consignment, weights, export details, the Open360 / OpenFreight choice, a 50-character project name, refresh-proof pages.
+*   **Same page and steps as Generate Labels:** tabs and header rows, Column mapping (address columns plus Attn, Address 3 and one chip per pack column, with a row to add another pack column by hand), the consignment table with the address book, ✏️ edits (country and service too), merging one receiver's addresses, a service per consignment, weights, export details, the Open360 / OpenFreight choice, a 50-character project name, refresh-proof pages.
 *   **Consignment Reference:** the job (J + 6 digits) found above the header row (`J466307-11` → `J466307`), else in the file name; type it in if there's none.
 *   **Output:** a project folder with the Excel file and the chosen CSV(s); the success page counts the items and consignments and lists any item left out for having no address. The dashboard tags these projects 🚚 Courier Import (nothing to stitch).
 
@@ -77,8 +86,8 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 
 ### 8. 🗂️ Project Dashboard & File Management
 *   **Home:** the tools are square tiles in a grid (1–4), above Recent Projects. The nav's Home link goes to the very top; Dashboard stops with "Recent Projects" just below the bar.
-*   **Colour by feature:** each project card's left edge and tag take the colour of the tool it was made with, as on its Home tile: blue 📊 Packing Sheets, orange 🖨️ Labels Shuffled, purple 🏷️ Packing Labels, green 🚚 Courier Import. A project that used two (Packing Sheets, then the Label Shuffler) shows both tags, and its band is split equally between the two colours.
-*   **Navigation:** Home, Dashboard, Address Book and Packing Specs are on every page; a tool's own link (📦 Packing Labels, 🚚 Courier Import, 🧵 Stitch Labels …) shows only on that tool's pages.
+*   **Colour by feature:** each project card's left edge and tag take the colour of the tool it was made with, as on its Home tile: blue 📊 Packing Sheets, orange 🖨️ Labels Shuffled, purple 🏷️ Generate Labels, green 🚚 Courier Import. A project that used two (Packing Sheets, then the Label Shuffler) shows both tags, and its band is split equally between the two colours.
+*   **Navigation:** Home, Dashboard, Address Book and Packing Specs are on every page; a tool's own link (📦 Generate Labels, 🚚 Courier Import, 🧵 Stitch Labels …) shows only on that tool's pages.
 *   **Persistent Sessions:** Jobs are organized into dedicated, timestamped project folders (e.g., `ProjectName_Job-123_260803_1430`).
 *   **Native Integration:** Open generated Excel, PDF or CSV files directly in their native Windows applications from the browser.
 *   **Courier Projects:** Projects with a courier CSV list it in its own group and show a **🧵 Stitch Labels** button in place of "Create Sub-Group" (Courier Import projects show a 🚚 Courier Import tag instead: they have no labels to stitch).
@@ -86,6 +95,11 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
 *   **No Leftover Uploads:** Leaving a page after scanning a file but before generating deletes that upload (closing it in Excel first if it's open). Anything missed is swept up the next time the app starts, once it's a day old.
 
 ---
+
+## 🤖 Working on it with Claude Code
+*   `CLAUDE.md` describes the project; `.claude/settings.json` offers the plugins Claude Code Setup, Frontend Design, Security Guidance and Anthropic's Agent Skills when the folder is opened, and runs `.claude/hooks/after_edit.py` (lint + tests) after each edit.
+*   `.claude/skills/distribution-files/` explains the distribution file layouts to Claude.
+*   Tests: `pip install -r requirements-dev.txt`, then `python -m pytest -q` (no Excel needed).
 
 ## 🛠️ Technology Stack
 
@@ -113,7 +127,7 @@ flowchart TD
     G --> H[Auto-sorted by Signature Code<br/>+ optional dividers]
     H --> I[📥 Download from Dashboard]
 
-    P[🏷️ Packing Labels] --> Q[Upload packing-spec Excel<br/>choose tabs + header row]
+    P[🏷️ Generate Labels] --> Q[Upload packing-spec Excel<br/>choose tabs + header row]
     Q --> R{Checks pass?}
     R -- errors --> R2[❌ Row/column list shown<br/>fix the Excel, update previews]
     R2 --> Q
@@ -132,7 +146,7 @@ flowchart TD
 * **Data Hygiene:** The application is built to automatically detect true sheet boundaries. However, keeping input files trimmed of unused rows/columns is recommended for maximum processing speed.
 * **Save before generating:** When you click Generate (on any tool) or Recheck, the app closes every copy of that spreadsheet open in Excel — in any Excel window, including Protected View — **without saving**, so it always works from the saved file. Make sure you've saved your changes first.
 * **Save before leaving:** The same applies when you leave a page without generating — the upload is closed in Excel without saving and deleted. Fix the file, save it, then scan it again.
-* **Packing Labels spreadsheets:** **Packing Spec**, **Job Number** and **Install** columns are required. Merge the Packing Spec cells across all rows that go in the same box — that merge is what defines a box. Every row needs a Job Number. Install is `Y` for a box going to an installer; `N` or blank means it goes to the store.
+* **Generate Labels spreadsheets (vertical):** **Packing Spec**, **Job Number** and **Install** columns are required. Merge the Packing Spec cells across all rows that go in the same box — that merge is what defines a box. Every row needs a Job Number. Install is `Y` for a box going to an installer; `N` or blank means it goes to the store.
 
 ---
 
@@ -175,4 +189,4 @@ pyinstaller --onefile --name "WarehouseApp" app.py
 
 ### Logs
 
-Each step of Packing Labels, the address book, Packing Specs and Stitch Labels is logged with counts and timings: INFO lines in the terminal, and everything (each courier label page, each address-book fill) in `logs/warehouse.log`, with full tracebacks for failures. Set `WAREHOUSE_LOG_LEVEL=DEBUG` for the detail in the terminal too. `data/` and `logs/` stay out of git.
+Each step of Generate Labels, the address book, Packing Specs and Stitch Labels is logged with counts and timings: INFO lines in the terminal, and everything (each courier label page, each address-book fill) in `logs/warehouse.log`, with full tracebacks for failures. Set `WAREHOUSE_LOG_LEVEL=DEBUG` for the detail in the terminal too. `data/` and `logs/` stay out of git.

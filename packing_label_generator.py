@@ -1,12 +1,14 @@
 import re
 from collections import Counter
-import pandas as pd
 import openpyxl
 import io
 import math
 import base64
 import zipfile
-import xml.etree.ElementTree as ET
+try:  # the xlsx parts are read from uploaded files: defusedxml refuses entity tricks (billion laughs)
+    from defusedxml import ElementTree as ET
+except ImportError:  # pragma: no cover - requirements.txt installs it
+    import xml.etree.ElementTree as ET
 import pymupdf as fitz
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 from pdf_engine import code128_modules, _draw_code128, BARCODE_QUIET_MODULES, BARCODE_MAX_MODULE
@@ -81,7 +83,7 @@ def extract_rich_value_images(excel_path, sheet_name):
                         if media_path:
                             col_idx = column_index_from_string(col_letter)
                             image_map[(r, col_idx)] = io.BytesIO(z.read(media_path))
-    except Exception as e:
+    except Exception:
         pass
     return image_map
 
@@ -404,7 +406,7 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
                 no_address_packs.append(rows[0]['row'])
 
             if any(r['crosses_pack'] for r in rows):
-                warnings.append(_issue(span, col['address'], f"Merged address shared with next pack"))
+                warnings.append(_issue(span, col['address'], "Merged address shared with next pack"))
 
     if no_address_packs:
         warnings.append(_issue(_row_ranges(no_address_packs), col['address'], "No address"))
@@ -758,6 +760,8 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
             y += h + gap
 
         elif attr == 'barcode':
+            if item.get('is_code'):
+                continue  # a packing-sheet code box: nothing to scan
             val = item.get('barcode') or _clean(item.get('job_no'))
             modules = code128_modules(val, compact=True) if val else None
             if not modules:
@@ -820,7 +824,7 @@ def _round_rect(page, rect, r, color=None, fill=None, width=0):
     page.draw_rect(rect, color=color, fill=fill, width=width, radius=radius)
 
 
-def _spec_panel(page, rect, spec, max_size=22):
+def _spec_panel(page, rect, spec, max_size=22, tag=""):
     """Black rounded panel with the Packing Spec in large white type. Returns its bottom y."""
     inner_w = rect.width - 16
     size = max_size
@@ -833,6 +837,12 @@ def _spec_panel(page, rect, spec, max_size=22):
     panel = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + h)
     _round_rect(page, panel, 6, fill=(0, 0, 0))
     page.insert_text((panel.x0 + 8, panel.y0 + 11), "PACKING SPEC", fontname="hebo", fontsize=7, color=(1, 1, 1))
+    if tag:  # horizontal files: the pack and its packing-sheet code, top right of the panel
+        tag_size = 9  # its own name: 'size' is the Packing Spec's, drawn below
+        while tag_size > 6 and fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size) > panel.width - 90:
+            tag_size -= 0.5
+        width = fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size)
+        page.insert_text((panel.x1 - 8 - width, panel.y0 + 12), tag, fontname="hebo", fontsize=tag_size, color=(1, 0.82, 0.2))
     _draw_lines(page, lines, panel.x0 + 8, panel.x0 + 8 + inner_w, panel.y0 + 15, "hebo", size, (1, 1, 1))
     return panel.y1
 
@@ -855,18 +865,23 @@ def assign_barcodes(pack_groups):
     """Gives every item its barcode text. Same idea as the Distribution Mapper's kinds, with rows in
     place of columns: a job number on more than one row gets one kind per row, numbered K1, K2, K3...
     in reading order (first tab to last, then top to bottom), so K1 is its first row in the first tab.
-    Call it with all selected tabs combined, in tab order."""
+    An item may carry 'source_key' (horizontal files: its tab and item column): items sharing one are the same
+    kind, so an item column keeps its kind on every store's label. Call it with all selected tabs combined, in tab order."""
     items = [item for g in pack_groups.values() for item in g['items']]
     key = lambda item: str(item.get('job_no') or '').strip().upper()
-    totals = Counter(key(i) for i in items if key(i))
-    seen = Counter()
+    source = lambda item: item.get('source_key') or id(item)
+    kinds_of = {}  # job -> {source: kind}, in reading order
+    for item in items:
+        if key(item):
+            kinds = kinds_of.setdefault(key(item), {})
+            kinds.setdefault(source(item), len(kinds) + 1)
     for item in items:
         job = str(item.get('job_no') or '').strip()
         if not job:
             item['barcode'] = ''
             continue
-        seen[key(item)] += 1
-        item['barcode'] = barcode_text(job, seen[key(item)] if totals[key(item)] > 1 else None)
+        kinds = kinds_of[key(item)]
+        item['barcode'] = barcode_text(job, kinds[source(item)] if len(kinds) > 1 else None)
 
 
 def assign_label_numbers(pack_groups):
@@ -1009,14 +1024,17 @@ def cell_preview(pack_groups, max_px=360):
     """The first pack group's item cells for the page's live layout preview (script.js section 10). The browser
     draws them with the same sizes and rules as _layout_cell/_draw_cell, so this hands it the cell size in pt and,
     per item, its texts, barcode modules and images (small data URLs). Barcodes are given to every pack of the tab
-    first (assign_barcodes), as the PDF does, so the K numbers match. Only page 1's worth of cells is sent."""
+    first (assign_barcodes), as the PDF does, so the K numbers match. Only page 1's worth of cells is sent.
+    A horizontal file's label opens with its code boxes (group['code_cells']), so the preview does too."""
     if not pack_groups:
         return None
     assign_barcodes(pack_groups)
     group = next(iter(pack_groups.values()))
+    cells = list(group.get('code_cells') or []) + group['items']
     items = []
-    for item in group['items'][:FIRST_PAGE_CELLS]:
-        barcode = item.get('barcode') or _clean(item.get('job_no'))
+    for item in cells[:FIRST_PAGE_CELLS]:
+        # A code box has nothing to scan: no barcode, as _layout_cell draws it
+        barcode = '' if item.get('is_code') else item.get('barcode') or _clean(item.get('job_no'))
         items.append({
             **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'desc', 'dimension', 'material', 'install', 'notes')},
             'barcode': barcode,
@@ -1031,7 +1049,7 @@ def cell_preview(pack_groups, max_px=360):
         'store': group.get('store_name', ''),
         'spec': group.get('pack_spec_name', ''),
         'items': items,
-        'total_items': len(group['items']),
+        'total_items': len(cells),
     }
 
 
@@ -1103,7 +1121,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         if tab_no is not None and previous_tab is not None and tab_no != previous_tab:
             divider(tab_no, tab_name)
         previous_tab = tab_no if tab_no is not None else previous_tab
-        items = group_data['items']
+        # Horizontal files: the packing-sheet code boxes go first. Drawn only, so they never count as items,
+        # units, job numbers or barcode kinds anywhere else
+        items = list(group_data.get('code_cells') or []) + group_data['items']
         total_items = len(items)
         store = group_data['store_name']
         # '01T1. Blue Star Moorabbin': the label's serial in its tab before the name, on every page of the pack
@@ -1140,7 +1160,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                                             fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
 
                     zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
-                    y = _spec_panel(page, zone_b, spec) + 8
+                    y = _spec_panel(page, zone_b, spec, tag=_latin(group_data.get('pack_tag') or '')) + 8
 
                     if store and store.lower() != 'none':
                         for line in _wrap(shown_name, "hebo", 13, zone_b.width)[:2]:

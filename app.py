@@ -16,7 +16,7 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
 from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
+from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, NOT_STORE_TABS, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
@@ -42,6 +42,8 @@ from courier_export import (build_consignments, detect_series, write_label_map, 
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
 import app_log
+from horizontal_distribution import read_horizontal, read_signature_file
+from horizontal_labels import generate_horizontal_labels
 import logging
 
 
@@ -144,6 +146,33 @@ app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
 app.config['TEMP_FOLDER'] = temp_dir
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
+# Uploads are Excel files and courier label PDFs: anything far bigger is a mistake (or an attack), refused early
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('WAREHOUSE_MAX_UPLOAD_MB', '500')) * 1024 * 1024
+
+# Routes that do something (every POST, and the GET links that open a file in Windows). Any web page open in the
+# same browser could otherwise make the browser call them on 127.0.0.1 (cross-site request forgery).
+ACTION_GETS = {'open_local_file', 'open_upload_file'}
+
+
+def script_json(value):
+    """JSON safe to put inside a <script> tag: '<', '>' and '&' escaped, so a folder or file name holding
+    '</script>' can't end the tag and run as code. JSON.parse reads it back unchanged."""
+    return json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
+
+
+@app.before_request
+def same_origin_only():
+    """Refuses actions started by another website. Browsers say where a request comes from (Sec-Fetch-Site, else
+    Origin); this app's own pages are same-origin, typing a URL or a bookmark is 'none'."""
+    if request.method != 'POST' and request.endpoint not in ACTION_GETS:
+        return None
+    site = request.headers.get('Sec-Fetch-Site')
+    if site in ('cross-site', 'same-site'):
+        return 'Refused: this request came from another website.', 403
+    origin = request.headers.get('Origin')
+    if not site and origin and origin != 'null' and origin.split('://', 1)[-1] != request.host:
+        return 'Refused: this request came from another website.', 403
+    return None
 
 # Project names go into the folder name and every file name: kept short enough that every file of a project still
 # opens in Excel (whose limit is about 218 characters for a file's full path)
@@ -1125,8 +1154,8 @@ def pdf_engine():
                 with pd.ExcelFile(excel_path) as xls:
                     installer_tabs = sorted({tab for tab, _ in read_divider_barcodes(xls)})
                     for sheet in xls.sheet_names:
-                        if sheet == DIVIDER_BARCODE_SHEET:
-                            continue  # barcode data for the dividers, not a tab of store codes
+                        if sheet in NOT_STORE_TABS:
+                            continue  # divider barcodes / the Label Plugin: not a tab of store codes
                         df = pd.read_excel(xls, sheet_name=sheet)
                         packs = df.columns[1:].tolist()
                         tabs_data[sheet] = packs
@@ -1163,7 +1192,7 @@ def pdf_engine():
                                     break
                             projects_info[folder_name] = sig_file
 
-                projects_json = json.dumps(projects_info)
+                projects_json = script_json(projects_info)
 
                 # Re-render Step 1 with duplicate errors, plus enough context for the
                 # "Open Excel File" / "Recheck File" buttons to target the exact file.
@@ -1286,7 +1315,7 @@ def pdf_engine():
                         break
                 projects_info[folder_name] = sig_file
                 
-    projects_json = json.dumps(projects_info)
+    projects_json = script_json(projects_info)
     return _show('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
 
 
@@ -1308,9 +1337,31 @@ def _consignment_edits(form):
     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
 
 
-def _read_tab(filepath, header_row, tab, columns=None, mode='labels'):
-    """parse_packing_data() (Courier Import: read_allocation()), plus store names for files whose only address info
-    is one combined cell. columns: the tab's Column mapping set by hand in the preview (_column_choices)."""
+def _signature_path(filepath):
+    """Where the Signature Links file uploaded with a horizontal distribution file is kept until Generate."""
+    return filepath + '.signature.xlsx'
+
+
+def _signature_for(filepath):
+    """The Signature Links file uploaded with this distribution file (read_signature_file), or None."""
+    path = _signature_path(filepath)
+    if not os.path.isfile(path):
+        return None
+    try:
+        return read_signature_file(path)
+    except Exception as e:
+        log_pack.warning("  Signature Links file %s couldn't be read: %s", os.path.basename(path), e)
+        return None
+
+
+def _read_tab(filepath, header_row, tab, columns=None, mode='labels', tab_no=1):
+    """parse_packing_data() (Courier Import: read_allocation(); horizontal files: read_horizontal()), plus store
+    names for files whose only address info is one combined cell. columns: the tab's Column mapping set by hand in
+    the preview (_column_choices). tab_no: the tab's place among the selected tabs (T1, T2 … in references)."""
+    if mode == 'horizontal':
+        pack_groups, last_row, found_headers, warnings = read_horizontal(filepath, header_row, tab, columns, tab_no,
+                                                                         _signature_for(filepath))
+        return fill_store_names(pack_groups), last_row, found_headers, warnings
     read = read_allocation if mode == 'courier' else parse_packing_data
     pack_groups, last_row, found_headers, warnings = read(filepath, header_row, sheet_name=tab, columns=columns)
     return fill_store_names(pack_groups), last_row, found_headers, warnings
@@ -1322,7 +1373,7 @@ def _column_choices(form, tab, mode='labels'):
     Import's fields are the address list's, and 'pack_<n>' for its pack columns."""
     choices = {}
     prefix = f'colmap::{tab}::'
-    if mode == 'courier':
+    if mode in ('courier', 'horizontal'):
         fields = [k[len(prefix):] for k in form if k.startswith(prefix)]
         fields = [f for f in fields if f in IMPORT_FIELD_NAMES or PACK_FIELD.match(f)]
     else:
@@ -1342,7 +1393,7 @@ def _mapping_view(filepath, header_row, tab, choices, mode='labels'):
         log_pack.warning("  tab %s: couldn't read header row %s for the column mapping: %s", tab, header_row, e)
         columns = []
     text_of = dict(columns)
-    if mode == 'courier':
+    if mode in ('courier', 'horizontal'):
         try:
             found, packs, _ = scan_columns(filepath, header_row, tab)
         except Exception as e:
@@ -2013,10 +2064,56 @@ def create_packing_labels():
     return _distribution_page('labels')
 
 
+@app.route('/packing-labels/horizontal', methods=['GET', 'POST'])
+def create_horizontal_labels():
+    """Packing labels from a horizontal distribution file (a row per store, a column per item, packs under merged
+    headers), in packing-sheet order, optionally with the Signature Links file of its Packing Sheets run."""
+    return _distribution_page('horizontal')
+
+
 @app.route('/courier-import', methods=['GET', 'POST'])
 def courier_import():
     """Courier Import: only the courier CSV, from an address list with a column per pack (courier_import.py)."""
     return _distribution_page('courier')
+
+
+def _signature_note(signature):
+    """What the preview says about the Signature Links file of a horizontal job."""
+    if not signature:
+        return {'loaded': False}
+    return {'loaded': True, 'plugin': sorted(signature.get('plugin') or {}), 'codes': sorted(signature.get('codes') or {}),
+            'barcodes': len(signature.get('barcodes') or {})}
+
+
+def _keep_signature_upload(upload, filepath, tabs):
+    """Keeps the Signature Links file sent with a horizontal distribution file next to it (an older one is
+    removed, so a re-scan without one doesn't use it). With a Label Plugin tab, the tabs it describes come
+    ticked with their header rows filled in. Returns (user_inputs or None, error text or None)."""
+    path = _signature_path(filepath)
+    if os.path.exists(path):
+        os.remove(path)
+    if not upload or not upload.filename:
+        return None, None
+    if os.path.splitext(upload.filename)[1].lower() not in ('.xlsx', '.xlsm'):
+        return None, "The Signature Links file must be an .xlsx file (the one Packing Sheets made)."
+    upload.save(path)
+    try:
+        signature = read_signature_file(path)
+    except Exception as e:
+        os.remove(path)
+        return None, f"Could not read the Signature Links file: {e}"
+    plugin = signature.get('plugin') or {}
+    log_pack.info("  Signature Links %s: codes for %d tab(s), Label Plugin for %s", secure_filename(upload.filename),
+                  len(signature['codes']), sorted(plugin) or 'none')
+    if not plugin:
+        return None, None
+    inputs = {}
+    for tab in tabs:
+        t = plugin.get(tab)
+        above = (t['first_row'] - 1 if t and t.get('first_row') else
+                 max([r for r in (t.get('pack_group_row'), t.get('job_id_row')) if r] or [1]) if t else 1)
+        inputs[tab] = {'selected': bool(t), 'header_row': str(above)}
+    return inputs, None
 
 
 def _distribution_page(mode):
@@ -2029,6 +2126,7 @@ def _distribution_page(mode):
     if kept:
         return kept
     courier_mode = mode == 'courier'
+    horizontal_mode = mode == 'horizontal'
     log = log_import if courier_mode else log_pack
     show = lambda **context: _show('packing_labels.html', mode=mode, **context)
     if request.method == 'GET':
@@ -2060,7 +2158,12 @@ def _distribution_page(mode):
                 wb.close()
 
             log.info("Upload %s: %d tab(s) %s", filename, len(tabs), tabs)
-            return show(tabs=tabs, filename=filename)
+            inputs = None
+            if horizontal_mode:
+                inputs, sig_error = _keep_signature_upload(request.files.get('signature_file'), filepath, tabs)
+                if sig_error:
+                    return show(page_error=sig_error)
+            return show(tabs=tabs, filename=filename, user_inputs=inputs)
         except Exception as e:
             log.exception("Could not scan upload %s", original_filename)
             return show(page_error=f"Could not scan '{original_filename}': {e}")
@@ -2107,7 +2210,8 @@ def _distribution_page(mode):
             if choices:
                 log.info("  tab %s: columns set by hand %s", tab, choices)
             try:
-                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices, mode)
+                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices, mode,
+                                                                           selected_tabs.index(tab) + 1)
                 
                 total_packs = len(pack_groups)
                 total_stores = len(set(g['store_name'] for g in pack_groups.values()))
@@ -2145,7 +2249,8 @@ def _distribution_page(mode):
         if previews and not any(p['error'] for p in previews):
             combined = {}
             for tab in selected_tabs:
-                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode)
+                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode,
+                                            selected_tabs.index(tab) + 1)
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
                 if courier_mode:
                     _import_refs(groups, selected_tabs.index(tab) + 1)
@@ -2210,8 +2315,10 @@ def _distribution_page(mode):
             except Exception:
                 log.exception("  live cell preview could not be built")
 
+        signature = _signature_for(filepath) if horizontal_mode else None
         return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
-                               file_note=file_note, cell_preview=preview_cells)
+                               file_note=file_note, cell_preview=preview_cells,
+                               signature_note=_signature_note(signature) if horizontal_mode else None)
 
     # Action: Generate Final PDF & Save to Project
     if 'generate' in request.form:
@@ -2250,12 +2357,19 @@ def _distribution_page(mode):
         project_dir = None
         started = time.perf_counter()
         tab_of = {}  # pack key -> its tab's number among the selected tabs, for the Item Reference ('01T2QWXK Store')
+        pack_notes = {}  # horizontal: (tab number, pack number) -> the warnings about that pack, for its audit page
         try:
             # 1. Parse Data
             sheet_warnings = []
             for tab in selected_tabs:
                 header_row = int(user_inputs[tab]['header_row'])
-                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode)
+                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode,
+                                                            selected_tabs.index(tab) + 1)
+                if horizontal_mode:
+                    for g in pack_groups.values():
+                        key = (g['tab_no'], g['pack_no'])
+                        pack_notes.setdefault(key, [w for w in tab_warnings
+                                                    if f"pack {g['pack_name']}".lower() in f"{w.get('col', '')} {w.get('text', '')}".lower()])
                 if courier_mode:
                     _import_refs(pack_groups, selected_tabs.index(tab) + 1)
                 sheet_warnings += [{**w, 'col': f"{tab} {w.get('col', '')}".strip() if len(selected_tabs) > 1 else w.get('col', '')}
@@ -2273,6 +2387,8 @@ def _distribution_page(mode):
                 n = tab_of[key]
                 seen[n] += 1
                 serials[key] = f"{seen[n]:0{max(2, len(str(per_tab[n])))}d}T{n}"
+            if horizontal_mode:  # '03T1P2': the store's number in its tab, T + the tab, P + the pack
+                serials = {key: g['serial'] for key, g in combined_pack_groups.items()}
 
             # 2. Courier consignments, checked before anything is written or moved
             fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
@@ -2294,7 +2410,8 @@ def _distribution_page(mode):
                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
 
             # 3. Setup Project Folder structure
-            raw_project_name = _project_name(request.form.get('project_name'), 'Courier_Import_Job' if courier_mode else 'Packing_Labels_Job')
+            raw_project_name = _project_name(request.form.get('project_name'), 'Courier_Import_Job' if courier_mode else
+                                             'Horizontal_Labels_Job' if horizontal_mode else 'Packing_Labels_Job')
             safe_project_name = clean_file_name(raw_project_name)
             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
             final_folder_name = f"{safe_project_name}_{time_stamp}"
@@ -2303,6 +2420,10 @@ def _distribution_page(mode):
 
             # 4. Move the Excel File into the Project
             new_filepath = os.path.join(project_dir, filename)
+            signature_used = _signature_for(filepath) if horizontal_mode else None
+            if signature_used:  # the project keeps the Signature Links file it was made with (not named 'Signature links…',
+                # so the Label Shuffler doesn't take this project for one of its own)
+                shutil.copy(_signature_path(filepath), os.path.join(project_dir, f"Used Signature Links - {os.path.splitext(filename)[0]}.xlsx"))
             shutil.move(filepath, new_filepath)
             log.info("  project folder %s", final_folder_name)
 
@@ -2334,8 +2455,14 @@ def _distribution_page(mode):
                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
                                             ref_issues)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
-                    page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
-                                                    serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
+                    if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
+                        page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
+                                                               report, serials, add_dividers='code_dividers' in request.form,
+                                                               divider_barcodes=(signature_used or {}).get('barcodes'),
+                                                               notes=pack_notes)
+                    else:
+                        page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
+                                                            serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
                 log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
 
                 # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
@@ -2344,7 +2471,10 @@ def _distribution_page(mode):
                 base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
                 map_name = f"{base_name}.labelmap.json"
                 items = open360_items(cartons, consignments, tab_of, serials)
-                open360_refs = open360_item_references(items)
+                if horizontal_mode:  # '03T1P2 Chadstone': the serial is the code Stitch Labels matches
+                    open360_refs = [(f"{serials[x['pack_key']]} {x['store']}", serials[x['pack_key']]) for x in cartons]
+                else:
+                    open360_refs = open360_item_references(items)
                 ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
                 csv_files = []
                 if 'open360' in csv_formats:
@@ -2391,6 +2521,8 @@ def _distribution_page(mode):
             except Exception as e:
                 log_book.exception("Could not update the address book after Generate: %s", e)
 
+            if horizontal_mode and os.path.exists(_signature_path(filepath)):
+                os.remove(_signature_path(filepath))
             log.info("Generate done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
             left_out = [x for x in all_cartons if x not in cartons]
             summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
@@ -2458,9 +2590,9 @@ if __name__ == '__main__':
     # server itself (WERKZEUG_RUN_MAIN=true). Only the first may clear the port, or the server would stop its own watcher.
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         free_port(PORT)
-    if getattr(sys, 'frozen', False):
-        app.run(debug=False, port=PORT)
-    else:
-        app.run(debug=True, port=PORT)
+    # The Flask debugger runs any code typed into its error page: only on request (set WAREHOUSE_DEBUG=1), never in
+    # the .exe, and never reachable from another computer (no host= here: 127.0.0.1 only)
+    debug = os.environ.get('WAREHOUSE_DEBUG') == '1' and not getattr(sys, 'frozen', False)
+    app.run(debug=debug, port=PORT)
 
     

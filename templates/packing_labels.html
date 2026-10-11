@@ -3,8 +3,10 @@
 {# One page for two features: Packing Labels (mode 'labels': packing labels PDF + courier CSVs) and Courier Import
    (mode 'courier': only the courier CSV, from an address list with a column per pack, headed 1, 2, 3 …) #}
 {% set courier_mode = mode == 'courier' %}
-{% set page_url = url_for('courier_import') if courier_mode else url_for('create_packing_labels') %}
-{% set feature_name = '🚚 Courier Import' if courier_mode else '📦 Packing Labels' %}
+{# mode 'horizontal': packing labels from a horizontal distribution file (a row per store), in packing-sheet order #}
+{% set horizontal_mode = mode == 'horizontal' %}
+{% set page_url = url_for('courier_import') if courier_mode else (url_for('create_horizontal_labels') if horizontal_mode else url_for('create_packing_labels')) %}
+{% set feature_name = '🚚 Courier Import' if courier_mode else '📦 Generate Labels' %}
 {% macro issue_table(items, kind) %}
 <table class="issue-table issue-{{ kind }}">
     {% for i in items %}
@@ -76,7 +78,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>{{ 'Courier Import' if courier_mode else 'Generate Packing Labels' }}</title>
+    <title>{{ 'Courier Import' if courier_mode else 'Generate Labels' }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
@@ -90,7 +92,15 @@
     </div>
 
     <div class="container pl-page">
-        <h1>{{ '🚚 Generate Courier Import File' if courier_mode else '📦 Generate Packing Labels' }}</h1>
+        <h1>{{ '🚚 Generate Courier Import File' if courier_mode else '📦 Generate Labels' }}</h1>
+        {% if not courier_mode %}
+        <nav class="pl-layout-switch" aria-label="Distribution file layout">
+            <a href="{{ url_for('create_packing_labels') }}" class="pl-layout-option"{% if not horizontal_mode %} aria-current="page"{% endif %}>
+                <strong>Vertical</strong><small>a row per item, Packing Spec merged per box</small></a>
+            <a href="{{ url_for('create_horizontal_labels') }}" class="pl-layout-option"{% if horizontal_mode %} aria-current="page"{% endif %}>
+                <strong>Horizontal</strong><small>a row per store, packs under merged headers</small></a>
+        </nav>
+        {% endif %}
         
         <div class="pl-top-links">
             <a href="/" class="nav-link">← Home</a>
@@ -113,7 +123,7 @@
             <h4 class="instructions-title">⚠️ Requirements</h4>
             {% if courier_mode %}
             <ul class="instructions-list">
-                <li><strong>One row per store / receiver</strong>, with its address. The columns are found by their headers, as in Packing Labels: "Store Name", "Receiver Name", "Attn", "Address 1", "Address 2", "Address 3", "Suburb", "State", "Postcode" and "Country". A whole address in one column works too. Columns that describe the store ("Store Type", "Store Size") aren't its name.</li>
+                <li><strong>One row per store / receiver</strong>, with its address. The columns are found by their headers, as in Generate Labels: "Store Name", "Receiver Name", "Attn", "Address 1", "Address 2", "Address 3", "Suburb", "State", "Postcode" and "Country". A whole address in one column works too. Columns that describe the store ("Store Type", "Store Size") aren't its name.</li>
                 <li><strong>Header Row:</strong> Tell the tool which row holds those headers (e.g. 7).</li>
                 <li><strong>Pack columns:</strong> one per pack group, headed <strong>1, 2, 3 …</strong> (or P1, P2 …). Each store's cell holds that pack's Packing Spec, e.g. <em>OB600100100</em>, <em>CS1070580140</em>, <em>Box</em>, or <em>2 x OB600100100</em> for two boxes.</li>
                 <li><strong>x or X</strong> (or a blank cell) under a pack: that store doesn't get that pack, so it isn't counted for it.</li>
@@ -123,6 +133,16 @@
                 <li><strong>Consignment Reference:</strong> the job (J + 6 digits) found above the header row, e.g. J466307 from J466307-11; type it in if there's none.</li>
                 <li><strong>Output:</strong> only the courier CSV (Open360, OpenFreight or both), in a new project folder with the Excel file. No packing labels.</li>
                 <li><strong>Names only:</strong> a list with store names and no address columns still works: addresses come from the address book, or you pick or type them in the consignment table.</li>
+            </ul>
+            {% elif horizontal_mode %}
+            <ul class="instructions-list">
+                <li><strong>The Packing Sheets layout:</strong> one row per store, one column per item, each pack's items under one merged header in the pack row, and the job numbers in a row above the stores.</li>
+                <li><strong>Packing-sheet codes:</strong> the "Code for Pack …" columns Packing Sheets puts at the start of each pack are read like any header: each store's cell holds its code. Sub-group codes ("Code for pack 1: 1-5") sort the labels within a code. No code column? The codes are taken from the Signature Links file, else worked out exactly as Packing Sheets does.</li>
+                <li><strong>Signature Links file (optional):</strong> the one Packing Sheets made for this job. Its <strong>Label Plugin</strong> tab fills in the tabs and header rows for you, its codes are checked against the file, and its installer barcodes go on the dividers.</li>
+                <li><strong>Header Row:</strong> the row just above the first store (filled in from the Label Plugin when there is one).</li>
+                <li><strong>Packing Spec:</strong> a column per pack headed with the pack's number (1, 2, 3 …), each store's spec in it (<em>OB600100100</em>, <em>2 x CS450320150</em>, <em>x</em> for none), as in Courier Import; or the stock columns named in the Label Plugin.</li>
+                <li><strong>Order:</strong> pack by pack as on the packing sheets, an audit page before each pack, then code A, B, C … with a divider before each, stores in sheet order.</li>
+                <li><strong>Item Reference:</strong> the store's number in its tab, T + the tab, P + the pack, then the store: <strong>03T1P2 Chadstone</strong>.</li>
             </ul>
             {% else %}
             <ul class="instructions-list">
@@ -151,6 +171,17 @@
                 </div>
                 <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls" required>
             </div>
+            {% if horizontal_mode %}
+            <div class="dropzone pl-dropzone-optional">
+                <div class="dropzone-content">
+                    <div class="dropzone-icon">🔗</div>
+                    <p class="dropzone-text">Signature Links file <span class="pl-optional-tag">optional</span></p>
+                    <p class="dropzone-subtext">From the Packing Sheets run, e.g. off the shared drive — .xlsx</p>
+                    <p class="dropzone-filename"></p>
+                </div>
+                <input type="file" name="signature_file" class="dropzone-input" accept=".xlsx, .xlsm">
+            </div>
+            {% endif %}
             <button type="submit" class="btn-generate pl-submit">Scan File</button>
         </form>
         {% endif %}
@@ -166,7 +197,7 @@
 
         <!-- Single form handles both Preview and Generate. novalidate: Update Previews always goes through;
              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
-        <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else 'pl_column_mapping' }}">
+        <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else ('ph_column_mapping' if horizontal_mode else 'pl_column_mapping') }}">
             <input type="hidden" name="filename" value="{{ filename }}">
             
             {% for tab in tabs %}
@@ -205,6 +236,14 @@
             </p>
             {% endif %}
             
+            {% if horizontal_mode and signature_note %}
+            <p class="pl-file-note pl-signature-note{% if not signature_note.loaded %} pl-file-note-warn{% endif %}">
+                {% if signature_note.loaded %}🔗 Signature Links loaded:
+                    {% if signature_note.plugin %}Label Plugin for {{ signature_note.plugin|join(', ') }};{% else %}no Label Plugin tab (an older file);{% endif %}
+                    codes for {{ signature_note.codes|join(', ') or 'no tab' }}{% if signature_note.barcodes %}; installer barcodes on the dividers{% endif %}.
+                {% else %}🔗 No Signature Links file: codes come from the file's code columns, else they're worked out as Packing Sheets does. Scan again with the file to check them against it.{% endif %}
+            </p>
+            {% endif %}
             {% set lock = namespace(has_error=false) %}
             
             {% for bp in previews %}
@@ -227,6 +266,11 @@
                         <span class="metric-badge">Last Row Parsed: {{ bp.last_row }}</span>
                         <span class="metric-badge">Total Packs: {{ bp.total_packs }}</span>
                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
+                        {% if horizontal_mode and bp.found_headers.packs %}
+                        <span class="metric-badge">Packs: {% for name, cols in bp.found_headers.packs.items() %}{{ name }} ({{ cols }}){{ ', ' if not loop.last }}{% endfor %}</span>
+                        <span class="metric-badge">Rows: job {{ bp.found_headers.rows.job }} · pack {{ bp.found_headers.rows.pack }} · stores {{ bp.found_headers.rows.stores }}</span>
+                        <span class="metric-badge">Codes: {{ bp.found_headers.codes|join('; ') }}</span>
+                        {% endif %}
                         {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
                     </div>
                     {{ colmap_panel(bp.sheet_name, bp.mapping) }}
@@ -529,8 +573,8 @@
                         {% if cell_preview and cell_preview['items'] %}
                         <p class="pl-config-hint">
                             First package group: <strong>{{ cell_preview.store or 'No store name' }}</strong> · {{ cell_preview.spec }}.
-                            {% if cell_preview.total_items > cell_preview['items']|length %}Showing the first {{ cell_preview['items']|length }} of {{ cell_preview.total_items }} items (page 1).
-                            {% else %}{{ cell_preview.total_items }} item{{ 's' if cell_preview.total_items != 1 }}.{% endif %}
+                            {% if cell_preview.total_items > cell_preview['items']|length %}Showing the first {{ cell_preview['items']|length }} of {{ cell_preview.total_items }} boxes (page 1).
+                            {% else %}{{ cell_preview.total_items }} box{{ 'es' if cell_preview.total_items != 1 }}.{% endif %}
                             Drawn to the same sizes as the PDF.
                         </p>
                         <div id="pl-cell-preview" class="pl-cell-preview" aria-label="Live preview of the item boxes"
@@ -544,6 +588,16 @@
 
 
                 <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
+                {% if horizontal_mode %}
+                <fieldset class="pl-csv-choice pl-divider-choice">
+                    <legend>Label order</legend>
+                    <div class="pl-csv-options">
+                        <label class="pl-csv-option"><input type="checkbox" name="code_dividers" value="1" checked>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet, with installer barcodes</small></span></label>
+                    </div>
+                    <span class="pl-csv-hint issue-detail">Labels follow the packing sheets: an audit page per pack, then code A, B, C …, stores in sheet order.</span>
+                </fieldset>
+                {% endif %}
                 <fieldset class="pl-csv-choice" id="pl-csv-choice">
                     <legend>Courier CSV</legend>
                     <div class="pl-csv-options">
@@ -552,7 +606,7 @@
                         <label class="pl-csv-option"><input type="checkbox" name="courier_csv" value="openfreight">
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>OpenFreight CSV</strong><small>the older courier CSV, with Who Pays and Charge Account</small></span></label>
                     </div>
-                    <span class="pl-csv-hint issue-detail">{% if courier_mode %}Choose one or both for this job. Both carry the same Item References (T1P1 Store, T1P2 Store …).{% else %}Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.{% endif %}</span>
+                    <span class="pl-csv-hint issue-detail">{% if courier_mode %}Choose one or both for this job. Both carry the same Item References (T1P1 Store, T1P2 Store …).{% elif horizontal_mode %}Choose one or both for this job. Both carry the same Item References (01T1P1 Store, 02T1P1 Store …), so courier labels from either stitch the same way.{% else %}Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.{% endif %}</span>
                     {% if courier and courier.export %}
                     {% set ex = courier.export %}
                     <div class="pl-export" id="pl-export" data-defaults-url="{{ url_for('api_export_defaults') }}" hidden>

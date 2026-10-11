@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "anthropic-agent-skills": {
+      "source": { "source": "github", "repo": "anthropics/skills" }
+    }
+  },
+  "enabledPlugins": {
+    "claude-code-setup@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "document-skills@anthropic-agent-skills": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(ruff check:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)"
+    ],
+    "deny": [
+      "Read(./data/**)",
+      "Read(./.env)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [{ "type": "command", "command": "python .claude/hooks/after_edit.py", "timeout": 180 }]
+      }
+    ]
+  }
+}

@@ -40,6 +40,7 @@ _STOP = re.compile(r'item\s*desc|description|powered by', re.I)
 _CODE_IN_REF = re.compile(r'\d+(?:\.\d+)?-([A-Z]{4,8})-L-')        # older Item References: '01-QWXK-L-1-Store'
 _CODE_ANYWHERE = re.compile(r'(?<![A-Z])-?([A-Z]{4,8})-L-\d')
 _CODE_TAB = re.compile(r'(?<![A-Za-z0-9])\d{1,4}T\d{1,2}([A-Z]{4,})')  # '01T1QWXK Store': count, T + tab, code
+_CODE_TP = re.compile(r'(?<![A-Za-z0-9])(\d{1,4}T\d{1,2}P\d{1,3})(?!\d)')  # horizontal files: '03T1P2 Store'
 
 
 class StitchError(ValueError):
@@ -82,8 +83,13 @@ def _tab_code(text, known):
 
 def find_code(text, known):
     """The unique code on a courier label, if it's one of this project's (known: set of codes). Item References
-    of both layouts: '01T1QWXK Provision Clayton' and the older '01-QWXK-L-1-Provision Clayton'."""
+    of all layouts: '01T1QWXK Provision Clayton', the older '01-QWXK-L-1-Provision Clayton', and horizontal
+    files' '03T1P2 Chadstone' (store number in the tab, T + tab, P + pack)."""
     known = {k.upper() for k in known}
+    for ref in _item_ref_texts(text) + [text]:  # horizontal files: store number, T + tab, P + pack ('03T1P2')
+        for candidate in _CODE_TP.findall(ref) + _CODE_TP.findall(ref.replace(' ', '')):
+            if candidate.upper() in known:
+                return candidate.upper()
     for ref in _item_ref_texts(text) + [text]:  # in the Item Ref first, then anywhere on the label
         found = _tab_code(ref, known) or _tab_code(ref.replace(' ', ''), known)
         if found:
@@ -164,9 +170,9 @@ def page_key(page, text):
     import hashlib
     words = " ".join(text.split()).lower()
     if words:
-        return "t" + hashlib.sha1(words.encode('utf-8')).hexdigest()[:16]
+        return "t" + hashlib.sha1(words.encode('utf-8'), usedforsecurity=False).hexdigest()[:16]
     pix = page.get_pixmap(dpi=40, colorspace=fitz.csGRAY)
-    return "i" + hashlib.sha1(pix.samples).hexdigest()[:16]
+    return "i" + hashlib.sha1(pix.samples, usedforsecurity=False).hexdigest()[:16]
 
 
 def address_snippet(text, lines=5):

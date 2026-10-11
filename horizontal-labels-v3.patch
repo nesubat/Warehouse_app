@@ -1,0 +1,2217 @@
+diff --git a/.claude/hooks/after_edit.py b/.claude/hooks/after_edit.py
+new file mode 100644
+index 0000000..7443f3b
+--- /dev/null
++++ b/.claude/hooks/after_edit.py
+@@ -0,0 +1,48 @@
++"""Claude Code hook, after every file edit: lint the Python file that changed and run the tests, so a broken
++reader or label never gets past the edit that broke it. Problems go back to Claude (exit 2); runs no AI itself.
++
++Also runnable by hand:  python .claude/hooks/after_edit.py path/to/file.py
++"""
++import json
++import os
++import shutil
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++# Files whose changes can move a label, a code or a courier reference: the tests cover them
++WATCHED = ('horizontal_', 'packing_label', 'courier_', 'label_stitcher', 'core_math', 'matrix_engine', 'app.py', 'tests/')
++
++
++def changed_file():
++    if len(sys.argv) > 1:
++        return sys.argv[1]
++    try:
++        return (json.load(sys.stdin).get('tool_input') or {}).get('file_path', '')
++    except ValueError:
++        return ''
++
++
++def main():
++    path = changed_file()
++    if not path.endswith('.py'):
++        return 0
++    rel = os.path.relpath(os.path.abspath(path), ROOT).replace('\\', '/')
++    problems = []
++    if shutil.which('ruff'):
++        lint = subprocess.run(['ruff', 'check', '--select', 'E9,F', '--quiet', path], cwd=ROOT, capture_output=True, text=True)
++        if lint.returncode:
++            problems.append(f"ruff found problems in {rel}:\n{lint.stdout or lint.stderr}")
++    if any(w in rel for w in WATCHED):
++        tests = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-x', 'tests'], cwd=ROOT, capture_output=True,
++                               text=True, timeout=170)
++        if tests.returncode:
++            problems.append("Tests failed after this edit:\n" + "\n".join(tests.stdout.splitlines()[-25:]))
++    if problems:
++        print("\n\n".join(problems), file=sys.stderr)
++        return 2
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/.claude/settings.json b/.claude/settings.json
+new file mode 100644
+index 0000000..b0bc60b
+--- /dev/null
++++ b/.claude/settings.json
+@@ -0,0 +1,34 @@
++{
++  "$schema": "https://json.schemastore.org/claude-code-settings.json",
++  "extraKnownMarketplaces": {
++    "anthropic-agent-skills": {
++      "source": { "source": "github", "repo": "anthropics/skills" }
++    }
++  },
++  "enabledPlugins": {
++    "claude-code-setup@claude-plugins-official": true,
++    "frontend-design@claude-plugins-official": true,
++    "security-guidance@claude-plugins-official": true,
++    "document-skills@anthropic-agent-skills": true
++  },
++  "permissions": {
++    "allow": [
++      "Bash(python -m pytest:*)",
++      "Bash(ruff check:*)",
++      "Bash(git status:*)",
++      "Bash(git diff:*)"
++    ],
++    "deny": [
++      "Read(./data/**)",
++      "Read(./.env)"
++    ]
++  },
++  "hooks": {
++    "PostToolUse": [
++      {
++        "matcher": "Edit|MultiEdit|Write",
++        "hooks": [{ "type": "command", "command": "python .claude/hooks/after_edit.py", "timeout": 180 }]
++      }
++    ]
++  }
++}
+diff --git a/.claude/skills/distribution-files/SKILL.md b/.claude/skills/distribution-files/SKILL.md
+new file mode 100644
+index 0000000..07f1477
+--- /dev/null
++++ b/.claude/skills/distribution-files/SKILL.md
+@@ -0,0 +1,47 @@
++---
++name: distribution-files
++description: How this app's retail distribution spreadsheets are laid out (vertical packing lists, horizontal Packing Sheets layout, Final files with code columns, Signature Links with Label Plugin and Divider Barcodes tabs) and how packing labels, codes and Item References are derived from them. Use when reading, changing or debugging anything that parses a distribution file, makes packing labels, shuffles labels, writes courier CSVs or stitches courier labels.
++---
++
++# Distribution files in Warehouse_app
++
++## Two layouts
++**Vertical** (Packing Labels, `parse_packing_data`): one row per item. The Packing Spec cell is merged down every
++row of one box; that merge defines the box. Required columns: Packing Spec, Job Number, Install.
++
++**Horizontal** (Packing Sheets, Courier Import, horizontal labels): one row per store, one column per item.
++- Job number row: a job number over each item column (`J476699-03`).
++- Pack row: one merged header over each pack's item columns (or one header over a single column).
++- Store rows below; quantities in the grid; a TOTAL row may follow.
++- Packing Spec per store per pack: a column headed with the pack's number (`1`, `P1`), or the stock columns
++  Packing Sheets was given; `x` or blank means no pack.
++- Item details (Description, Size, Artwork …) in labelled rows above the header.
++
++## What Packing Sheets adds
++- **Final file**: a column at the start of each selected pack, job-row header `Code for Pack <name>`, each store's
++  code (A, B …) in it. Sub-Group adds `Code for pack <name>: 1-5` columns after it. Treat these as headers whose
++  cells hold codes, not quantities.
++- **Signature Links**: a tab per distribution tab (store names + `Code for <name>` per pack), `Divider Barcodes`
++  (installer tabs: job numbers per code) and `Label Plugin` (rows, store column, packs, stock columns per tab).
++
++Codes come from `core_math.generate_pack_signatures` over rows `pack_group_row+1 … last_row`: stores with the
++same quantities in a pack share a code; letters follow `sort_key`, and every order uses `(len(code), code)`.
++
++## Horizontal packing labels
++- Codes: the file's code column, else Signature Links, else worked out the same way. Disagreement = error.
++- Order: tab → pack (left to right) → code → sub-group codes → store row. An audit page opens each pack; a
++  divider (`pdf_engine.build_divider_sheet`) opens each code when dividers are on.
++- Item Reference: `<store's number in the tab>T<tab>P<pack> <store>`, e.g. `03T1P2 Chadstone`. The serial is the
++  code Stitch Labels matches (`label_stitcher._CODE_TP`).
++- Code boxes: each label starts with one item box per code (`group['code_cells']`): the code column's header
++  (`Code for Pack 2`, `Code for pack 2: 1-2`) in the job number's place, the store's code in the quantity box,
++  no barcode. Drawn only: never counted as items, units, job numbers or barcode kinds.
++- Audit page per pack: labels, boxes, codes, units, where the codes came from, what needs a look (no table).
++- Barcode kinds: per item column (`source_key`), so `J…-03 K2` is the same piece on every store's label.
++
++## Checks before anything prints
++Quantities are numbers; every item has a job number; a pack marked x has no quantities; every unit is on a label;
++TOTAL row agrees; codes agree with quantities and with Signature Links. Report each with its Excel row and column.
++
++## Try it
++`python tests/fixtures.py out/` → upload the Final file with the Signature Links file at /packing-labels/horizontal.
+diff --git a/.gitignore b/.gitignore
+index 1012646..7aee5ff 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -24,3 +24,7 @@ __pycache__/
+ # Local runtime data: address book database, packing specs, senders, service code usage, logs
+ data/
+ logs/
++
++# Claude Code: personal settings stay on each computer (the shared ones are .claude/settings.json)
++.claude/settings.local.json
++.pytest_cache/
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..783dab5
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,47 @@
++# Warehouse_app — notes for Claude Code
++
++Local Flask app (Windows, Microsoft Excel via xlwings) that turns retail distribution spreadsheets into packing
++sheets, sorted courier labels, packing labels and courier CSVs. Floor staff print what it makes, so a quiet wrong
++answer costs real money: **check, report with the Excel row and column, and refuse to generate** rather than guess.
++
++Full plain-language guide to every file: `docs/CODE_GUIDE.md`. Feature list: `README.md`.
++
++## Run and test
++- `python app.py` → http://127.0.0.1:5001 (`set WAREHOUSE_DEBUG=1` for Flask's reloader/debugger; never in production)
++- `pip install -r requirements.txt -r requirements-dev.txt`, then `python -m pytest -q` (runs without Excel)
++- `python tests/fixtures.py OUT_DIR` writes a sample horizontal Final file + Signature Links file to try by hand
++- The hook in `.claude/settings.json` lints each edited `.py` and runs the tests; fix what it reports before moving on
++
++## Where things are
++- `matrix_engine.py` Packing Sheets (xlwings). Writes Final file (a "Code for Pack <name>" column at the start of
++  each selected pack), Packing Sheet, and Signature Links (a tab of store codes per tab, `Divider Barcodes`,
++  `Label Plugin`). `subgroup_engine.py` adds "Code for pack <name>: 1-5" columns.
++- `pdf_engine.py` Label Shuffler (codes A, B … Z, AA order, divider sheets, audit report).
++- `packing_label_generator.py` vertical files → packing labels (`parse_packing_data`, `generate_packing_labels`).
++- `horizontal_distribution.py` + `horizontal_labels.py` horizontal files → the same pack groups → labels in
++  packing-sheet order (audit page per pack, divider per code). Item Reference `03T1P2 Store`. Each label starts
++  with a box per packing-sheet code (`code_cells`: header in the job number's place, code in the quantity's).
++- `courier_import.py`, `courier_export.py` consignments and the Open360 / OpenFreight CSVs.
++- `label_stitcher.py` puts courier labels on packing labels by the code in their Item Ref.
++- `app.py` routes. Packing Labels, horizontal labels and Courier Import share `_distribution_page(mode)`.
++
++## Rules that keep labels right
++- Never address cells by fixed row/column: find rows and columns by header text and pattern (layouts drift).
++- Every unit in a distribution grid must land on exactly one label; reconcile totals and say where they differ.
++- Code order is `(len(code), code)` everywhere (Packing Sheets, Shuffler, labels). Don't invent another.
++- Item References must stay unique within a job and match what Stitch Labels parses (`label_stitcher.find_code`).
++- Changing barcode text, references or label order changes what's printed: add or update a test in `tests/`.
++- Signature Links tabs that aren't store codes are listed in `core_math.NOT_STORE_TABS`; add new ones there.
++
++## Security (applied; keep it that way)
++- Local app on 127.0.0.1. Actions are guarded by `same_origin_only` in `app.py`; don't add GET routes that change
++  things without adding them to `ACTION_GETS`. No `debug=True`, no `host="0.0.0.0"` without a login in front.
++- JSON inside `<script>`: `|tojson` or `script_json()`, never `json.dumps(...)|safe`. In JS, `textContent` for data
++  from files; `innerHTML` only with `esc()`.
++- Uploaded files: `secure_filename`, check the extension, keep them inside `UPLOAD_FOLDER`. XML from xlsx files is
++  parsed with defusedxml. SQL values always as `?` parameters.
++
++## Style
++- UI copy is plain, short and tells the user what to do next. Reuse the existing classes in `static/styles.css`
++  (`.pl-csv-option`, `.blueprint-card`, `.metric-badge` …) so new screens look like the rest of the app.
++- Comments explain *why*, in plain language, as in the existing code.
+diff --git a/README.md b/README.md
+index db137ed..f590e60 100644
+--- a/README.md
++++ b/README.md
+@@ -51,6 +51,15 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
+ *   **Store, Receiver and Attn (both tools):** a Store Name column names the label and the Item Reference, a Receiver Name column is who the courier delivers to, and an Attn column is the contact; they can be the same or different. No Receiver Name: the receiver comes from the address cell, else it's the store. No Store Name: the receiver's name stands in for it.
+ *   **Items under the address:** in the consignment table each consignment's items (Item Reference, spec, size, weight box) sit under its address, three to a row, with the address in a larger font.
+ 
++### 4b. 🏷️ Horizontal Packing Labels (Label Maker for Horizontal Distribution)
++*   **Same page, other layout:** Packing Labels → **Horizontal**, for files with a row per store and a column per item, packs under merged headers (the Packing Sheets layout).
++*   **Packing-sheet codes as headers:** the "Code for Pack …" columns Packing Sheets adds (and Sub-Group's "Code for pack 1: 1-5") are read like job numbers, each store's code in its cell. No code column: codes come from the Signature Links file, else are worked out exactly as Packing Sheets does.
++*   **Signature Links as the plugin:** Packing Sheets now writes a **Label Plugin** tab into the Signature Links file (rows, store column, packs, stock columns per tab). Upload it with the distribution file (e.g. from the shared drive) and the tabs and header rows fill themselves in; its codes are checked against the file and its installer barcodes go on the dividers. The Label Shuffler skips the tab.
++*   **Packing-sheet order:** an audit page per pack (labels, boxes, codes and units to check against the packing sheet, where the codes came from, and anything to check), then code A, B, C … with the Label Shuffler's divider sheet before each (switchable), stores in sheet order. Standard A4 packing labels.
++*   **Code boxes on every label:** each pack's packing-sheet code is its own item box, first on the label: the code column's header ("Code for Pack 2", or a sub-group's "Code for pack 2: 1-2") where a job number goes, and the store's code (A, B, C …) where the quantity goes. No barcode, and never counted as units.
++*   **Item Reference:** the store's number in its tab, T + the tab, P + the pack: `03T1P2 Chadstone`, in the labels, both courier CSVs and the label map, so Stitch Labels matches by it.
++*   **Checks:** quantities that aren't numbers, packs marked x with quantities, codes that no longer match the quantities or the Signature Links file, units on no label, TOTAL row differences — each with its Excel row and column; errors lock Generate.
++
+ ### 5. 🚚 Courier Import (Generate Courier Import File)
+ *   **The courier CSV straight from an address list**, no packing labels: one row per store / receiver with its address, and one column per pack group headed **1, 2, 3 …** (or P1, P2 …). Each store's cell under a pack holds that pack's Packing Spec (`OB600100100`, `Box`, `2 x OB600100100` for two boxes).
+ *   **x / X (or blank) under a pack:** that store doesn't get that pack; it isn't counted for it.
+@@ -87,6 +96,11 @@ The **Warehouse Automation Suite** is a robust, local Flask-based web applicatio
+ 
+ ---
+ 
++## 🤖 Working on it with Claude Code
++*   `CLAUDE.md` describes the project; `.claude/settings.json` offers the plugins Claude Code Setup, Frontend Design, Security Guidance and Anthropic's Agent Skills when the folder is opened, and runs `.claude/hooks/after_edit.py` (lint + tests) after each edit.
++*   `.claude/skills/distribution-files/` explains the distribution file layouts to Claude.
++*   Tests: `pip install -r requirements-dev.txt`, then `python -m pytest -q` (no Excel needed).
++
+ ## 🛠️ Technology Stack
+ 
+ *   **Backend:** Python 3, Flask, Werkzeug
+diff --git a/app.py b/app.py
+index b6126ed..5ff6ad3 100644
+--- a/app.py
++++ b/app.py
+@@ -16,7 +16,7 @@ import pandas as pd
+ from werkzeug.utils import secure_filename
+ from pdf_engine import process_and_shuffle_pdf
+ from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
+-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, read_divider_barcodes
++from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, NOT_STORE_TABS, read_divider_barcodes
+ from subgroup_engine import execute_subgroups, SubgroupValidationError
+ from packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
+                                      detect_columns, header_columns, similar_addresses, cell_preview)
+@@ -42,6 +42,8 @@ from courier_export import (build_consignments, detect_series, write_label_map,
+                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
+ import openpyxl
+ import app_log
++from horizontal_distribution import read_horizontal, read_signature_file
++from horizontal_labels import generate_horizontal_labels
+ import logging
+ 
+ 
+@@ -144,6 +146,33 @@ app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
+ app.config['TEMP_FOLDER'] = temp_dir
+ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+ os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
++# Uploads are Excel files and courier label PDFs: anything far bigger is a mistake (or an attack), refused early
++app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('WAREHOUSE_MAX_UPLOAD_MB', '500')) * 1024 * 1024
++
++# Routes that do something (every POST, and the GET links that open a file in Windows). Any web page open in the
++# same browser could otherwise make the browser call them on 127.0.0.1 (cross-site request forgery).
++ACTION_GETS = {'open_local_file', 'open_upload_file'}
++
++
++def script_json(value):
++    """JSON safe to put inside a <script> tag: '<', '>' and '&' escaped, so a folder or file name holding
++    '</script>' can't end the tag and run as code. JSON.parse reads it back unchanged."""
++    return json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
++
++
++@app.before_request
++def same_origin_only():
++    """Refuses actions started by another website. Browsers say where a request comes from (Sec-Fetch-Site, else
++    Origin); this app's own pages are same-origin, typing a URL or a bookmark is 'none'."""
++    if request.method != 'POST' and request.endpoint not in ACTION_GETS:
++        return None
++    site = request.headers.get('Sec-Fetch-Site')
++    if site in ('cross-site', 'same-site'):
++        return 'Refused: this request came from another website.', 403
++    origin = request.headers.get('Origin')
++    if not site and origin and origin != 'null' and origin.split('://', 1)[-1] != request.host:
++        return 'Refused: this request came from another website.', 403
++    return None
+ 
+ # Project names go into the folder name and every file name: kept short enough that every file of a project still
+ # opens in Excel (whose limit is about 218 characters for a file's full path)
+@@ -1125,8 +1154,8 @@ def pdf_engine():
+                 with pd.ExcelFile(excel_path) as xls:
+                     installer_tabs = sorted({tab for tab, _ in read_divider_barcodes(xls)})
+                     for sheet in xls.sheet_names:
+-                        if sheet == DIVIDER_BARCODE_SHEET:
+-                            continue  # barcode data for the dividers, not a tab of store codes
++                        if sheet in NOT_STORE_TABS:
++                            continue  # divider barcodes / the Label Plugin: not a tab of store codes
+                         df = pd.read_excel(xls, sheet_name=sheet)
+                         packs = df.columns[1:].tolist()
+                         tabs_data[sheet] = packs
+@@ -1163,7 +1192,7 @@ def pdf_engine():
+                                     break
+                             projects_info[folder_name] = sig_file
+ 
+-                projects_json = json.dumps(projects_info)
++                projects_json = script_json(projects_info)
+ 
+                 # Re-render Step 1 with duplicate errors, plus enough context for the
+                 # "Open Excel File" / "Recheck File" buttons to target the exact file.
+@@ -1286,7 +1315,7 @@ def pdf_engine():
+                         break
+                 projects_info[folder_name] = sig_file
+                 
+-    projects_json = json.dumps(projects_info)
++    projects_json = script_json(projects_info)
+     return _show('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
+ 
+ 
+@@ -1308,9 +1337,31 @@ def _consignment_edits(form):
+     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
+ 
+ 
+-def _read_tab(filepath, header_row, tab, columns=None, mode='labels'):
+-    """parse_packing_data() (Courier Import: read_allocation()), plus store names for files whose only address info
+-    is one combined cell. columns: the tab's Column mapping set by hand in the preview (_column_choices)."""
++def _signature_path(filepath):
++    """Where the Signature Links file uploaded with a horizontal distribution file is kept until Generate."""
++    return filepath + '.signature.xlsx'
++
++
++def _signature_for(filepath):
++    """The Signature Links file uploaded with this distribution file (read_signature_file), or None."""
++    path = _signature_path(filepath)
++    if not os.path.isfile(path):
++        return None
++    try:
++        return read_signature_file(path)
++    except Exception as e:
++        log_pack.warning("  Signature Links file %s couldn't be read: %s", os.path.basename(path), e)
++        return None
++
++
++def _read_tab(filepath, header_row, tab, columns=None, mode='labels', tab_no=1):
++    """parse_packing_data() (Courier Import: read_allocation(); horizontal files: read_horizontal()), plus store
++    names for files whose only address info is one combined cell. columns: the tab's Column mapping set by hand in
++    the preview (_column_choices). tab_no: the tab's place among the selected tabs (T1, T2 … in references)."""
++    if mode == 'horizontal':
++        pack_groups, last_row, found_headers, warnings = read_horizontal(filepath, header_row, tab, columns, tab_no,
++                                                                         _signature_for(filepath))
++        return fill_store_names(pack_groups), last_row, found_headers, warnings
+     read = read_allocation if mode == 'courier' else parse_packing_data
+     pack_groups, last_row, found_headers, warnings = read(filepath, header_row, sheet_name=tab, columns=columns)
+     return fill_store_names(pack_groups), last_row, found_headers, warnings
+@@ -1322,7 +1373,7 @@ def _column_choices(form, tab, mode='labels'):
+     Import's fields are the address list's, and 'pack_<n>' for its pack columns."""
+     choices = {}
+     prefix = f'colmap::{tab}::'
+-    if mode == 'courier':
++    if mode in ('courier', 'horizontal'):
+         fields = [k[len(prefix):] for k in form if k.startswith(prefix)]
+         fields = [f for f in fields if f in IMPORT_FIELD_NAMES or PACK_FIELD.match(f)]
+     else:
+@@ -1342,7 +1393,7 @@ def _mapping_view(filepath, header_row, tab, choices, mode='labels'):
+         log_pack.warning("  tab %s: couldn't read header row %s for the column mapping: %s", tab, header_row, e)
+         columns = []
+     text_of = dict(columns)
+-    if mode == 'courier':
++    if mode in ('courier', 'horizontal'):
+         try:
+             found, packs, _ = scan_columns(filepath, header_row, tab)
+         except Exception as e:
+@@ -2013,12 +2064,58 @@ def create_packing_labels():
+     return _distribution_page('labels')
+ 
+ 
++@app.route('/packing-labels/horizontal', methods=['GET', 'POST'])
++def create_horizontal_labels():
++    """Packing labels from a horizontal distribution file (a row per store, a column per item, packs under merged
++    headers), in packing-sheet order, optionally with the Signature Links file of its Packing Sheets run."""
++    return _distribution_page('horizontal')
++
++
+ @app.route('/courier-import', methods=['GET', 'POST'])
+ def courier_import():
+     """Courier Import: only the courier CSV, from an address list with a column per pack (courier_import.py)."""
+     return _distribution_page('courier')
+ 
+ 
++def _signature_note(signature):
++    """What the preview says about the Signature Links file of a horizontal job."""
++    if not signature:
++        return {'loaded': False}
++    return {'loaded': True, 'plugin': sorted(signature.get('plugin') or {}), 'codes': sorted(signature.get('codes') or {}),
++            'barcodes': len(signature.get('barcodes') or {})}
++
++
++def _keep_signature_upload(upload, filepath, tabs):
++    """Keeps the Signature Links file sent with a horizontal distribution file next to it (an older one is
++    removed, so a re-scan without one doesn't use it). With a Label Plugin tab, the tabs it describes come
++    ticked with their header rows filled in. Returns (user_inputs or None, error text or None)."""
++    path = _signature_path(filepath)
++    if os.path.exists(path):
++        os.remove(path)
++    if not upload or not upload.filename:
++        return None, None
++    if os.path.splitext(upload.filename)[1].lower() not in ('.xlsx', '.xlsm'):
++        return None, "The Signature Links file must be an .xlsx file (the one Packing Sheets made)."
++    upload.save(path)
++    try:
++        signature = read_signature_file(path)
++    except Exception as e:
++        os.remove(path)
++        return None, f"Could not read the Signature Links file: {e}"
++    plugin = signature.get('plugin') or {}
++    log_pack.info("  Signature Links %s: codes for %d tab(s), Label Plugin for %s", secure_filename(upload.filename),
++                  len(signature['codes']), sorted(plugin) or 'none')
++    if not plugin:
++        return None, None
++    inputs = {}
++    for tab in tabs:
++        t = plugin.get(tab)
++        above = (t['first_row'] - 1 if t and t.get('first_row') else
++                 max([r for r in (t.get('pack_group_row'), t.get('job_id_row')) if r] or [1]) if t else 1)
++        inputs[tab] = {'selected': bool(t), 'header_row': str(above)}
++    return inputs, None
++
++
+ def _distribution_page(mode):
+     """Packing Labels and Courier Import share one page and its steps: upload, tabs and header rows, the preview
+     (Column mapping, consignment table with the address book, ✏️ edits, merges, service codes, weights), the
+@@ -2029,6 +2126,7 @@ def _distribution_page(mode):
+     if kept:
+         return kept
+     courier_mode = mode == 'courier'
++    horizontal_mode = mode == 'horizontal'
+     log = log_import if courier_mode else log_pack
+     show = lambda **context: _show('packing_labels.html', mode=mode, **context)
+     if request.method == 'GET':
+@@ -2060,7 +2158,12 @@ def _distribution_page(mode):
+                 wb.close()
+ 
+             log.info("Upload %s: %d tab(s) %s", filename, len(tabs), tabs)
+-            return show(tabs=tabs, filename=filename)
++            inputs = None
++            if horizontal_mode:
++                inputs, sig_error = _keep_signature_upload(request.files.get('signature_file'), filepath, tabs)
++                if sig_error:
++                    return show(page_error=sig_error)
++            return show(tabs=tabs, filename=filename, user_inputs=inputs)
+         except Exception as e:
+             log.exception("Could not scan upload %s", original_filename)
+             return show(page_error=f"Could not scan '{original_filename}': {e}")
+@@ -2107,7 +2210,8 @@ def _distribution_page(mode):
+             if choices:
+                 log.info("  tab %s: columns set by hand %s", tab, choices)
+             try:
+-                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices, mode)
++                pack_groups, last_row, found_headers, warnings = _read_tab(filepath, header_row, tab, choices, mode,
++                                                                           selected_tabs.index(tab) + 1)
+                 
+                 total_packs = len(pack_groups)
+                 total_stores = len(set(g['store_name'] for g in pack_groups.values()))
+@@ -2145,7 +2249,8 @@ def _distribution_page(mode):
+         if previews and not any(p['error'] for p in previews):
+             combined = {}
+             for tab in selected_tabs:
+-                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode)
++                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode,
++                                            selected_tabs.index(tab) + 1)
+                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
+                 if courier_mode:
+                     _import_refs(groups, selected_tabs.index(tab) + 1)
+@@ -2210,8 +2315,10 @@ def _distribution_page(mode):
+             except Exception:
+                 log.exception("  live cell preview could not be built")
+ 
++        signature = _signature_for(filepath) if horizontal_mode else None
+         return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
+-                               file_note=file_note, cell_preview=preview_cells)
++                               file_note=file_note, cell_preview=preview_cells,
++                               signature_note=_signature_note(signature) if horizontal_mode else None)
+ 
+     # Action: Generate Final PDF & Save to Project
+     if 'generate' in request.form:
+@@ -2250,12 +2357,19 @@ def _distribution_page(mode):
+         project_dir = None
+         started = time.perf_counter()
+         tab_of = {}  # pack key -> its tab's number among the selected tabs, for the Item Reference ('01T2QWXK Store')
++        pack_notes = {}  # horizontal: (tab number, pack number) -> the warnings about that pack, for its audit page
+         try:
+             # 1. Parse Data
+             sheet_warnings = []
+             for tab in selected_tabs:
+                 header_row = int(user_inputs[tab]['header_row'])
+-                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode)
++                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode,
++                                                            selected_tabs.index(tab) + 1)
++                if horizontal_mode:
++                    for g in pack_groups.values():
++                        key = (g['tab_no'], g['pack_no'])
++                        pack_notes.setdefault(key, [w for w in tab_warnings
++                                                    if f"pack {g['pack_name']}".lower() in f"{w.get('col', '')} {w.get('text', '')}".lower()])
+                 if courier_mode:
+                     _import_refs(pack_groups, selected_tabs.index(tab) + 1)
+                 sheet_warnings += [{**w, 'col': f"{tab} {w.get('col', '')}".strip() if len(selected_tabs) > 1 else w.get('col', '')}
+@@ -2273,6 +2387,8 @@ def _distribution_page(mode):
+                 n = tab_of[key]
+                 seen[n] += 1
+                 serials[key] = f"{seen[n]:0{max(2, len(str(per_tab[n])))}d}T{n}"
++            if horizontal_mode:  # '03T1P2': the store's number in its tab, T + the tab, P + the pack
++                serials = {key: g['serial'] for key, g in combined_pack_groups.items()}
+ 
+             # 2. Courier consignments, checked before anything is written or moved
+             fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
+@@ -2294,7 +2410,8 @@ def _distribution_page(mode):
+                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
+ 
+             # 3. Setup Project Folder structure
+-            raw_project_name = _project_name(request.form.get('project_name'), 'Courier_Import_Job' if courier_mode else 'Packing_Labels_Job')
++            raw_project_name = _project_name(request.form.get('project_name'), 'Courier_Import_Job' if courier_mode else
++                                             'Horizontal_Labels_Job' if horizontal_mode else 'Packing_Labels_Job')
+             safe_project_name = clean_file_name(raw_project_name)
+             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
+             final_folder_name = f"{safe_project_name}_{time_stamp}"
+@@ -2303,6 +2420,10 @@ def _distribution_page(mode):
+ 
+             # 4. Move the Excel File into the Project
+             new_filepath = os.path.join(project_dir, filename)
++            signature_used = _signature_for(filepath) if horizontal_mode else None
++            if signature_used:  # the project keeps the Signature Links file it was made with (not named 'Signature links…',
++                # so the Label Shuffler doesn't take this project for one of its own)
++                shutil.copy(_signature_path(filepath), os.path.join(project_dir, f"Used Signature Links - {os.path.splitext(filename)[0]}.xlsx"))
+             shutil.move(filepath, new_filepath)
+             log.info("  project folder %s", final_folder_name)
+ 
+@@ -2334,8 +2455,14 @@ def _distribution_page(mode):
+                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
+                                             ref_issues)
+                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
+-                    page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
+-                                                    serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
++                    if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
++                        page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
++                                                               report, serials, add_dividers='code_dividers' in request.form,
++                                                               divider_barcodes=(signature_used or {}).get('barcodes'),
++                                                               notes=pack_notes)
++                    else:
++                        page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
++                                                            serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
+                 log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
+ 
+                 # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
+@@ -2344,7 +2471,10 @@ def _distribution_page(mode):
+                 base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
+                 map_name = f"{base_name}.labelmap.json"
+                 items = open360_items(cartons, consignments, tab_of, serials)
+-                open360_refs = open360_item_references(items)
++                if horizontal_mode:  # '03T1P2 Chadstone': the serial is the code Stitch Labels matches
++                    open360_refs = [(f"{serials[x['pack_key']]} {x['store']}", serials[x['pack_key']]) for x in cartons]
++                else:
++                    open360_refs = open360_item_references(items)
+                 ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
+                 csv_files = []
+                 if 'open360' in csv_formats:
+@@ -2391,6 +2521,8 @@ def _distribution_page(mode):
+             except Exception as e:
+                 log_book.exception("Could not update the address book after Generate: %s", e)
+ 
++            if horizontal_mode and os.path.exists(_signature_path(filepath)):
++                os.remove(_signature_path(filepath))
+             log.info("Generate done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
+             left_out = [x for x in all_cartons if x not in cartons]
+             summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
+@@ -2458,9 +2590,9 @@ if __name__ == '__main__':
+     # server itself (WERKZEUG_RUN_MAIN=true). Only the first may clear the port, or the server would stop its own watcher.
+     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+         free_port(PORT)
+-    if getattr(sys, 'frozen', False):
+-        app.run(debug=False, port=PORT)
+-    else:
+-        app.run(debug=True, port=PORT)
++    # The Flask debugger runs any code typed into its error page: only on request (set WAREHOUSE_DEBUG=1), never in
++    # the .exe, and never reachable from another computer (no host= here: 127.0.0.1 only)
++    debug = os.environ.get('WAREHOUSE_DEBUG') == '1' and not getattr(sys, 'frozen', False)
++    app.run(debug=debug, port=PORT)
+ 
+     
+diff --git a/core_math.py b/core_math.py
+index 56b1333..efa8763 100644
+--- a/core_math.py
++++ b/core_math.py
+@@ -10,6 +10,39 @@ import pandas as pd
+ DIVIDER_BARCODE_SHEET = "Divider Barcodes"
+ DIVIDER_BARCODE_COLUMNS = ["Tab", "Pack", "Code", "Job Number", "Kind", "Qty", "Barcode"]
+ 
++# Extra tab in the Signature Links file (File 3): what Packing Sheets was told about each tab (rows, store column,
++# packs and their stock columns), so the Packing Labels user can read the horizontal distribution file with no
++# mapping. One row per tab and pack. Skipped by the Label Shuffler when it lists tabs/packs.
++LABEL_PLUGIN_SHEET = "Label Plugin"
++LABEL_PLUGIN_COLUMNS = ["Tab", "Pack", "Pack Order", "Pack Group Row", "Job Number Row", "First Store Row",
++                        "Last Store Row", "Store Column", "Stock Column", "Stock Column (Final file)", "Item Columns",
++                        "Codes", "Selected", "Installer", "Final File"]
++NOT_STORE_TABS = (DIVIDER_BARCODE_SHEET, LABEL_PLUGIN_SHEET)  # Signature Links tabs that aren't a tab of store codes
++
++
++def label_plugin_rows(tab_name, tab_info, inputs, pack_summaries, file1_name):
++    """The Label Plugin rows of one tab (LABEL_PLUGIN_COLUMNS). tab_info: generate_tab_map's backend_data;
++    inputs: the tab's user inputs (selected_packs, installer); pack_summaries: the tab's packs left to right, with
++    'name', 'unique_sigs' and 'is_selected'. Column letters are given for the original file; the stock column also
++    as it sits in the Final file, after a code column went in at the start of every selected pack to its left."""
++    from openpyxl.utils import get_column_letter
++    packs = tab_info["pack_ranges"]
++    selected = {p["name"] for p in pack_summaries if p.get("is_selected")}
++    codes = {p["name"]: len(p.get("unique_sigs") or []) for p in pack_summaries}
++    first_row = max(tab_info["pack_group_row"], tab_info["job_id_row"]) + 1
++    rows = []
++    for order, pack in enumerate(packs, start=1):
++        stock = tab_info["stock_start_col"] + order - 1
++        stock = stock if stock <= tab_info["last_stock_col"] else None
++        shift = sum(1 for p in packs if p["name"] in selected and p["start"] <= (stock or 0))
++        rows.append([tab_name, pack["name"], order, tab_info["pack_group_row"], tab_info["job_id_row"], first_row,
++                     tab_info["last_row"], get_column_letter(tab_info["store_col_idx"]),
++                     get_column_letter(stock) if stock else "", get_column_letter(stock + shift) if stock else "",
++                     f"{get_column_letter(pack['start'])}-{get_column_letter(pack['end'])}",
++                     codes.get(pack["name"], ""), "Y" if pack["name"] in selected else "N",
++                     "Y" if inputs.get("installer") else "N", file1_name or ""])
++    return rows
++
+ def clean_file_name(raw_string):
+     """Cleans messy strings into safe file names."""
+     if not raw_string:
+diff --git a/horizontal_distribution.py b/horizontal_distribution.py
+new file mode 100644
+index 0000000..0ffd4bc
+--- /dev/null
++++ b/horizontal_distribution.py
+@@ -0,0 +1,509 @@
++"""Packing Labels from a HORIZONTAL distribution file (the Packing Sheets layout).
++
++Vertical files (parse_packing_data) have one row per item with the Packing Spec merged down a box's rows.
++Horizontal files have one row per store and one column per item, the items of a pack under a merged pack header:
++
++            Description | Code for Pack 1  A1 poster   A2 poster |  Code for Pack 2  Code for pack 2: 1-2  Card  Strip
++  Job row   Job Number  | Code for Pack 1  J476699-01  J476699-02 | Code for Pack 2  Code for pack 2: 1-2  J…-05 J…-06
++  Pack row  Store  Addr…|  <--------------- 1 ------------------> |  <------------------- 2 ---------------------->
++            Corio  …    |  B               2           2          |  A                A                     3     10
++
++The packing-sheet code columns ("Code for Pack <name>", sub-groups "Code for pack <name>: 1-5") are headers like any
++job number: their cells hold each store's code instead of a quantity. A pack may have one, several or none:
++  - in the file:            used, and checked against the quantities and the Signature Links file
++  - only in Signature Links: taken from there (its "Code for <pack>" columns)
++  - nowhere:                worked out exactly as Packing Sheets does (core_math.generate_pack_signatures)
++
++The Signature Links file can carry a "Label Plugin" tab (written by Packing Sheets, core_math.label_plugin_rows):
++the rows and columns Packing Sheets was given for each tab, so the Packing Labels user needs no mapping.
++
++read_horizontal() returns pack groups shaped like parse_packing_data()'s, ordered like the packing sheets
++(pack, then code A, B … Z, AA, then sub-group codes, then the store's row), each with its serial
++'<store's number in the tab>T<tab>P<pack>' ('03T1P2'), the start of its Item Reference '03T1P2 Chadstone'.
++Positions are found by pattern and header text, never fixed rows or columns.
++"""
++import io
++import re
++from collections import Counter, defaultdict
++
++import openpyxl
++from openpyxl.utils import get_column_letter
++from openpyxl.utils.cell import column_index_from_string
++
++from packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
++                                     is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field)
++from courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
++                            NO_PACK, TOTAL_ROW)
++from courier_export import attn_text
++from core_math import (generate_pack_signatures, sanitize_cell, clean_store_name, LABEL_PLUGIN_SHEET,
++                       DIVIDER_BARCODE_SHEET, read_divider_barcodes)
++from pdf_engine import code128_modules
++from packing_specs import split_count
++
++JOB = re.compile(r'^[A-Z]{1,3}\d{4,8}(-\d{1,4})?[A-Z]?$', re.I)
++CODE_HEADER = re.compile(r'^\s*code\s+for\s+(.+?)\s*$', re.I)
++SUB_RANGE = re.compile(r'^(.*?):\s*(\d+\s*-\s*\d+)$')
++ROW_LABELS = (  # label text left of the items, above the header -> item field
++    ('desc', r'desc|item\s*name|^item$|^name$'),
++    ('dimension', r'size|dimension|dims'),
++    ('material', r'material|substrate'),
++    ('notes', r'note|comment'),
++    ('thumbnail', r'art\s*work|image|thumb|visual|picture'),
++    ('pack_spec', r'pack(ing)?\s*spec|carton|box\s*type'),
++)
++
++
++# ---------------------------------------------------------------- codes and names
++
++def code_key(code):
++    """Packing-sheet order of a code: A … Z, AA … (length, then letters); no code last."""
++    code = (code or '').strip().upper()
++    return (len(code), code) if code else (99, '')
++
++
++def parse_code_header(text):
++    """'Code for Pack 2' -> ('Pack 2', None); 'Code for pack 2: 1-5' -> ('pack 2', '1-5'); anything else None."""
++    m = CODE_HEADER.match(str(text or ''))
++    if not m:
++        return None
++    rest = m.group(1)
++    sub = SUB_RANGE.match(rest)
++    return (sub.group(1).strip(), re.sub(r'\s+', '', sub.group(2))) if sub else (rest, None)
++
++
++def names_pack(header_name, pack_name):
++    """A code header's pack name against a pack's: Packing Sheets writes 'Code for Pack 1' in the Final file and
++    'Code for 1' in Signature Links, so 'Pack 1' and '1' both name pack '1' (and 'Pack Pack A' names 'Pack A')."""
++    h, p = _norm(header_name), _norm(pack_name)
++    return h == p or h == _norm(f"pack {pack_name}")
++
++
++# ---------------------------------------------------------------- the Signature Links file
++
++def read_signature_file(path):
++    """{'plugin': {tab: {...}}, 'codes': {tab: {pack header name: {store key: code}}}, 'barcodes': {...}} from a
++    Signature Links file. Every part may be empty: an older file has no Label Plugin tab."""
++    out = {'plugin': {}, 'codes': {}, 'barcodes': {}, 'file': path}
++    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
++    try:
++        for ws in wb.worksheets:
++            rows = [[c for c in r] for r in ws.iter_rows(values_only=True)]
++            if not rows:
++                continue
++            header = [str(h).strip() if h is not None else '' for h in rows[0]]
++            if ws.title == LABEL_PLUGIN_SHEET:
++                out['plugin'] = _plugin_from_rows(header, rows[1:])
++            elif ws.title != DIVIDER_BARCODE_SHEET:
++                tab = {}
++                for c, h in enumerate(header[1:], start=1):
++                    parsed = parse_code_header(h)
++                    if not parsed or parsed[1]:
++                        continue
++                    tab[parsed[0]] = {_norm(clean_store_name(r[0])): str(r[c]).strip()
++                                      for r in rows[1:] if r and r[0] and c < len(r) and r[c] not in (None, '')}
++                if tab:
++                    out['codes'][ws.title] = tab
++    finally:
++        wb.close()
++    try:
++        import pandas as pd
++        with pd.ExcelFile(path) as xls:
++            out['barcodes'] = read_divider_barcodes(xls)
++    except Exception:
++        out['barcodes'] = {}
++    return out
++
++
++def _plugin_from_rows(header, rows):
++    idx = {h: i for i, h in enumerate(header)}
++    need = {'Tab', 'Pack', 'Pack Order', 'Pack Group Row', 'Job Number Row', 'First Store Row', 'Last Store Row', 'Store Column'}
++    if not need <= set(idx):
++        return {}
++    get = lambda r, k: r[idx[k]] if k in idx and idx[k] < len(r) else None
++    num = lambda v: int(float(v)) if v not in (None, '') and str(v).strip().replace('.', '', 1).isdigit() else None
++    tabs = {}
++    for r in rows:
++        tab = str(get(r, 'Tab') or '').strip()
++        if not tab:
++            continue
++        t = tabs.setdefault(tab, {
++            'pack_group_row': num(get(r, 'Pack Group Row')), 'job_id_row': num(get(r, 'Job Number Row')),
++            'first_row': num(get(r, 'First Store Row')), 'last_row': num(get(r, 'Last Store Row')),
++            'store_col': str(get(r, 'Store Column') or '').strip().upper(), 'packs': []})
++        t['packs'].append({
++            'name': str(get(r, 'Pack') or '').strip(), 'order': num(get(r, 'Pack Order')),
++            'stock_col': str(get(r, 'Stock Column') or '').strip().upper(),
++            'stock_col_final': str(get(r, 'Stock Column (Final file)') or '').strip().upper(),
++        })
++    return tabs
++
++
++# ---------------------------------------------------------------- the distribution tab
++
++def _row_field(text):
++    t = " ".join(str(text).lower().split())
++    for field, pattern in ROW_LABELS:
++        if re.search(pattern, t):
++            return field
++    return None
++
++
++def _image_map(ws, path):
++    images = {cell: [data] for cell, data in extract_rich_value_images(path, ws.title).items()}
++    for image in getattr(ws, '_images', []):
++        try:
++            r, c = _floating_image_cell(ws, image.anchor)
++            images.setdefault((r, c), []).append(io.BytesIO(image._data()))
++        except Exception:
++            continue
++    return images
++
++
++def _letter_to_col(letter):
++    try:
++        return column_index_from_string(letter) if letter else None
++    except ValueError:
++        return None
++
++
++def read_horizontal(excel_path, header_row, sheet_name=None, columns=None, tab_no=1, signature=None):
++    """Pack groups of one tab, in packing-sheet order. Returns (pack_groups, last_row, found, warnings) like
++    parse_packing_data(); raises PackCheckError(errors, warnings) when the labels can't be trusted.
++    header_row: the row just above the first store. columns: the Column mapping set by hand (Courier Import fields:
++    address columns, and 'pack_<n>' for a pack's Packing Spec column). signature: read_signature_file()."""
++    signature = signature or {}
++    wb = openpyxl.load_workbook(excel_path, data_only=True)
++    try:
++        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
++        return _read(ws, excel_path, header_row, columns or {}, tab_no, signature)
++    finally:
++        wb.close()
++
++
++def _read(ws, excel_path, header_row, columns, tab_no, signature):
++    spans = _merged_spans(ws)
++    plugin = (signature.get('plugin') or {}).get(ws.title)
++    sig_codes = (signature.get('codes') or {}).get(ws.title, {})
++    errors, warnings = [], []
++    L = get_column_letter
++
++    def val(r, c):
++        top = spans.get((r, c))
++        v = ws.cell(row=top[0], column=top[1]).value if top else ws.cell(row=r, column=c).value
++        return '' if v is None else str(v).strip()
++
++    # 1. The job number row: the Label Plugin's, else the row with the most job numbers / code headers
++    top_rows = range(1, header_row + 1)
++    if plugin and plugin.get('job_id_row'):
++        job_row = plugin['job_id_row']
++    else:
++        score = lambda r: sum(1 for c in range(1, ws.max_column + 1)
++                              if JOB.match(val(r, c)) or parse_code_header(val(r, c)))
++        job_row = max(top_rows, key=score)
++        if not score(job_row):
++            raise PackCheckError([_issue('', f"Rows 1-{header_row}", "No Job Number row found above the stores",
++                                         "Check the header row, or upload the Signature Links file with its Label Plugin tab.")], warnings)
++    marked = [c for c in range(1, ws.max_column + 1) if JOB.match(val(job_row, c)) or parse_code_header(val(job_row, c))]
++    first_col, last_col = min(marked), max(marked)
++
++    # 2. The pack row: the Label Plugin's, else the row whose headers / merged cells cover the most item columns
++    if plugin and plugin.get('pack_group_row'):
++        pack_row = plugin['pack_group_row']
++    else:
++        # Pack headers are merged over their items (a description or size row isn't), and sit nearest the stores
++        def merged(r):
++            return sum(1 for c in range(first_col, last_col + 1) if spans.get((r, c)) and spans[(r, c)][2] > 1)
++
++        def filled(r):
++            return sum(1 for c in range(first_col, last_col + 1) if val(r, c) or (r, c) in spans)
++        candidates = [r for r in range(1, max(header_row, job_row) + 1) if r != job_row and filled(r)]
++        if not candidates:
++            raise PackCheckError([_issue('', f"Rows 1-{header_row}", "No pack headers found over the item columns")], warnings)
++        pack_row = max(candidates, key=lambda r: (merged(r) > 0, merged(r), r == header_row, r))
++
++    # 3. Packs, left to right: a merged cell in the pack row, or one header over one column (as Packing Sheets reads them)
++    packs, col_pack = [], {}
++    c = first_col
++    while c <= last_col:
++        top = spans.get((pack_row, c))
++        if top:
++            start, end = top[1], top[1] + top[2] - 1
++            name = val(pack_row, start) or f"Pack_{start}"
++        elif val(pack_row, c):
++            start = end = c
++            name = val(pack_row, c)
++        else:
++            c += 1
++            continue
++        packs.append({'name': name, 'order': len(packs) + 1, 'cols': list(range(start, end + 1))})
++        for x in range(start, end + 1):
++            col_pack[x] = packs[-1]
++        c = end + 1
++    if plugin:
++        known = [p['name'] for p in plugin['packs']]
++        for p in packs:
++            hit = next((q for q in plugin['packs'] if _norm(q['name']) == _norm(p['name'])), None)
++            if hit and hit.get('order'):
++                p['order'] = hit['order']
++            p['plugin'] = hit
++        missing = [n for n in known if not any(_norm(n) == _norm(p['name']) for p in packs)]
++        if missing:
++            warnings.append(_issue('', f"Row {pack_row}", f"Packs in the Label Plugin not found here: {', '.join(missing)}"))
++
++    # 4. Inside each pack: code columns (headers 'Code for …') and item columns (job numbers)
++    for p in packs:
++        p['code_cols'], p['sub_cols'], p['items'] = None, [], []
++        for x in p['cols']:
++            parsed = parse_code_header(val(job_row, x))
++            if parsed:
++                hname, rng = parsed
++                if not names_pack(hname, p['name']):
++                    warnings.append(_issue('', f"{L(x)}{job_row}", f"'{val(job_row, x)}' sits in pack {p['name']}"))
++                if rng:
++                    p['sub_cols'].append((rng, x))
++                elif p['code_cols'] is None:
++                    p['code_cols'] = x
++            elif val(job_row, x):
++                p['items'].append(x)
++    item_cols = [x for p in packs for x in p['items']]
++    if not item_cols:
++        raise PackCheckError([_issue('', f"Row {job_row}", "No item columns (job numbers) under the packs")], warnings)
++
++    # 5. Store rows: as Packing Sheets finds them (last store above a TOTAL row), unless the Label Plugin says
++    cols = detect_import_columns(_header_cells(ws, header_row))
++    spec_cols, spec_warn = detect_pack_columns(ws, header_row, spans)
++    spec_cols = {n: c for n, c in spec_cols.items() if c not in col_pack}
++    cols, spec_cols = apply_choices(cols, spec_cols, columns)
++    warnings += [w for w in spec_warn if not columns]
++    if plugin and _letter_to_col(plugin.get('store_col')):
++        cols['store_name'] = _letter_to_col(plugin['store_col'])
++    store_col = cols.get('store_name') or cols.get('receiver_name')
++    if not store_col:
++        raise PackCheckError([_issue('', f"Row {header_row}", "No Store Name column found",
++                                     "Pick it in the Column mapping, or upload the Signature Links file.")], warnings)
++    install_col = next((x for x, v in _header_cells(ws, header_row) if v and _header_field(v) == 'install'), None)
++    last_row = plugin.get('last_row') if plugin and plugin.get('last_row') else None
++    if not last_row:
++        last_row = ws.max_row
++        while last_row > header_row and not val(last_row, store_col):
++            last_row -= 1
++        if TOTAL_ROW.match(val(last_row, store_col)):
++            last_row -= 1
++    first_row = plugin.get('first_row') if plugin and plugin.get('first_row') else header_row + 1
++    store_rows = [r for r in range(first_row, last_row + 1) if val(r, store_col)]
++    totals_row = next((r for r in range(last_row + 1, min(ws.max_row, last_row + 3) + 1)
++                       if TOTAL_ROW.match(val(r, store_col))), None)
++
++    # 6. Item details from labelled rows above (Description, Size, Artwork …)
++    attr_rows = {'job_no': job_row}
++    for r in range(1, header_row + 1):
++        if r == job_row:
++            continue
++        label = next((val(r, x) for x in range(first_col - 1, 0, -1) if x not in spec_cols.values() and val(r, x)), '')
++        field = _row_field(label) if label else None
++        if field and field not in attr_rows:
++            attr_rows[field] = r
++    images = _image_map(ws, excel_path)
++    info, no_image = {}, []
++    for x in item_cols:
++        info[x] = {f: (val(attr_rows[f], x) if f in attr_rows else '') for f in ('job_no', 'desc', 'dimension', 'material', 'notes')}
++        info[x]['thumbnails'] = images.get((attr_rows['thumbnail'], x), []) if 'thumbnail' in attr_rows else []
++        if 'thumbnail' in attr_rows and not info[x]['thumbnails']:
++            no_image.append(L(x))
++    if no_image:
++        warnings.append(_issue('', f"{', '.join(no_image)} · row {attr_rows['thumbnail']}", "No artwork image"))
++
++    # 7. Each pack's codes per store: from its code column, else Signature Links, else worked out as Packing Sheets does
++    raw = [[ws.cell(row=r, column=x).value for x in range(1, ws.max_column + 1)] for r in range(1, ws.max_row + 1)]
++    sig_rows = list(range(pack_row + 1, last_row + 1))  # the rows Packing Sheets coded
++    store_key = {r: _norm(clean_store_name(val(r, store_col))) for r in store_rows}
++    code_problems = []
++    for p in packs:
++        computed = {}
++        if p['items']:
++            _, _, _, _, ordered = generate_pack_signatures(raw, sig_rows, min(p['items']), max(p['items']))
++            computed = dict(zip(sig_rows, ordered))
++        sheet = next((codes for name, codes in sig_codes.items() if names_pack(name, p['name'])), None)
++        if p['code_cols']:
++            p['codes'] = {r: val(r, p['code_cols']).upper() for r in store_rows}
++            p['code_source'] = f"the file's '{val(job_row, p['code_cols'])}' column (column {L(p['code_cols'])})"
++            stale = [r for r in store_rows if p['codes'][r] != (computed.get(r) or '')]
++            if stale:
++                code_problems.append(_issue(_row_ranges(stale), f"{L(p['code_cols'])} · Pack {p['name']}",
++                                            "Code doesn't match the quantities",
++                                            "The quantities changed after Packing Sheets: run Packing Sheets again."))
++        elif sheet is not None:
++            p['codes'] = {r: (sheet.get(store_key[r]) or '').upper() for r in store_rows}
++            p['code_source'] = "the Signature Links file"
++        else:
++            p['codes'] = {r: computed.get(r, '') for r in store_rows}
++            p['code_source'] = "worked out from the quantities (no code column, no Signature Links)"
++        if sheet is not None and p['code_cols']:
++            off = [r for r in store_rows if (sheet.get(store_key[r]) or '').upper() != p['codes'][r]]
++            if off:
++                code_problems.append(_issue(_row_ranges(off), f"Pack {p['name']}",
++                                            "Code differs from the Signature Links file",
++                                            "The two files are from different Packing Sheets runs."))
++            p['code_source'] += ", checked against Signature Links"
++        p['subs'] = {rng: {r: val(r, x).upper() for r in store_rows} for rng, x in p['sub_cols']}
++        p['code_header'] = (val(job_row, p['code_cols']) if p['code_cols'] else
++                            f"Code for Pack {p['name']}" if not str(p['name']).lower().startswith('pack') else f"Code for {p['name']}")
++        p['sub_headers'] = [(rng, val(job_row, x)) for rng, x in p['sub_cols']]
++    errors += code_problems
++
++    # 8. One pack group per store and pack that has quantities
++    n_stores = len(store_rows)
++    width = max(2, len(str(n_stores)))
++    names = Counter(store_key.values())
++    groups, bad_qty, x_but_qty, no_spec, spec_no_qty = {}, [], [], [], []
++    grid_units = label_units = 0
++    for number, r in enumerate(store_rows, start=1):
++        receiver = val(r, cols['receiver_name']) if 'receiver_name' in cols else ''
++        store = clean_store_name(val(r, cols['store_name'])) if 'store_name' in cols else receiver
++        store = store or receiver
++        parts = {k: val(r, cols[k]) for k in ADDRESS_FIELDS + ('address_3',) if k in cols}
++        line2 = ", ".join(v for v in (parts.get('address_2', ''), parts.get('address_3', '')) if v)
++        install = is_install_flag(val(r, install_col)) if install_col else False
++        for p in packs:
++            items = []
++            for x in p['items']:
++                q = sanitize_cell(ws.cell(row=r, column=x).value)
++                if isinstance(q, str):
++                    bad_qty.append((r, x))
++                    continue
++                if q:
++                    grid_units += q
++                    items.append({**{k: v for k, v in info[x].items()}, 'qty': f"{q:g}" if isinstance(q, float) else str(q),
++                                  'install': "INSTALLER" if install else "", 'source_key': (ws.title, x)})
++            spec = _spec_for(p, r, val, spec_cols, attr_rows, any(p['code_cols'] or p['sub_cols'] for p in packs))
++            if items and spec.lower() in NO_PACK:
++                (x_but_qty if spec else no_spec).append((r, p))
++                continue
++            if not items:
++                if spec and spec.lower() not in NO_PACK and p.get('spec_from') == 'column':
++                    spec_no_qty.append((r, p))
++                continue
++            label_units += sum(float(i['qty']) for i in items)
++            code = p['codes'].get(r, '')
++            subs = [(rng, codes.get(r, '')) for rng, codes in p['subs'].items()]
++            # Item boxes for the codes, first on the label (where the code columns sit in the file): the code
++            # column's header where a job number goes, the store's code where the quantity goes
++            code_cells = [_code_cell(p['code_header'], code)] + [_code_cell(h, c) for (rng, h), c in
++                                                                 zip(p['sub_headers'], (c for _, c in subs)) if c]
++            tag = f"PACK {p['order']} \u00b7 CODE {code or '?'}" + "".join(f" \u00b7 {rng}: {c}" for rng, c in subs if c)
++            serial = f"{number:0{width}d}T{tab_no}P{p['order']}"
++            groups[f"ROW_{r}_P{p['order']}"] = {
++                'pack_spec_name': spec, 'store_name': store, 'receiver_name': receiver,
++                'contact': attn_text(val(r, cols['contact'])) if 'contact' in cols else '', 'install': install,
++                'address_1': parts.get('address_1', ''), 'address_2': line2,
++                **{k: parts.get(k, '') for k in ('suburb', 'state', 'postcode', 'country')},
++                'pack_no': p['order'], 'pack_name': p['name'], 'pack_code': code, 'sub_codes': subs,
++                'pack_tag': tag, 'code_cells': code_cells, 'code_source': p['code_source'], 'serial': serial, 'store_no': number,
++                'tab_no': tab_no, 'tab_name': ws.title, 'excel_rows': [r], 'items': items,
++            }
++
++    # 9. Checks, each with its Excel row and column
++    for r, x in bad_qty:
++        errors.append(_issue(str(r), L(x), "Quantity isn't a number"))
++    for r, p in x_but_qty:
++        errors.append(_issue(str(r), f"Pack {p['name']}", f"Pack {p['name']} marked x but has quantities",
++                             "Give it a Packing Spec, or clear its quantities."))
++    for r, p in no_spec:
++        errors.append(_issue(str(r), f"Pack {p['name']}", "No Packing Spec for this pack",
++                             "Add the pack's Packing Spec column (headed with the pack's number), or a Packing Spec row."))
++    for r, p in spec_no_qty:
++        warnings.append(_issue(str(r), f"Pack {p['name']}", "Packing Spec but no quantities: no label made"))
++    uncoded = [g['excel_rows'][0] for g in groups.values() if not g['pack_code']]
++    if uncoded:
++        errors.append(_issue(_row_ranges(uncoded), 'Code', "Store gets a pack but has no packing-sheet code"))
++    dupes = [s for s, k in names.items() if k > 1 and s]
++    if dupes:
++        warnings.append(_issue('', L(store_col), f"Store listed twice: {', '.join(dupes)}",
++                               "The packing sheets and the Label Shuffler can't tell them apart."))
++    no_barcode = sorted({i['job_no'] for g in groups.values() for i in g['items'] if i['job_no'] and code128_modules(i['job_no']) is None})
++    if no_barcode:
++        warnings.append(_issue('', f"Row {job_row}", f"Job number can't be a barcode: {', '.join(no_barcode)}"))
++    if abs(grid_units - label_units) > 1e-9:
++        errors.append(_issue('', 'Quantities', f"{grid_units - label_units:g} units in the grid are on no label",
++                             "Fix the problems above: every unit must land on a packing label."))
++    totals = [sanitize_cell(raw[totals_row - 1][x - 1]) for x in item_cols] if totals_row else []
++    totals = [t for t in totals if isinstance(t, (int, float)) and t]
++    if totals:  # a TOTAL row with its numbers in: they must add up to the stores' quantities
++        sheet_total = sum(totals)
++        if abs(sheet_total - grid_units) > 1e-9:
++            warnings.append(_issue(str(totals_row), 'TOTAL', f"TOTAL row says {sheet_total:g}, the stores add up to {grid_units:g}"))
++    if errors:
++        raise PackCheckError(errors, warnings)
++
++    # 10. Packing-sheet order: pack, code (A … Z, AA …), sub-group codes, the store's row
++    order = sorted(groups, key=lambda k: (groups[k]['pack_no'], code_key(groups[k]['pack_code']),
++                                          [code_key(c) for _, c in groups[k]['sub_codes']], groups[k]['store_no']))
++    found = {'packs': {f"{p['order']}. {p['name']}": f"{L(p['cols'][0])}-{L(p['cols'][-1])}" for p in packs},
++             'codes': sorted({re.sub(r"'Code for .*?' column \(column [A-Z]+\)", "code columns", p['code_source']) for p in packs}),
++             'rows': {'job': job_row, 'pack': pack_row, 'stores': f"{first_row}-{last_row}"},
++             'plugin': bool(plugin), 'stores': n_stores}
++    return {k: groups[k] for k in order}, last_row, found, warnings
++
++
++def _spec_for(p, r, val, spec_cols, attr_rows, final_file):
++    """A store's Packing Spec for a pack: its column headed with the pack's number (Courier Import's), else the
++    Label Plugin's stock column for the pack, else a Packing Spec row above the pack's items."""
++    n = int(p['name']) if p['name'].isdigit() else p['order']
++    if n in spec_cols:
++        p['spec_from'] = 'column'
++        return val(r, spec_cols[n])
++    plug = p.get('plugin') or {}
++    col = _letter_to_col(plug.get('stock_col_final') if final_file else plug.get('stock_col')) or _letter_to_col(plug.get('stock_col'))
++    if col:
++        p['spec_from'] = 'column'
++        return val(r, col)
++    if 'pack_spec' in attr_rows:
++        p['spec_from'] = 'row'
++        return next((val(attr_rows['pack_spec'], x) for x in p['items'] if val(attr_rows['pack_spec'], x)), '')
++    return ''
++
++
++def _code_cell(header, code):
++    """A packing-sheet code as an item box: the header in the job number's place, the code in the quantity's.
++    No barcode (it isn't a piece to scan), and never counted as units or job numbers."""
++    return {'job_no': header, 'qty': code or '?', 'desc': '', 'dimension': '', 'material': '', 'install': '',
++            'notes': '', 'thumbnails': [], 'barcode': '', 'is_code': True}
++
++
++def item_references(pack_groups):
++    """[(Item Reference, code)] per pack in order: ('03T1P2 Chadstone', '03T1P2'). The code is what Stitch Labels
++    reads back off the courier label (label_stitcher.find_code)."""
++    return [(f"{g['serial']} {g['store_name']}", g['serial']) for g in pack_groups.values()]
++
++
++def pack_blocks(pack_groups):
++    """The packs in order as [((tab_no, pack_no), [keys])], one block per tab and pack (an audit page each)."""
++    blocks = []
++    for k, g in pack_groups.items():
++        key = (g.get('tab_no', 1), g['pack_no'])
++        if not blocks or blocks[-1][0] != key:
++            blocks.append((key, []))
++        blocks[-1][1].append(k)
++    return blocks
++
++
++def pack_summary(pack_groups, keys):
++    """What a pack's audit page shows: its item columns, and per code the stores, boxes and quantity per item."""
++    cols, seen = [], set()
++    for k in keys:
++        for i in pack_groups[k]['items']:
++            if i['source_key'] not in seen:
++                seen.add(i['source_key'])
++                cols.append((i['source_key'], i['job_no'], i['desc']))
++    cols.sort(key=lambda c: c[0][1])
++    by_code = defaultdict(lambda: {'stores': 0, 'boxes': 0, 'qty': Counter(), 'serials': []})
++    for k in keys:
++        g = pack_groups[k]
++        row = by_code[g['pack_code']]
++        row['stores'] += 1
++        row['boxes'] += split_count(g['pack_spec_name'])[0]
++        row['serials'].append(g['serial'])
++        for i in g['items']:
++            row['qty'][i['source_key']] = float(i['qty'])
++    codes = sorted(by_code, key=code_key)
++    return cols, [(c, by_code[c]) for c in codes]
+diff --git a/horizontal_labels.py b/horizontal_labels.py
+new file mode 100644
+index 0000000..ab8856d
+--- /dev/null
++++ b/horizontal_labels.py
+@@ -0,0 +1,148 @@
++"""The packing labels PDF for a horizontal distribution file, in packing-sheet order:
++
++  job report (page 1)
++  for each tab, for each pack:   audit page   - the pack's codes as on its packing sheet, with stores, boxes and
++                                                quantities per item, where the codes came from, and what needs a look
++      for each code A, B, C …:   divider      - the Label Shuffler's divider sheet (pdf_engine.build_divider_sheet),
++                                                with the installer barcodes when the Signature Links file has them
++                                 labels       - the standard A4 packing labels (generate_packing_labels), one per box
++
++The labels are drawn by generate_packing_labels() exactly as for vertical files, then put in this order. The page
++numbers returned (and written to the label map) point at the final PDF, so Stitch Labels finds every label.
++"""
++import os
++import tempfile
++
++import pymupdf as fitz
++
++from packing_label_generator import generate_packing_labels, draw_report_pages, A4_W, A4_H, MM2PT, _latin
++from pdf_engine import build_divider_sheet
++from horizontal_distribution import pack_blocks, pack_summary
++
++GREEN, RED, AMBER = (0.18, 0.63, 0.36), (0.75, 0.22, 0.17), (0.85, 0.55, 0.0)
++INK, MUTED, RULE = (0.2, 0.2, 0.2), (0.45, 0.45, 0.45), (0.82, 0.82, 0.82)
++M = 12 * MM2PT
++
++
++def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=None, addresses=None, report=None,
++                               serials=None, add_dividers=True, divider_barcodes=None, notes=None):
++    """pack_groups: every selected tab's groups, combined in tab order, each tab already in packing-sheet order
++    (horizontal_distribution.read_horizontal). divider_barcodes: read_divider_barcodes() of the Signature Links file,
++    {(tab, 'Code for <pack>'): {code: [entries]}}. notes: {(tab_no, pack_no): [issue dicts]} shown on the audit page.
++    Returns generate_packing_labels()'s page info, with the page numbers of the final PDF."""
++    divider_barcodes, notes = divider_barcodes or {}, notes or {}
++    tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
++    tmp.close()
++    try:
++        info = generate_packing_labels(pack_groups, tmp.name, attribute_order, addresses, None, serials, None)
++        labels = fitz.open(tmp.name)
++        out = fitz.open()
++        report_pages = draw_report_pages(out, report, at=0) if report else 0
++        new_page = {}
++        for (tab_no, pack_no), keys in pack_blocks(pack_groups):
++            draw_pack_audit(out, pack_groups, keys, notes.get((tab_no, pack_no), []), add_dividers)
++            first = pack_groups[keys[0]]
++            codes = []
++            for k in keys:
++                if not codes or codes[-1][0] != pack_groups[k]['pack_code']:
++                    codes.append((pack_groups[k]['pack_code'], []))
++                codes[-1][1].append(k)
++            for code, code_keys in codes:
++                if add_dividers:
++                    entries = _barcodes_for(divider_barcodes, first['tab_name'], first['pack_name'], code)
++                    n = len(code_keys)
++                    div = build_divider_sheet(A4_W, A4_H, code or '?', n, n, False, barcode_entries=entries)
++                    _divider_caption(div[0], first, n)
++                    out.insert_pdf(div)
++                    div.close()
++                for k in code_keys:
++                    for p in info['pages'][k]:
++                        new_page[p] = len(out)
++                        out.insert_pdf(labels, from_page=p, to_page=p)
++        labels.close()
++        out.save(output_pdf_path, garbage=3, deflate=True)
++        out.close()
++    finally:
++        os.unlink(tmp.name)
++    info['pages'] = {k: [new_page[p] for p in v] for k, v in info['pages'].items()}
++    info['copies'] = {k: [[new_page[p] for p in box] for box in v] for k, v in info['copies'].items()}
++    info['report_pages'] = report_pages
++    return info
++
++
++def _barcodes_for(lookup, tab, pack, code):
++    """The installer barcodes for one code's divider, keyed as the Label Shuffler keys them."""
++    for (t, header), by_code in lookup.items():
++        name = header[len('Code for '):] if header.startswith('Code for ') else header
++        if t == tab and name.strip().lower() in (str(pack).strip().lower(), f"pack {pack}".strip().lower()):
++            return by_code.get(code)
++    return None
++
++
++def _divider_caption(page, first, count):
++    """The pack this divider belongs to, small at the foot, so a stack of dividers can be told apart."""
++    pack = f"Pack {first['pack_no']}" + ("" if str(first['pack_name']).strip() == str(first['pack_no']) else f" - {first['pack_name']}")
++    text = _latin(f"Tab {first['tab_no']} - {first['tab_name']}  |  {pack}  |  "
++                  f"{count} label{'s' if count != 1 else ''}")
++    w = fitz.get_text_length(text, fontname='hebo', fontsize=12)
++    page.insert_text(((page.rect.width - w) / 2, page.rect.height - 52), text, fontname='hebo', fontsize=12, color=INK)
++
++
++def _text(page, x, y, text, size=10, bold=False, color=INK, right=None):
++    font = 'hebo' if bold else 'helv'
++    text = _latin(text)
++    if right is not None:
++        x = right - fitz.get_text_length(text, fontname=font, fontsize=size)
++    page.insert_text((x, y), text, fontname=font, fontsize=size, color=color)
++
++
++def _fit(text, size, width, bold=False):
++    """The text cut to the width, ending in '...' when it had to be cut."""
++    font = 'hebo' if bold else 'helv'
++    text = _latin(text)
++    if fitz.get_text_length(text, fontname=font, fontsize=size) <= width:
++        return text
++    while text and fitz.get_text_length(text + '...', fontname=font, fontsize=size) > width:
++        text = text[:-1]
++    return text + '...' if text else ''
++
++
++def draw_pack_audit(doc, pack_groups, keys, issues, dividers):
++    """One pack's audit page, before its labels: the counts to check against the packing sheet, where the codes
++    came from, and what needs a look. Green header when nothing does, amber when something should be checked."""
++    first = pack_groups[keys[0]]
++    _, rows = pack_summary(pack_groups, keys)
++    boxes = sum(r['boxes'] for _, r in rows)
++    units = sum(float(i['qty']) for k in keys for i in pack_groups[k]['items'])
++    title = f"Pack {first['pack_name']}" if str(first['pack_name']).strip().isdigit() else first['pack_name']
++    colour = AMBER if issues else GREEN
++
++    page = doc.new_page(width=A4_W, height=A4_H)
++    page.draw_rect(fitz.Rect(0, 0, A4_W, 54), color=colour, fill=colour)
++    _text(page, M, 24, f"PACK AUDIT - TAB {first['tab_no']} - PACK {first['pack_no']}", 9, True, (1, 1, 1))
++    _text(page, M, 44, title, 18, True, (1, 1, 1))
++    _text(page, 0, 44, "Check before packing" if issues else "All checks passed", 12, True, (1, 1, 1), right=A4_W - M)
++
++    # The figures to check against the packing sheet
++    x = M
++    for label, value in (("Labels", f"{len(keys)}"), ("Boxes", f"{boxes}"), ("Codes", f"{len(rows)}"), ("Units", f"{units:g}")):
++        w = max(70, fitz.get_text_length(value, fontname='hebo', fontsize=15) + 22)
++        page.draw_rect(fitz.Rect(x, 68, x + w - 8, 112), color=RULE, fill=(0.97, 0.97, 0.97), radius=0.15, width=0.6)
++        _text(page, x + 8, 84, label.upper(), 7.5, True, MUTED)
++        _text(page, x + 8, 104, value, 15, True)
++        x += w
++    _text(page, M, 134, f"Codes: {first.get('code_source', '')}", 9, False, MUTED)
++    _text(page, M, 148, ("Order: code by code (A, B, C ...), a divider before each code, stores in sheet order."
++                         if dividers else "Order: code by code (A, B, C ...), stores in sheet order. Dividers off."),
++          9, False, MUTED)
++
++    # What needs a look, for this pack only
++    y = 176
++    if issues:
++        _text(page, M, y, "Needs a look", 11, True, AMBER)
++        for i in issues[:20]:
++            y += 15
++            where = " ".join(p for p in (f"Row {i.get('rows')}" if i.get('rows') else '', i.get('col', '')) if p)
++            _text(page, M, y, _fit(f"- {where}: {i.get('text', '')}" if where else f"- {i.get('text', '')}", 9.5, A4_W - 2 * M), 9.5)
++    else:
++        _text(page, M, y, "Every unit in this pack is on a label, and every store has its packing-sheet code.", 9.5, False, GREEN)
+diff --git a/label_stitcher.py b/label_stitcher.py
+index 7a05535..fb6692f 100644
+--- a/label_stitcher.py
++++ b/label_stitcher.py
+@@ -40,6 +40,7 @@ _STOP = re.compile(r'item\s*desc|description|powered by', re.I)
+ _CODE_IN_REF = re.compile(r'\d+(?:\.\d+)?-([A-Z]{4,8})-L-')        # older Item References: '01-QWXK-L-1-Store'
+ _CODE_ANYWHERE = re.compile(r'(?<![A-Z])-?([A-Z]{4,8})-L-\d')
+ _CODE_TAB = re.compile(r'(?<![A-Za-z0-9])\d{1,4}T\d{1,2}([A-Z]{4,})')  # '01T1QWXK Store': count, T + tab, code
++_CODE_TP = re.compile(r'(?<![A-Za-z0-9])(\d{1,4}T\d{1,2}P\d{1,3})(?!\d)')  # horizontal files: '03T1P2 Store'
+ 
+ 
+ class StitchError(ValueError):
+@@ -82,8 +83,13 @@ def _tab_code(text, known):
+ 
+ def find_code(text, known):
+     """The unique code on a courier label, if it's one of this project's (known: set of codes). Item References
+-    of both layouts: '01T1QWXK Provision Clayton' and the older '01-QWXK-L-1-Provision Clayton'."""
++    of all layouts: '01T1QWXK Provision Clayton', the older '01-QWXK-L-1-Provision Clayton', and horizontal
++    files' '03T1P2 Chadstone' (store number in the tab, T + tab, P + pack)."""
+     known = {k.upper() for k in known}
++    for ref in _item_ref_texts(text) + [text]:  # horizontal files: store number, T + tab, P + pack ('03T1P2')
++        for candidate in _CODE_TP.findall(ref) + _CODE_TP.findall(ref.replace(' ', '')):
++            if candidate.upper() in known:
++                return candidate.upper()
+     for ref in _item_ref_texts(text) + [text]:  # in the Item Ref first, then anywhere on the label
+         found = _tab_code(ref, known) or _tab_code(ref.replace(' ', ''), known)
+         if found:
+@@ -164,9 +170,9 @@ def page_key(page, text):
+     import hashlib
+     words = " ".join(text.split()).lower()
+     if words:
+-        return "t" + hashlib.sha1(words.encode('utf-8')).hexdigest()[:16]
++        return "t" + hashlib.sha1(words.encode('utf-8'), usedforsecurity=False).hexdigest()[:16]
+     pix = page.get_pixmap(dpi=40, colorspace=fitz.csGRAY)
+-    return "i" + hashlib.sha1(pix.samples).hexdigest()[:16]
++    return "i" + hashlib.sha1(pix.samples, usedforsecurity=False).hexdigest()[:16]
+ 
+ 
+ def address_snippet(text, lines=5):
+diff --git a/matrix_engine.py b/matrix_engine.py
+index 2b7ded5..32c3f84 100644
+--- a/matrix_engine.py
++++ b/matrix_engine.py
+@@ -7,7 +7,7 @@ import pandas as pd
+ import collections
+ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
+ import json
+-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS
++from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
+ 
+ 
+ 
+@@ -735,6 +735,18 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
+                 worksheet = writer.sheets[DIVIDER_BARCODE_SHEET]
+                 worksheet.set_column(0, len(DIVIDER_BARCODE_COLUMNS) - 1, None, writer.book.add_format({'font_size': 12}))
+                 worksheet.autofit()
++
++            # --- LABEL PLUGIN TAB ---
++            # The rows and columns of every tab and pack, so Packing Labels can read the horizontal distribution
++            # file (this run's Final file, or the original) without anyone mapping it again. Kept last.
++            plugin_rows = []
++            for tab_name in selected_tabs:
++                summaries = list(reversed(tab_summaries.get(tab_name, [])))  # back to left-to-right
++                plugin_rows += label_plugin_rows(tab_name, tab_data_memory[tab_name], user_inputs.get(tab_name, {}),
++                                                 summaries, file1_name)
++            if plugin_rows:
++                pd.DataFrame(plugin_rows, columns=LABEL_PLUGIN_COLUMNS).to_excel(writer, sheet_name=LABEL_PLUGIN_SHEET, index=False)
++                writer.sheets[LABEL_PLUGIN_SHEET].autofit()
+         wb_raw.close()
+     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
+     if file1_name: 
+diff --git a/packing_label_generator.py b/packing_label_generator.py
+index ba914a2..f9002ad 100644
+--- a/packing_label_generator.py
++++ b/packing_label_generator.py
+@@ -1,12 +1,14 @@
+ import re
+ from collections import Counter
+-import pandas as pd
+ import openpyxl
+ import io
+ import math
+ import base64
+ import zipfile
+-import xml.etree.ElementTree as ET
++try:  # the xlsx parts are read from uploaded files: defusedxml refuses entity tricks (billion laughs)
++    from defusedxml import ElementTree as ET
++except ImportError:  # pragma: no cover - requirements.txt installs it
++    import xml.etree.ElementTree as ET
+ import pymupdf as fitz
+ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
+ from pdf_engine import code128_modules, _draw_code128, BARCODE_QUIET_MODULES, BARCODE_MAX_MODULE
+@@ -81,7 +83,7 @@ def extract_rich_value_images(excel_path, sheet_name):
+                         if media_path:
+                             col_idx = column_index_from_string(col_letter)
+                             image_map[(r, col_idx)] = io.BytesIO(z.read(media_path))
+-    except Exception as e:
++    except Exception:
+         pass
+     return image_map
+ 
+@@ -404,7 +406,7 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
+                 no_address_packs.append(rows[0]['row'])
+ 
+             if any(r['crosses_pack'] for r in rows):
+-                warnings.append(_issue(span, col['address'], f"Merged address shared with next pack"))
++                warnings.append(_issue(span, col['address'], "Merged address shared with next pack"))
+ 
+     if no_address_packs:
+         warnings.append(_issue(_row_ranges(no_address_packs), col['address'], "No address"))
+@@ -758,6 +760,8 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
+             y += h + gap
+ 
+         elif attr == 'barcode':
++            if item.get('is_code'):
++                continue  # a packing-sheet code box: nothing to scan
+             val = item.get('barcode') or _clean(item.get('job_no'))
+             modules = code128_modules(val, compact=True) if val else None
+             if not modules:
+@@ -820,7 +824,7 @@ def _round_rect(page, rect, r, color=None, fill=None, width=0):
+     page.draw_rect(rect, color=color, fill=fill, width=width, radius=radius)
+ 
+ 
+-def _spec_panel(page, rect, spec, max_size=22):
++def _spec_panel(page, rect, spec, max_size=22, tag=""):
+     """Black rounded panel with the Packing Spec in large white type. Returns its bottom y."""
+     inner_w = rect.width - 16
+     size = max_size
+@@ -833,6 +837,12 @@ def _spec_panel(page, rect, spec, max_size=22):
+     panel = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + h)
+     _round_rect(page, panel, 6, fill=(0, 0, 0))
+     page.insert_text((panel.x0 + 8, panel.y0 + 11), "PACKING SPEC", fontname="hebo", fontsize=7, color=(1, 1, 1))
++    if tag:  # horizontal files: the pack and its packing-sheet code, top right of the panel
++        tag_size = 9  # its own name: 'size' is the Packing Spec's, drawn below
++        while tag_size > 6 and fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size) > panel.width - 90:
++            tag_size -= 0.5
++        width = fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size)
++        page.insert_text((panel.x1 - 8 - width, panel.y0 + 12), tag, fontname="hebo", fontsize=tag_size, color=(1, 0.82, 0.2))
+     _draw_lines(page, lines, panel.x0 + 8, panel.x0 + 8 + inner_w, panel.y0 + 15, "hebo", size, (1, 1, 1))
+     return panel.y1
+ 
+@@ -855,18 +865,23 @@ def assign_barcodes(pack_groups):
+     """Gives every item its barcode text. Same idea as the Distribution Mapper's kinds, with rows in
+     place of columns: a job number on more than one row gets one kind per row, numbered K1, K2, K3...
+     in reading order (first tab to last, then top to bottom), so K1 is its first row in the first tab.
+-    Call it with all selected tabs combined, in tab order."""
++    An item may carry 'source_key' (horizontal files: its tab and item column): items sharing one are the same
++    kind, so an item column keeps its kind on every store's label. Call it with all selected tabs combined, in tab order."""
+     items = [item for g in pack_groups.values() for item in g['items']]
+     key = lambda item: str(item.get('job_no') or '').strip().upper()
+-    totals = Counter(key(i) for i in items if key(i))
+-    seen = Counter()
++    source = lambda item: item.get('source_key') or id(item)
++    kinds_of = {}  # job -> {source: kind}, in reading order
++    for item in items:
++        if key(item):
++            kinds = kinds_of.setdefault(key(item), {})
++            kinds.setdefault(source(item), len(kinds) + 1)
+     for item in items:
+         job = str(item.get('job_no') or '').strip()
+         if not job:
+             item['barcode'] = ''
+             continue
+-        seen[key(item)] += 1
+-        item['barcode'] = barcode_text(job, seen[key(item)] if totals[key(item)] > 1 else None)
++        kinds = kinds_of[key(item)]
++        item['barcode'] = barcode_text(job, kinds[source(item)] if len(kinds) > 1 else None)
+ 
+ 
+ def assign_label_numbers(pack_groups):
+@@ -1103,7 +1118,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
+         if tab_no is not None and previous_tab is not None and tab_no != previous_tab:
+             divider(tab_no, tab_name)
+         previous_tab = tab_no if tab_no is not None else previous_tab
+-        items = group_data['items']
++        # Horizontal files: the packing-sheet code boxes go first. Drawn only, so they never count as items,
++        # units, job numbers or barcode kinds anywhere else
++        items = list(group_data.get('code_cells') or []) + group_data['items']
+         total_items = len(items)
+         store = group_data['store_name']
+         # '01T1. Blue Star Moorabbin': the label's serial in its tab before the name, on every page of the pack
+@@ -1140,7 +1157,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
+                                             fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
+ 
+                     zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
+-                    y = _spec_panel(page, zone_b, spec) + 8
++                    y = _spec_panel(page, zone_b, spec, tag=_latin(group_data.get('pack_tag') or '')) + 8
+ 
+                     if store and store.lower() != 'none':
+                         for line in _wrap(shown_name, "hebo", 13, zone_b.width)[:2]:
+diff --git a/requirements-dev.txt b/requirements-dev.txt
+new file mode 100644
+index 0000000..71cc539
+--- /dev/null
++++ b/requirements-dev.txt
+@@ -0,0 +1,2 @@
++pytest
++ruff
+diff --git a/requirements.txt b/requirements.txt
+index c90f35b..51ebad5 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -5,3 +5,4 @@ xlwings
+ PyMuPDF
+ xlsxwriter
+ Pillow
++defusedxml
+diff --git a/static/styles.css b/static/styles.css
+index bdabe26..1d17c38 100644
+--- a/static/styles.css
++++ b/static/styles.css
+@@ -1817,3 +1817,18 @@ a.ab-btn { display: inline-block; text-decoration: none; }
+ .home-data-link { margin-top: 26px; font-size: 14px; }
+ .home-data-link a { font-weight: 600; text-decoration: none; }
+ .home-data-link span { color: #7f8c8d; }
++
++/* Packing Labels: Vertical / Horizontal layout switch, built like the Courier CSV buttons */
++.pl-page .pl-layout-switch { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 18px; }
++.pl-page .pl-layout-option { display: inline-flex; flex-direction: column; gap: 2px; padding: 10px 16px; border: 2px solid #ccd1d1;
++    border-radius: 12px; background: #fff; color: #2c3e50; text-decoration: none; min-width: 200px; transition: border-color .15s, background .15s; }
++.pl-page .pl-layout-option strong { font-size: 14.5px; }
++.pl-page .pl-layout-option small { font-size: 12px; color: #7f8c8d; }
++.pl-page .pl-layout-option:hover { border-color: #82c99e; background: #f4fbf7; }
++.pl-page .pl-layout-option[aria-current="page"] { background: #1e8449; border-color: #1e8449; color: #fff; box-shadow: 0 2px 8px rgba(30, 132, 73, .3); }
++.pl-page .pl-layout-option[aria-current="page"] small { color: #d5f5e3; }
++.pl-page .pl-layout-option:focus-visible { outline: 3px solid #3498db; outline-offset: 2px; }
++.pl-page .pl-dropzone-optional { margin-top: 12px; border-style: dashed; opacity: .95; }
++.pl-page .pl-optional-tag { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 10px; background: #eaf2f8; color: #1f618d;
++    font-size: 12px; font-weight: 600; vertical-align: middle; }
++.pl-page .pl-divider-choice { margin-bottom: 14px; }
+diff --git a/templates/index.html b/templates/index.html
+index 9a9efd3..147376c 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -30,7 +30,7 @@
+             <a href="{{ url_for('create_packing_labels') }}" class="portal-card labels-card">
+                 <div class="portal-icon">🏷️</div>
+                 <div class="portal-title">3. Generate Packing Labels</div>
+-                <div class="portal-desc">Create custom A4 packing labels from your Excel data.</div>
++                <div class="portal-desc">Create custom A4 packing labels from your Excel data: vertical lists, or horizontal distribution files in packing-sheet order.</div>
+             </a>
+ 
+             <a href="{{ url_for('courier_import') }}" class="portal-card import-card">
+diff --git a/templates/packing_labels.html b/templates/packing_labels.html
+index 14c737c..da4ad3f 100644
+--- a/templates/packing_labels.html
++++ b/templates/packing_labels.html
+@@ -3,7 +3,9 @@
+ {# One page for two features: Packing Labels (mode 'labels': packing labels PDF + courier CSVs) and Courier Import
+    (mode 'courier': only the courier CSV, from an address list with a column per pack, headed 1, 2, 3 …) #}
+ {% set courier_mode = mode == 'courier' %}
+-{% set page_url = url_for('courier_import') if courier_mode else url_for('create_packing_labels') %}
++{# mode 'horizontal': packing labels from a horizontal distribution file (a row per store), in packing-sheet order #}
++{% set horizontal_mode = mode == 'horizontal' %}
++{% set page_url = url_for('courier_import') if courier_mode else (url_for('create_horizontal_labels') if horizontal_mode else url_for('create_packing_labels')) %}
+ {% set feature_name = '🚚 Courier Import' if courier_mode else '📦 Packing Labels' %}
+ {% macro issue_table(items, kind) %}
+ <table class="issue-table issue-{{ kind }}">
+@@ -91,6 +93,14 @@
+ 
+     <div class="container pl-page">
+         <h1>{{ '🚚 Generate Courier Import File' if courier_mode else '📦 Generate Packing Labels' }}</h1>
++        {% if not courier_mode %}
++        <nav class="pl-layout-switch" aria-label="Distribution file layout">
++            <a href="{{ url_for('create_packing_labels') }}" class="pl-layout-option"{% if not horizontal_mode %} aria-current="page"{% endif %}>
++                <strong>Vertical</strong><small>a row per item, Packing Spec merged per box</small></a>
++            <a href="{{ url_for('create_horizontal_labels') }}" class="pl-layout-option"{% if horizontal_mode %} aria-current="page"{% endif %}>
++                <strong>Horizontal</strong><small>a row per store, packs under merged headers</small></a>
++        </nav>
++        {% endif %}
+         
+         <div class="pl-top-links">
+             <a href="/" class="nav-link">← Home</a>
+@@ -124,6 +134,16 @@
+                 <li><strong>Output:</strong> only the courier CSV (Open360, OpenFreight or both), in a new project folder with the Excel file. No packing labels.</li>
+                 <li><strong>Names only:</strong> a list with store names and no address columns still works: addresses come from the address book, or you pick or type them in the consignment table.</li>
+             </ul>
++            {% elif horizontal_mode %}
++            <ul class="instructions-list">
++                <li><strong>The Packing Sheets layout:</strong> one row per store, one column per item, each pack's items under one merged header in the pack row, and the job numbers in a row above the stores.</li>
++                <li><strong>Packing-sheet codes:</strong> the "Code for Pack …" columns Packing Sheets puts at the start of each pack are read like any header: each store's cell holds its code. Sub-group codes ("Code for pack 1: 1-5") sort the labels within a code. No code column? The codes are taken from the Signature Links file, else worked out exactly as Packing Sheets does.</li>
++                <li><strong>Signature Links file (optional):</strong> the one Packing Sheets made for this job. Its <strong>Label Plugin</strong> tab fills in the tabs and header rows for you, its codes are checked against the file, and its installer barcodes go on the dividers.</li>
++                <li><strong>Header Row:</strong> the row just above the first store (filled in from the Label Plugin when there is one).</li>
++                <li><strong>Packing Spec:</strong> a column per pack headed with the pack's number (1, 2, 3 …), each store's spec in it (<em>OB600100100</em>, <em>2 x CS450320150</em>, <em>x</em> for none), as in Courier Import; or the stock columns named in the Label Plugin.</li>
++                <li><strong>Order:</strong> pack by pack as on the packing sheets, an audit page before each pack, then code A, B, C … with a divider before each, stores in sheet order.</li>
++                <li><strong>Item Reference:</strong> the store's number in its tab, T + the tab, P + the pack, then the store: <strong>03T1P2 Chadstone</strong>.</li>
++            </ul>
+             {% else %}
+             <ul class="instructions-list">
+                 <li><strong>Header Row:</strong> Tell the tool which row holds your headers (e.g. 1 or 2). It finds the columns automatically.</li>
+@@ -151,6 +171,17 @@
+                 </div>
+                 <input type="file" name="file" class="dropzone-input" accept=".xlsx, .xls" required>
+             </div>
++            {% if horizontal_mode %}
++            <div class="dropzone pl-dropzone-optional">
++                <div class="dropzone-content">
++                    <div class="dropzone-icon">🔗</div>
++                    <p class="dropzone-text">Signature Links file <span class="pl-optional-tag">optional</span></p>
++                    <p class="dropzone-subtext">From the Packing Sheets run, e.g. off the shared drive — .xlsx</p>
++                    <p class="dropzone-filename"></p>
++                </div>
++                <input type="file" name="signature_file" class="dropzone-input" accept=".xlsx, .xlsm">
++            </div>
++            {% endif %}
+             <button type="submit" class="btn-generate pl-submit">Scan File</button>
+         </form>
+         {% endif %}
+@@ -166,7 +197,7 @@
+ 
+         <!-- Single form handles both Preview and Generate. novalidate: Update Previews always goes through;
+              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
+-        <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else 'pl_column_mapping' }}">
++        <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else ('ph_column_mapping' if horizontal_mode else 'pl_column_mapping') }}">
+             <input type="hidden" name="filename" value="{{ filename }}">
+             
+             {% for tab in tabs %}
+@@ -205,6 +236,14 @@
+             </p>
+             {% endif %}
+             
++            {% if horizontal_mode and signature_note %}
++            <p class="pl-file-note pl-signature-note{% if not signature_note.loaded %} pl-file-note-warn{% endif %}">
++                {% if signature_note.loaded %}🔗 Signature Links loaded:
++                    {% if signature_note.plugin %}Label Plugin for {{ signature_note.plugin|join(', ') }};{% else %}no Label Plugin tab (an older file);{% endif %}
++                    codes for {{ signature_note.codes|join(', ') or 'no tab' }}{% if signature_note.barcodes %}; installer barcodes on the dividers{% endif %}.
++                {% else %}🔗 No Signature Links file: codes come from the file's code columns, else they're worked out as Packing Sheets does. Scan again with the file to check them against it.{% endif %}
++            </p>
++            {% endif %}
+             {% set lock = namespace(has_error=false) %}
+             
+             {% for bp in previews %}
+@@ -227,6 +266,11 @@
+                         <span class="metric-badge">Last Row Parsed: {{ bp.last_row }}</span>
+                         <span class="metric-badge">Total Packs: {{ bp.total_packs }}</span>
+                         <span class="metric-badge">Unique Stores: {{ bp.total_stores }}</span>
++                        {% if horizontal_mode and bp.found_headers.packs %}
++                        <span class="metric-badge">Packs: {% for name, cols in bp.found_headers.packs.items() %}{{ name }} ({{ cols }}){{ ', ' if not loop.last }}{% endfor %}</span>
++                        <span class="metric-badge">Rows: job {{ bp.found_headers.rows.job }} · pack {{ bp.found_headers.rows.pack }} · stores {{ bp.found_headers.rows.stores }}</span>
++                        <span class="metric-badge">Codes: {{ bp.found_headers.codes|join('; ') }}</span>
++                        {% endif %}
+                         {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
+                     </div>
+                     {{ colmap_panel(bp.sheet_name, bp.mapping) }}
+@@ -544,6 +588,16 @@
+ 
+ 
+                 <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
++                {% if horizontal_mode %}
++                <fieldset class="pl-csv-choice pl-divider-choice">
++                    <legend>Label order</legend>
++                    <div class="pl-csv-options">
++                        <label class="pl-csv-option"><input type="checkbox" name="code_dividers" value="1" checked>
++                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet, with installer barcodes</small></span></label>
++                    </div>
++                    <span class="pl-csv-hint issue-detail">Labels follow the packing sheets: an audit page per pack, then code A, B, C …, stores in sheet order.</span>
++                </fieldset>
++                {% endif %}
+                 <fieldset class="pl-csv-choice" id="pl-csv-choice">
+                     <legend>Courier CSV</legend>
+                     <div class="pl-csv-options">
+@@ -552,7 +606,7 @@
+                         <label class="pl-csv-option"><input type="checkbox" name="courier_csv" value="openfreight">
+                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>OpenFreight CSV</strong><small>the older courier CSV, with Who Pays and Charge Account</small></span></label>
+                     </div>
+-                    <span class="pl-csv-hint issue-detail">{% if courier_mode %}Choose one or both for this job. Both carry the same Item References (T1P1 Store, T1P2 Store …).{% else %}Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.{% endif %}</span>
++                    <span class="pl-csv-hint issue-detail">{% if courier_mode %}Choose one or both for this job. Both carry the same Item References (T1P1 Store, T1P2 Store …).{% elif horizontal_mode %}Choose one or both for this job. Both carry the same Item References (01T1P1 Store, 02T1P1 Store …), so courier labels from either stitch the same way.{% else %}Choose one or both for this job. Both carry the same Item References, so courier labels from either stitch the same way.{% endif %}</span>
+                     {% if courier and courier.export %}
+                     {% set ex = courier.export %}
+                     <div class="pl-export" id="pl-export" data-defaults-url="{{ url_for('api_export_defaults') }}" hidden>
+diff --git a/templates/sub-group.html b/templates/sub-group.html
+index d743293..a8c687f 100644
+--- a/templates/sub-group.html
++++ b/templates/sub-group.html
+@@ -54,7 +54,7 @@
+     </div>
+ 
+     <!-- Inject Metadata for JS -->
+-    <script id="meta-data" type="application/json">{{ metadata_json | safe }}</script>
++    <script id="meta-data" type="application/json">{{ metadata | tojson }}</script>
+ 
+     <!-- Master External Script -->
+     <script src="{{ url_for('static', filename='script.js') }}"></script>
+diff --git a/tests/fixtures.py b/tests/fixtures.py
+new file mode 100644
+index 0000000..f6e3c07
+--- /dev/null
++++ b/tests/fixtures.py
+@@ -0,0 +1,219 @@
++"""Sample files shaped like Packing Sheets' outputs, for the tests and for trying the horizontal labels by hand:
++
++  build_final_file()       the 'Final <file>.xlsx': a horizontal distribution file with a 'Code for Pack <name>'
++                           column at the start of each pack (and a sub-group code column in pack 2)
++  build_signature_links()  the 'Signature links_<job>.xlsx': a tab of store codes per tab, the Divider Barcodes tab
++                           and the Label Plugin tab
++
++    python tests/fixtures.py OUT_DIR      writes both files there
++"""
++import io
++import os
++import re
++import sys
++
++import openpyxl
++import pandas as pd
++from openpyxl.drawing.image import Image as XLImage
++from openpyxl.styles import Alignment, Font, PatternFill
++from openpyxl.utils import get_column_letter
++from PIL import Image, ImageDraw
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from core_math import (generate_pack_signatures, label_plugin_rows, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS,  # noqa: E402
++                       DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS)
++
++ADDRESS = ["Store Name", "Attn", "Address 1", "Suburb", "State", "Postcode", "Install"]
++TABS = {
++    "Spring Sale": {
++        "items": [  # pack, job, description, size, colour
++            ("1", "J476699-01", "A1 poster", "594 x 841", (214, 69, 65)),
++            ("1", "J476699-02", "A2 poster", "420 x 594", (232, 126, 4)),
++            ("1", "J476699-03", "Window decal L", "1200 x 600", (41, 128, 185)),
++            ("1", "J476699-03", "Window decal R", "1200 x 600", (52, 152, 219)),
++            ("1", "J476699-04", "Ceiling wobbler", "300 dia", (142, 68, 173)),
++            ("2", "J476699-05", "Counter card", "A4", (39, 174, 96)),
++            ("2", "J476699-06", "Shelf strip", "900 x 40", (22, 160, 133)),
++            ("2", "J476699-07", "Floor decal", "500 dia", (243, 156, 18)),
++        ],
++        "subgroups": {"2": [(1, 2)]},  # pack 2 split by Sub-Group into items 1-2
++        "stores": [  # store, attn, address, suburb, state, postcode, install, spec per pack, qty per item
++            ("Corio Village", "Store Manager", "Shop K001, Corio Village SC", "Corio", "VIC", "3214", "N", ["OB600100100", "CS450320150"], [2, 2, 1, 1, 4, 3, 10, 2]),
++            ("Highpoint", "", "Shop 2102, 120-200 Rosamond Rd", "Maribyrnong", "VIC", "3032", "N", ["OB600100100", "CS450320150"], [2, 2, 1, 1, 4, 3, 10, 2]),
++            ("Chadstone", "Sam Lee", "Shop B045, 1341 Dandenong Rd", "Malvern East", "VIC", "3145", "N", ["OB600100100", "2 x CS450320150"], [4, 4, 2, 2, 8, 6, 20, 4]),
++            ("Westfield Parramatta", "", "Shop 4011, 159-175 Church St", "Parramatta", "NSW", "2150", "N", ["OB600100100", "CS450320150"], [1, 2, 1, 1, 2, 3, 10, 2]),
++            ("Carindale", "", "Shop 1080, 1151 Creek Rd", "Carindale", "QLD", "4152", "N", ["OB600100100", "x"], [1, 2, 1, 1, 2, 0, 0, 0]),
++            ("Rundle Mall", "Steven Priestley", "68 Ricketts Road", "Mount Waverley", "VIC", "3149", "Y", ["OB600100100", "CS450320150"], [2, 2, 1, 1, 4, 3, 10, 2]),
++            ("Garden City", "", "Shop 2200, 2049 Logan Rd", "Upper Mount Gravatt", "QLD", "4122", "N", ["x", "CS450320150"], [0, 0, 0, 0, 0, 3, 10, 2]),
++            ("Knox City", "", "Shop 3001, 425 Burwood Hwy", "Wantirna South", "VIC", "3152", "N", ["OB600100100", "CS450320150"], [2, 2, 1, 1, 4, 3, 5, 0]),
++        ],
++    },
++    "Easter": {
++        "items": [
++            ("1", "J476700-01", "Egg hunt poster", "A2", (230, 81, 120)),
++            ("1", "J476700-02", "Bunny standee", "1800 x 600", (120, 90, 200)),
++        ],
++        "subgroups": {},
++        "installer": True,
++        "stores": [
++            ("Corio Village", "Store Manager", "Shop K001, Corio Village SC", "Corio", "VIC", "3214", "N", ["OB1800100100"], [1, 1]),
++            ("Highpoint", "", "Shop 2102, 120-200 Rosamond Rd", "Maribyrnong", "VIC", "3032", "N", ["OB1800100100"], [2, 1]),
++            ("Chadstone", "Sam Lee", "Shop B045, 1341 Dandenong Rd", "Malvern East", "VIC", "3145", "N", ["OB1800100100"], [1, 1]),
++            ("Knox City", "", "Shop 3001, 425 Burwood Hwy", "Wantirna South", "VIC", "3152", "N", ["OB1800100100"], [2, 1]),
++        ],
++    },
++}
++JOB_ROW, PACK_ROW = 7, 8  # as in a Packing Sheets file: job numbers, then the merged pack headers just above the stores
++
++
++def _art(text, colour):
++    img = Image.new("RGB", (220, 300), colour)
++    d = ImageDraw.Draw(img)
++    d.rectangle([12, 12, 207, 287], outline="white", width=4)
++    d.text((70, 140), text, fill="white")
++    buf = io.BytesIO()
++    img.save(buf, "PNG")
++    buf.seek(0)
++    return buf
++
++
++def _layout(tab):
++    """Raw (original file) and final (with code columns) positions of every item column, per pack."""
++    spec = TABS[tab]
++    packs = []
++    for pack, *_ in spec["items"]:
++        if not packs or packs[-1] != pack:
++            packs.append(pack)
++    first_raw = len(ADDRESS) + len(packs) + 1
++    raw, col = {}, first_raw
++    for i, (pack, *_rest) in enumerate(spec["items"]):
++        raw.setdefault(pack, []).append(col)
++        col += 1
++    return packs, raw
++
++
++def build_final_file(path, codes=True, change=None):
++    """change: (tab, store row index, item index, new qty) applied after the codes were written (stale codes)."""
++    wb = openpyxl.Workbook()
++    wb.remove(wb.active)
++    computed = {}
++    for tab, spec in TABS.items():
++        ws = wb.create_sheet(tab)
++        packs, raw = _layout(tab)
++        ws["A1"] = f"{spec['items'][0][1][:7]} - {tab} 2026 - Store rollout"
++        ws["A1"].font = Font(bold=True, size=14)
++        for c, h in enumerate(ADDRESS, 1):
++            ws.cell(row=PACK_ROW, column=c, value=h)
++        for n, pack in enumerate(packs):
++            ws.cell(row=PACK_ROW, column=len(ADDRESS) + 1 + n, value=pack)  # the pack's Packing Spec column
++        labels = {3: "Description", 4: "Size", 6: "Artwork", JOB_ROW: "Job Number"}
++        for r, t in labels.items():
++            ws.cell(row=r, column=len(ADDRESS), value=t).font = Font(bold=True)
++        stores = spec["stores"]
++        first_store = PACK_ROW + 1
++        last_store = PACK_ROW + len(stores)
++        # Codes as Packing Sheets works them out, on the original columns (before any code column went in)
++        grid = [[None] * 60 for _ in range(last_store + 2)]
++        for i, st in enumerate(stores):
++            k = 0
++            for pack in packs:
++                for c in raw[pack]:
++                    grid[first_store + i - 1][c - 1] = st[8][k] or None
++                    k += 1
++        computed[tab] = {}
++        for pack in packs:
++            _, _, _, _, ordered = generate_pack_signatures(grid, range(PACK_ROW + 1, last_store + 1), min(raw[pack]), max(raw[pack]))
++            computed[tab][pack] = ordered
++        # Write the columns left to right: [code col][sub-group code cols][items] per pack
++        col = len(ADDRESS) + len(packs) + 1
++        item_index = 0
++        for pack in packs:
++            start = col
++            if codes:
++                ws.cell(row=JOB_ROW, column=col, value=f"Code for Pack {pack}")
++                for i in range(len(stores)):
++                    ws.cell(row=first_store + i, column=col, value=computed[tab][pack][i] or None)
++                col += 1
++                for a, b in spec["subgroups"].get(pack, []):
++                    cols = raw[pack][a - 1:b]
++                    _, _, _, _, sub = generate_pack_signatures(grid, range(PACK_ROW + 1, last_store + 1), min(cols), max(cols))
++                    ws.cell(row=JOB_ROW, column=col, value=f"Code for pack {pack}: {a}-{b}")
++                    for i in range(len(stores)):
++                        ws.cell(row=first_store + i, column=col, value=sub[i] or None)
++                    col += 1
++            for _ in raw[pack]:
++                p, job, desc, size, colour = spec["items"][item_index]
++                ws.cell(row=3, column=col, value=desc)
++                ws.cell(row=4, column=col, value=size)
++                ws.cell(row=JOB_ROW, column=col, value=job)
++                img = XLImage(_art(job[-2:], colour))
++                img.width, img.height = 60, 80
++                ws.add_image(img, f"{get_column_letter(col)}6")
++                for i, st in enumerate(stores):
++                    q = st[8][item_index]
++                    ws.cell(row=first_store + i, column=col, value=q or None)
++                ws.column_dimensions[get_column_letter(col)].width = 14
++                item_index += 1
++                col += 1
++            ws.cell(row=PACK_ROW, column=start, value=pack)
++            if col - 1 > start:
++                ws.merge_cells(start_row=PACK_ROW, start_column=start, end_row=PACK_ROW, end_column=col - 1)
++        for i, st in enumerate(stores):
++            for c, v in enumerate(st[:7], 1):
++                ws.cell(row=first_store + i, column=c, value=v)
++            for n, specv in enumerate(st[7]):
++                ws.cell(row=first_store + i, column=len(ADDRESS) + 1 + n, value=specv)
++        ws.cell(row=last_store + 1, column=1, value="TOTAL")
++        ws.row_dimensions[6].height = 64
++        for c in range(1, col):
++            ws.cell(row=PACK_ROW, column=c).font = Font(bold=True)
++            ws.cell(row=PACK_ROW, column=c).fill = PatternFill("solid", fgColor="DDDDDD")
++            ws.cell(row=PACK_ROW, column=c).alignment = Alignment(horizontal="center")
++        ws.column_dimensions["A"].width = 22
++        ws.column_dimensions["C"].width = 30
++    if change:
++        tab, i, item, qty = change
++        ws = wb[tab]
++        cols = [c for c in range(1, ws.max_column + 1) if re.match(r'J\d', str(ws.cell(row=JOB_ROW, column=c).value or ''))]
++        ws.cell(row=PACK_ROW + 1 + i, column=cols[item], value=qty)
++    wb.save(path)
++    return computed
++
++
++def build_signature_links(path, computed, plugin=True, tamper=None):
++    """tamper: (tab, pack, store index, code) written instead of the true code (files from different runs)."""
++    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
++        plugin_rows, barcode_rows = [], []
++        for tab, spec in TABS.items():
++            packs, raw = _layout(tab)
++            data = {" Name": [s[0] for s in spec["stores"]]}
++            for pack in packs:
++                codes = list(computed[tab][pack])
++                if tamper and tamper[0] == tab and tamper[1] == pack:
++                    codes[tamper[2]] = tamper[3]
++                data[f"Code for {pack}"] = codes
++            pd.DataFrame(data).to_excel(writer, sheet_name=tab, index=False)
++            info = {"pack_ranges": [{"name": p, "start": raw[p][0], "end": raw[p][-1]} for p in packs],
++                    "store_col_idx": 1, "pack_group_row": PACK_ROW, "job_id_row": JOB_ROW,
++                    "last_row": PACK_ROW + len(spec["stores"]), "stock_start_col": len(ADDRESS) + 1,
++                    "last_stock_col": len(ADDRESS) + len(packs)}
++            summaries = [{"name": p, "unique_sigs": sorted(set(c for c in computed[tab][p] if c)), "is_selected": True} for p in packs]
++            plugin_rows += label_plugin_rows(tab, info, {"installer": spec.get("installer")}, summaries, f"Final {tab}.xlsx")
++            if spec.get("installer"):
++                for pack in packs:
++                    for code in sorted(set(c for c in computed[tab][pack] if c)):
++                        for (p, job, desc, size, colour) in spec["items"]:
++                            if p == pack:
++                                barcode_rows.append([tab, pack, code, job, "", 1, job])
++        if barcode_rows:
++            pd.DataFrame(barcode_rows, columns=DIVIDER_BARCODE_COLUMNS).to_excel(writer, sheet_name=DIVIDER_BARCODE_SHEET, index=False)
++        if plugin:
++            pd.DataFrame(plugin_rows, columns=LABEL_PLUGIN_COLUMNS).to_excel(writer, sheet_name=LABEL_PLUGIN_SHEET, index=False)
++
++
++if __name__ == "__main__":
++    out = sys.argv[1] if len(sys.argv) > 1 else "."
++    os.makedirs(out, exist_ok=True)
++    codes = build_final_file(os.path.join(out, "Final J476699 Spring rollout.xlsx"))
++    build_signature_links(os.path.join(out, "Signature links_J476699.xlsx"), codes)
++    print("written to", out)
+diff --git a/tests/test_horizontal.py b/tests/test_horizontal.py
+new file mode 100644
+index 0000000..4a05311
+--- /dev/null
++++ b/tests/test_horizontal.py
+@@ -0,0 +1,292 @@
++"""Horizontal distribution labels: reading, checks, packing-sheet order, references, the PDF, stitching codes,
++and the whole Packing Labels page (upload -> preview -> generate) through Flask's test client.
++
++    pip install -r requirements-dev.txt
++    pytest -q
++"""
++import copy
++import json
++import os
++import random
++import re
++import sys
++
++import pymupdf as fitz
++import pytest
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, ROOT)
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++from fixtures import build_final_file, build_signature_links  # noqa: E402
++from horizontal_distribution import read_horizontal, read_signature_file, item_references  # noqa: E402
++from packing_label_generator import PackCheckError, assign_barcodes  # noqa: E402
++
++FINAL = "Final J476699 Spring rollout.xlsx"
++SIG = "Signature links_J476699.xlsx"
++
++
++@pytest.fixture()
++def files(tmp_path):
++    codes = build_final_file(tmp_path / FINAL)
++    build_signature_links(tmp_path / SIG, codes)
++    return tmp_path / FINAL, tmp_path / SIG, codes
++
++
++def read(path, tab="Spring Sale", sig=None, tab_no=1):
++    return read_horizontal(str(path), 8, tab, None, tab_no, read_signature_file(str(sig)) if sig else None)
++
++
++def test_codes_read_from_code_columns_in_packing_sheet_order(files):
++    final, sig, _ = files
++    groups, _, found, warnings = read(final, sig=sig)
++    order = [(g["pack_no"], g["pack_code"], g["store_name"]) for g in groups.values()]
++    assert order[:3] == [(1, "A", "Westfield Parramatta"), (1, "A", "Carindale"), (1, "B", "Corio Village")]
++    assert [p for p, _, _ in order] == sorted(p for p, _, _ in order)  # pack by pack
++    assert found["plugin"] and not warnings
++
++
++def test_reference_is_store_number_tab_pack(files):
++    final, sig, _ = files
++    groups, *_ = read(final, sig=sig)
++    refs = dict(item_references(groups))
++    assert "03T1P2 Chadstone" in refs and refs["03T1P2 Chadstone"] == "03T1P2"
++    easter, *_ = read(final, "Easter", sig, tab_no=2)
++    assert {g["serial"] for g in easter.values()} == {"01T2P1", "02T2P1", "03T2P1", "04T2P1"}
++
++
++def test_subgroup_codes_kept_and_shown(files):
++    final, sig, _ = files
++    groups, *_ = read(final, sig=sig)
++    chad = next(g for g in groups.values() if g["serial"] == "03T1P2")
++    assert chad["sub_codes"] == [("1-2", "C")] and "1-2: C" in chad["pack_tag"]
++
++
++def test_without_code_columns_codes_come_from_signature_links_then_quantities(tmp_path):
++    codes = build_final_file(tmp_path / FINAL, codes=False)
++    build_signature_links(tmp_path / SIG, codes)
++    with_sig, *_ = read(tmp_path / FINAL, sig=tmp_path / SIG)
++    alone, _, found, _ = read(tmp_path / FINAL)
++    assert [g["pack_code"] for g in with_sig.values()] == [g["pack_code"] for g in alone.values()]
++    assert "worked out" in found["codes"][0]
++
++
++def test_codes_differing_from_signature_links_stop_generate(tmp_path):
++    codes = build_final_file(tmp_path / FINAL)
++    build_signature_links(tmp_path / SIG, codes, tamper=("Spring Sale", "1", 0, "C"))
++    with pytest.raises(PackCheckError) as e:
++        read(tmp_path / FINAL, sig=tmp_path / SIG)
++    assert any("Signature Links" in i["text"] for i in e.value.issues)
++
++
++def test_quantities_changed_after_packing_sheets_stop_generate(tmp_path):
++    build_final_file(tmp_path / FINAL, change=("Spring Sale", 0, 0, 7))
++    with pytest.raises(PackCheckError) as e:
++        read(tmp_path / FINAL)
++    assert any("doesn't match the quantities" in i["text"] for i in e.value.issues)
++
++
++def test_every_unit_lands_on_a_label(files):
++    final, sig, _ = files
++    groups, *_ = read(final, sig=sig)
++    from openpyxl import load_workbook
++    ws = load_workbook(final, data_only=True)["Spring Sale"]
++    jobs = [c for c in range(1, ws.max_column + 1) if re.match(r"J\d", str(ws.cell(row=7, column=c).value or ""))]
++    grid = sum(ws.cell(row=r, column=c).value or 0 for r in range(9, 17) for c in jobs)
++    assert grid == sum(float(i["qty"]) for g in groups.values() for i in g["items"])
++
++
++def test_barcode_kinds_follow_item_columns(files):
++    final, sig, _ = files
++    groups, *_ = read(final, sig=sig)
++    assign_barcodes(groups)
++    kinds = {i["barcode"] for g in groups.values() for i in g["items"] if i["job_no"] == "J476699-03"}
++    assert kinds == {"J476699-03 K1", "J476699-03 K2"}  # two columns share the job: two kinds, on every store
++
++
++def test_barcode_kinds_of_vertical_files_unchanged():
++    """No source_key (vertical files): every row is its own kind, as before."""
++    rnd = random.Random(4)
++    for _ in range(200):
++        groups = {f"g{i}": {"items": [{"job_no": rnd.choice(["J1-01", "J1-02", "j1-02 ", ""])} for _ in range(rnd.randint(0, 5))]}
++                  for i in range(rnd.randint(1, 6))}
++        expected = copy.deepcopy(groups)
++        seen, totals = {}, {}
++        for g in expected.values():
++            for it in g["items"]:
++                k = it["job_no"].strip().upper()
++                if k:
++                    totals[k] = totals.get(k, 0) + 1
++        for g in expected.values():
++            for it in g["items"]:
++                k, job = it["job_no"].strip().upper(), it["job_no"].strip()
++                if not k:
++                    it["barcode"] = ""
++                    continue
++                seen[k] = seen.get(k, 0) + 1
++                it["barcode"] = f"{job} K{seen[k]}" if totals[k] > 1 else job
++        assign_barcodes(groups)
++        assert groups == expected
++
++
++def test_stitcher_reads_horizontal_codes():
++    from label_stitcher import find_code
++    known = {"03T1P2", "12T2P1"}
++    assert find_code("Item Ref: 03T1P2 Chadstone", known) == "03T1P2"
++    assert find_code("Item Reference 12T2P1 Rundle Mall", known) == "12T2P1"
++    assert find_code("Item Ref: 103T1P2 Chadstone", known) is None
++    assert find_code("Item Ref: 03T1P21 Chadstone", known) is None
++
++
++def test_signature_links_tabs_skipped_by_shuffler():
++    from core_math import NOT_STORE_TABS, LABEL_PLUGIN_SHEET, DIVIDER_BARCODE_SHEET
++    assert set(NOT_STORE_TABS) == {LABEL_PLUGIN_SHEET, DIVIDER_BARCODE_SHEET}
++
++
++# ------------------------------------------------------------------ the page, end to end
++
++@pytest.fixture()
++def client(tmp_path, monkeypatch):
++    import app as app_module
++    monkeypatch.setitem(app_module.app.config, "UPLOAD_FOLDER", str(tmp_path / "projects"))
++    os.makedirs(tmp_path / "projects", exist_ok=True)
++    for name in ("close_if_open_elsewhere", "save_if_open_elsewhere"):  # Excel-only helpers
++        monkeypatch.setattr(app_module, name, lambda *a, **k: None)
++    monkeypatch.setattr(app_module, "convert_legacy_excel_to_xlsx", lambda p: p)
++    app_module.app.config["TESTING"] = True
++    return app_module.app.test_client(), app_module, tmp_path / "projects"
++
++
++def run_page(client, final, sig, dividers=True):
++    c, app_module, projects = client
++    with open(final, "rb") as f, open(sig, "rb") as s:
++        r = c.post("/packing-labels/horizontal", data={"file": (f, final.name), "signature_file": (s, sig.name)},
++                   content_type="multipart/form-data", follow_redirects=True)
++    assert r.status_code == 200, r.data[:500]
++    page = r.data.decode()
++    assert 'value="8"' in page  # header rows filled in from the Label Plugin
++    filename = app_module.secure_filename(final.name)
++    form = {"filename": filename, "all_tabs": ["Spring Sale", "Easter"], "selected_tabs": ["Spring Sale", "Easter"],
++            "header_row_Spring Sale": "8", "header_row_Easter": "8"}
++    r = c.post("/packing-labels/horizontal", data={**form, "preview": "1"}, follow_redirects=True)
++    preview = r.data.decode()
++    assert "Cannot Generate" not in preview, preview[preview.find("issue"):][:800]
++    assert "Signature Links loaded" in preview
++    from courier_export import SERVICE_CODES
++    service = SERVICE_CODES[0][0]
++    gen = {**form, "generate": "1", "who_pays": "S", "service_code": service, "reference": "J476699",
++           "project_name": "Spring rollout", "courier_csv": ["open360", "openfreight"],
++           "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty"}
++    if dividers:
++        gen["code_dividers"] = "1"
++    r = c.post("/packing-labels/horizontal", data=gen, follow_redirects=True)
++    assert r.status_code == 200 and "Labels Successfully Generated" in r.data.decode(), r.data.decode()[:1500]
++    folder = next(p for p in projects.iterdir() if p.is_dir())
++    return folder
++
++
++def test_page_generates_labels_csv_and_label_map(client, files):
++    final, sig, _ = files
++    folder = run_page(client, final, sig)
++    names = os.listdir(folder)
++    pdf = next(n for n in names if n.startswith("Packing Labels Only"))
++    open360 = next(n for n in names if n.endswith("Open360.csv"))
++    labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
++    assert any(n.startswith("Used Signature Links") for n in names)
++    rows = open(folder / open360, encoding="utf-8").read()
++    assert "03T1P2 Chadstone" in rows and "01T2P1 Corio Village" in rows
++    doc = fitz.open(folder / pdf)
++    texts = [p.get_text() for p in doc]
++    # report, then per pack: audit page, divider per code, labels
++    assert "PACK AUDIT - TAB 1 - PACK 1" in texts[labelmap.get("report_pages", 1)]
++    codes = {pk["open360_code"] for packs in labelmap["stores"].values() for pk in packs}
++    assert "03T1P2" in codes
++    for packs in labelmap["stores"].values():  # every label-map page really is that pack's packing label
++        for pk in packs:
++            for p in pk["pdf_pages"] + pk["box_pages"]:
++                assert pk["open360_code"] + "." in texts[p - 1], (pk["open360_code"], texts[p - 1][:200])
++    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if pk["open360_code"] == "03T1P2")
++    assert chad["boxes"] == 2 and len(set(chad["box_pages"])) == 2  # one courier label per box
++
++
++def test_page_without_dividers_has_no_divider_sheets(client, files):
++    final, sig, _ = files
++    folder = run_page(client, final, sig, dividers=False)
++    pdf = next(n for n in os.listdir(folder) if n.startswith("Packing Labels Only"))
++    assert not any("Matched Labels" in p.get_text() for p in fitz.open(folder / pdf))
++
++
++def test_cross_site_actions_refused(client):
++    c, *_ = client
++    assert c.post("/packing-labels/horizontal", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
++    assert c.get("/open_upload/x.xlsx", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
++    assert c.post("/packing-labels/horizontal", headers={"Origin": "http://evil.example"}).status_code == 403
++    assert c.get("/packing-labels/horizontal", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200  # just a page
++
++
++def test_courier_labels_stitch_onto_their_packing_labels(client, files):
++    """Courier labels booked from the Open360 CSV (Item Ref '03T1P2 Chadstone'), in any order, land on their own
++    packing label; a pack of two boxes takes two."""
++    import csv
++    from label_stitcher import stitch
++    final, sig, _ = files
++    folder = run_page(client, final, sig)
++    names = os.listdir(folder)
++    labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
++    rows = list(csv.DictReader(open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8")))
++    refs = [r["Item Reference"] for r in rows for _ in range(int(r["Item Quantity"] or 1))]
++    assert all(re.match(r"\d{2}T\dP\d ", ref) for ref in refs)
++    random.Random(7).shuffle(refs)
++    courier = fitz.open()
++    for ref in refs:  # a 4x6 courier label with its Item Ref
++        page = courier.new_page(width=288, height=432)
++        page.insert_text((20, 40), "TIG Freight - Open360", fontsize=12)
++        page.insert_text((20, 300), f"Item Ref: {ref}", fontsize=10)
++    out = folder / "Complete.pdf"
++    result = stitch(str(folder), labelmap, [("courier.pdf", courier.tobytes())], str(out))
++    assert not result["unmatched"] and len(result["placed"]) == len(refs)
++    assert fitz.open(out).page_count >= len(refs)
++
++
++def test_pack_tag_leaves_packing_spec_full_size(tmp_path):
++    """The PACK/CODE tag must not shrink the Packing Spec printed under it (they once shared a variable)."""
++    from packing_label_generator import generate_packing_labels
++    group = lambda tag: {"g": {"pack_spec_name": "2 x CS450320150", "store_name": "Chadstone", "receiver_name": "", "install": False,
++                               "address_1": "", "address_2": "", "suburb": "", "state": "", "postcode": "", "country": "",
++                               "pack_tag": tag, "excel_rows": [9], "items": [{"job_no": "J1-01", "qty": "1", "desc": "", "dimension": "",
++                                                                              "material": "", "install": "", "notes": "", "thumbnails": []}]}}
++    sizes = []
++    for tag in ("", "PACK 2 \u00b7 CODE C \u00b7 1-2: C"):
++        out = tmp_path / f"l{len(sizes)}.pdf"
++        generate_packing_labels(group(tag), str(out))
++        spans = [s for b in fitz.open(out)[0].get_text("dict")["blocks"] for line in b.get("lines", []) for s in line["spans"]]
++        sizes.append(max(s["size"] for s in spans if "CS450320150" in s["text"]))
++    assert sizes[0] == sizes[1] >= 18
++
++
++def test_labels_carry_code_boxes_and_audit_page_is_short(client, files):
++    """Each label has an item box per code: the code column's header in the job number's place, the store's code
++    in the quantity's, no barcode. Code boxes never count as job numbers. The audit page has no code table."""
++    final, sig, _ = files
++    folder = run_page(client, final, sig)
++    names = os.listdir(folder)
++    doc = fitz.open(folder / next(n for n in names if n.startswith("Packing Labels Only")))
++    labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
++    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if pk["open360_code"] == "03T1P2")
++    page = " ".join(doc[chad["pdf_pages"][0] - 1].get_text().split())  # a long header wraps in its box
++    assert page.count("Code for Pack 2") == 1 and "Code for pack 2: 1-2" in page  # header once: no barcode caption
++    words = [w[4] for w in doc[chad["pdf_pages"][0] - 1].get_text("words")]
++    assert words.count("C") >= 2  # the pack code and the sub-group code, each in its quantity box
++    assert all(not str(j).startswith("Code for") for packs in labelmap["stores"].values() for pk in packs
++               for j in pk.get("job_numbers", []))
++    audit = next(p.get_text() for p in doc if "PACK AUDIT - TAB 1 - PACK 2" in p.get_text())
++    assert "J476699-05" not in audit and "Spring Sale" not in audit and "LABELS" in audit
++
++
++def test_code_box_named_after_pack_when_codes_come_from_signature_links(tmp_path):
++    codes = build_final_file(tmp_path / FINAL, codes=False)
++    build_signature_links(tmp_path / SIG, codes)
++    groups, *_ = read(tmp_path / FINAL, sig=tmp_path / SIG)
++    g = next(iter(groups.values()))
++    assert [c["job_no"] for c in g["code_cells"]] == ["Code for Pack 1"] and g["code_cells"][0]["qty"] == g["pack_code"]
++    assert all(not i.get("is_code") for i in g["items"])

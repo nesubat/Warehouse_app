@@ -7,7 +7,7 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS
+from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
 
 
 
@@ -735,6 +735,18 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 worksheet = writer.sheets[DIVIDER_BARCODE_SHEET]
                 worksheet.set_column(0, len(DIVIDER_BARCODE_COLUMNS) - 1, None, writer.book.add_format({'font_size': 12}))
                 worksheet.autofit()
+
+            # --- LABEL PLUGIN TAB ---
+            # The rows and columns of every tab and pack, so Packing Labels can read the horizontal distribution
+            # file (this run's Final file, or the original) without anyone mapping it again. Kept last.
+            plugin_rows = []
+            for tab_name in selected_tabs:
+                summaries = list(reversed(tab_summaries.get(tab_name, [])))  # back to left-to-right
+                plugin_rows += label_plugin_rows(tab_name, tab_data_memory[tab_name], user_inputs.get(tab_name, {}),
+                                                 summaries, file1_name)
+            if plugin_rows:
+                pd.DataFrame(plugin_rows, columns=LABEL_PLUGIN_COLUMNS).to_excel(writer, sheet_name=LABEL_PLUGIN_SHEET, index=False)
+                writer.sheets[LABEL_PLUGIN_SHEET].autofit()
         wb_raw.close()
     # --- NEW: SAVE METADATA JSON TO PROJECT FOLDER ---
     if file1_name: 

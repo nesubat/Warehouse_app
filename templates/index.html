@@ -29,8 +29,8 @@
 
             <a href="{{ url_for('create_packing_labels') }}" class="portal-card labels-card">
                 <div class="portal-icon">🏷️</div>
-                <div class="portal-title">3. Generate Packing Labels</div>
-                <div class="portal-desc">Create custom A4 packing labels from your Excel data.</div>
+                <div class="portal-title">3. Generate Labels</div>
+                <div class="portal-desc">Create custom A4 packing labels from your Excel data: vertical lists, or horizontal distribution files in packing-sheet order.</div>
             </a>
 
             <a href="{{ url_for('courier_import') }}" class="portal-card import-card">
@@ -60,7 +60,7 @@
             <div class="project-header accordion-header">
                 <div>
                     <h3 class="project-title" style="margin: 0;">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span>
-                        {% for k in project.kinds %}<span class="project-feature project-feature-{{ k }}">{{ {'import': '🚚 Courier Import', 'labels': '🏷️ Packing Labels', 'shuffler': '🖨️ Labels Shuffled', 'sheets': '📊 Packing Sheets'}[k] }}</span>{% endfor %}</h3>
+                        {% for k in project.kinds %}<span class="project-feature project-feature-{{ k }}">{{ {'import': '🚚 Courier Import', 'labels': '🏷️ Generate Labels', 'shuffler': '🖨️ Labels Shuffled', 'sheets': '📊 Packing Sheets'}[k] }}</span>{% endfor %}</h3>
                     <div class="project-meta" style="margin-top: 5px;">
                         <span>Created: {{ project.date }}</span>
                     </div>

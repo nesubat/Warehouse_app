@@ -1817,3 +1817,18 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .home-data-link { margin-top: 26px; font-size: 14px; }
 .home-data-link a { font-weight: 600; text-decoration: none; }
 .home-data-link span { color: #7f8c8d; }
+
+/* Packing Labels: Vertical / Horizontal layout switch, built like the Courier CSV buttons */
+.pl-page .pl-layout-switch { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 18px; }
+.pl-page .pl-layout-option { display: inline-flex; flex-direction: column; gap: 2px; padding: 10px 16px; border: 2px solid #ccd1d1;
+    border-radius: 12px; background: #fff; color: #2c3e50; text-decoration: none; min-width: 200px; transition: border-color .15s, background .15s; }
+.pl-page .pl-layout-option strong { font-size: 14.5px; }
+.pl-page .pl-layout-option small { font-size: 12px; color: #7f8c8d; }
+.pl-page .pl-layout-option:hover { border-color: #82c99e; background: #f4fbf7; }
+.pl-page .pl-layout-option[aria-current="page"] { background: #1e8449; border-color: #1e8449; color: #fff; box-shadow: 0 2px 8px rgba(30, 132, 73, .3); }
+.pl-page .pl-layout-option[aria-current="page"] small { color: #d5f5e3; }
+.pl-page .pl-layout-option:focus-visible { outline: 3px solid #3498db; outline-offset: 2px; }
+.pl-page .pl-dropzone-optional { margin-top: 12px; border-style: dashed; opacity: .95; }
+.pl-page .pl-optional-tag { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 10px; background: #eaf2f8; color: #1f618d;
+    font-size: 12px; font-weight: 600; vertical-align: middle; }
+.pl-page .pl-divider-choice { margin-bottom: 14px; }
