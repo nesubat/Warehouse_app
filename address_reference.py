@@ -220,7 +220,10 @@ def check_updates():
     nz = loaded_info('NZ')
     # LINZ changes its addresses every week and has no release names: a month-old copy is worth refreshing
     out['NZ'] = {'loaded': nz and nz['version'], 'latest': 'updated weekly by LINZ',
-                 'newer': not nz or (datetime.now() - datetime.fromisoformat(nz['loaded_at'])).days > 7}
+                 'newer': not nz or (datetime.now() - datetime.fromisoformat(nz['loaded_at'])).days > 7,
+                 'layer': linz_layer_info(check=True)}
+    if out['NZ']['layer']['moved']:  # LINZ republished NZ Addresses: the next load must come from the new layer
+        out['NZ']['newer'] = True
     save_settings({'last_checked': datetime.now().isoformat(timespec='seconds')})
     return out
 
@@ -366,14 +369,37 @@ def _load_au(log=None):
             os.remove(os.path.join(DOWNLOADS, f))
 
 
-def _linz_layer():
-    """NZ Addresses' current layer number, from LINZ's public catalogue (no key needed); LINZ_LAYER when the catalogue
-    can't be reached or doesn't list it."""
+def linz_catalogue_layer():
+    """NZ Addresses' layer number in LINZ's public catalogue now (no key needed), or None when it can't be reached
+    or doesn't list it."""
     try:
         found = _get_json(LINZ_CATALOGUE.format(q=urllib.parse.quote(LINZ_TITLE)), tries=2)
-        return next(d['id'] for d in found if d.get('type') == 'layer' and d.get('title', '').strip() == LINZ_TITLE)
-    except (RuntimeError, StopIteration, KeyError, TypeError):
-        return LINZ_LAYER
+        return next(int(d['id']) for d in found if d.get('type') == 'layer' and d.get('title', '').strip() == LINZ_TITLE)
+    except (RuntimeError, StopIteration, KeyError, TypeError, ValueError):
+        return None
+
+
+def _linz_layer():
+    """(layer number, how it was chosen) for a download: the one set by hand on the Address Data page, else the
+    catalogue's, else LINZ_LAYER."""
+    hand = str(load_settings().get('linz_layer') or '').strip()
+    if hand.isdigit():
+        return int(hand), 'set by hand'
+    found = linz_catalogue_layer()
+    return (found, 'found in LINZ catalogue') if found else (LINZ_LAYER, "LINZ catalogue not reachable: app's default")
+
+
+def linz_layer_info(check=False):
+    """For the Address Data page: the layer set by hand (or None), the one the loaded NZ data came from, and with
+    check=True the catalogue's now and whether LINZ has moved NZ Addresses since the last load."""
+    s = load_settings()
+    hand = str(s.get('linz_layer') or '').strip()
+    info = {'hand': int(hand) if hand.isdigit() else None, 'used': s.get('linz_layer_used'),
+            'used_how': s.get('linz_layer_how'), 'default': LINZ_LAYER}
+    if check:
+        info['catalogue'] = linz_catalogue_layer()
+        info['moved'] = bool(info['catalogue'] and info['used'] and info['catalogue'] != info['used'])
+    return info
 
 
 def _linz_pages(key):
@@ -381,7 +407,7 @@ def _linz_pages(key):
     os.makedirs(DOWNLOADS, exist_ok=True)
     out = os.path.join(DOWNLOADS, f"linz-nz-addresses-{datetime.now():%Y%m%d}.csv")
     base = LINZ_WFS.format(key=urllib.parse.quote(key.strip()))
-    layer = _linz_layer()
+    layer, how = _linz_layer()
     start, header, rows = 0, None, 0
     with open(out + '.part', 'w', encoding='utf-8', newline='') as f:
         while True:
@@ -398,9 +424,10 @@ def _linz_pages(key):
                         said = re.sub(r'\s+', ' ', re.sub('<[^>]+>', ' ', e.read().decode('utf-8', 'replace'))).strip()
                         if 'feature type' in said.lower() and 'unknown' in said.lower():
                             # The key worked; the layer number didn't (LINZ moved NZ Addresses to a new layer)
-                            raise RuntimeError(f"LINZ doesn't know NZ Addresses as layer {layer} any more: {said[:200]}. "
+                            raise RuntimeError(f"LINZ doesn't know NZ Addresses as layer {layer} ({how}): {said[:200]}. "
                                                f"Your API key is fine. Find the layer's number on data.linz.govt.nz "
-                                               f"(search \"{LINZ_TITLE}\") and put it in LINZ_LAYER in address_reference.py.")
+                                               f"(search \"{LINZ_TITLE}\", it's in the page address) and enter it under "
+                                               f"\"NZ Addresses layer\" on the Address Data page, or clear that box to look it up.")
                         raise RuntimeError(f"LINZ refused the request ({e.code}): {said[:250] or e.reason}. Check the API key "
                                            f"on data.linz.govt.nz (My account → API keys).")
                     if attempt == 7:
@@ -425,7 +452,9 @@ def _linz_pages(key):
             if len(body) < LINZ_PAGE:
                 break
     os.replace(out + '.part', out)
-    return out
+    # Remembered so the Address Data page can say which layer the data came from, and spot when LINZ moves it
+    save_settings({'linz_layer_used': layer, 'linz_layer_how': how})
+    return out, layer
 
 
 def linz_export():
@@ -482,7 +511,7 @@ def _nz_rows(log=None):
                  'high': ('address__2',), 'lifecycle': ('address_li',)}
         rows, source, kept = _dbf_rows(export), f"LINZ NZ Addresses (website export {datetime.fromtimestamp(os.path.getmtime(export)):%d %b %Y})", export
     else:
-        path = _linz_pages(load_settings().get('linz_key', ''))
+        path, layer = _linz_pages(load_settings().get('linz_key', ''))
         _progress(step='Reading NZ addresses', done=0, total=0, unit='')
         names = {'suburb': ('suburb_locality',), 'suburb_ascii': ('suburb_locality_ascii',), 'town': ('town_city',),
                  'town_ascii': ('town_city_ascii',), 'ta': ('territorial_authority',), 'road': ('full_road_name',),
@@ -490,7 +519,7 @@ def _nz_rows(log=None):
                  'lifecycle': ('address_lifecycle',)}
         f = open(path, encoding='utf-8', newline='')
         rows = ({k.lower(): v for k, v in r.items()} for r in csv.DictReader(f))
-        source, kept = f"LINZ NZ Addresses (downloaded {datetime.now():%d %b %Y})", path
+        source, kept = f"LINZ NZ Addresses layer {layer} (downloaded {datetime.now():%d %b %Y})", path
     def standard():
         for r in rows:
             yield {k: next((r.get(c, '') for c in cols if c in r), '') for k, cols in names.items()}
