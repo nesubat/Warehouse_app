@@ -15,16 +15,16 @@ import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
 from pdf_engine import process_and_shuffle_pdf
-from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, NOT_STORE_TABS, read_divider_barcodes
+from matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
+from core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes
 from subgroup_engine import execute_subgroups, SubgroupValidationError
 from packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from address_book import AddressBook, AddressBookError
 from address_import import build_review, apply_review, all_label_maps, ImportProblem
-from address_match import suggestions as closest_addresses, name_score
-from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
+from address_match import suggestions as closest_addresses
+from packing_specs import SpecStore, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
 from courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
     FIELD_NAMES as IMPORT_FIELD_NAMES
 import address_reference
@@ -36,8 +36,7 @@ from collections import Counter
 import secrets
 from courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
-                            save_export_defaults, EXPORT_DEFAULTS, EXPORT_COLUMNS,
-                            open360_items, write_open360_csv,
+                            save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
@@ -1824,7 +1823,8 @@ def address_data_page():
     """Official address data (G-NAF for Australia, LINZ for New Zealand): what's loaded, updates, a lookup tester."""
     return render_template('address_data.html', au=address_reference.loaded_info('AU'), nz=address_reference.loaded_info('NZ'),
                            due=address_reference.reminder(), settings=address_reference.load_settings(),
-                           job=address_reference.job_status(), remind_days=address_reference.REMIND_DAYS)
+                           job=address_reference.job_status(), remind_days=address_reference.REMIND_DAYS,
+                           linz_layer=address_reference.linz_layer_info())
 
 
 @app.route('/api/address-data/key', methods=['POST'])
@@ -1834,6 +1834,18 @@ def api_address_data_key():
     address_reference.save_settings({'linz_key': key})
     log_book.info("Address data: LINZ API key %s", "saved" if key else "removed")
     return {'saved': bool(key)}
+
+
+@app.route('/api/address-data/layer', methods=['POST'])
+def api_address_data_layer():
+    """Sets NZ Addresses' LINZ layer number by hand, for when LINZ republishes it under a new one; blank goes back
+    to looking it up in LINZ's catalogue."""
+    layer = str((request.get_json(silent=True) or {}).get('linz_layer', '')).strip()
+    if layer and not (layer.isdigit() and len(layer) <= 9):
+        return {'error': "A layer number is digits only, e.g. 123113 (from the layer's page address on data.linz.govt.nz)."}, 400
+    address_reference.save_settings({'linz_layer': layer})
+    log_book.info("Address data: NZ Addresses layer %s", f"set by hand to {layer}" if layer else "back to automatic")
+    return {'layer': int(layer) if layer else None}
 
 
 @app.route('/api/address-data/updates')

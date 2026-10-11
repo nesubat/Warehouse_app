@@ -69,6 +69,19 @@
                 <button type="button" class="ab-btn ab-btn-plain" id="ad-key-save">Save key</button>
                 <span class="issue-detail" id="ad-key-status" role="status"></span>
             </div>
+
+            {# LINZ republishes NZ Addresses under a new layer number now and then: blank looks the current one up #}
+            <label for="ad-linz-layer" class="ad-layer-label"><strong>NZ Addresses layer</strong> <span class="issue-detail">— leave blank to look it up in LINZ's catalogue each time. Only type a number if LINZ has moved it and the lookup can't find it: the number is in the layer's page address on data.linz.govt.nz (…/layer/<strong>123113</strong>-nz-addresses/).</span></label>
+            <div class="ad-key-row">
+                <input type="text" id="ad-linz-layer" value="{{ linz_layer.hand or '' }}" inputmode="numeric" maxlength="9" autocomplete="off" placeholder="Automatic">
+                <button type="button" class="ab-btn ab-btn-plain" id="ad-layer-save">Save layer</button>
+                <span class="issue-detail" id="ad-layer-status" role="status"></span>
+            </div>
+            <p class="issue-detail ad-layer-now" id="ad-layer-now">
+                {% if linz_layer.used %}Last NZ download came from layer <strong>{{ linz_layer.used }}</strong> ({{ linz_layer.used_how }}).{% else %}No NZ download yet with the layer recorded.{% endif %}
+                {% if linz_layer.hand %}Next download: layer <strong>{{ linz_layer.hand }}</strong> (set by hand).{% else %}Next download: looked up in LINZ's catalogue (layer {{ linz_layer.default }} if it can't be reached).{% endif %}
+                "Check for updates" says if LINZ has moved it.
+            </p>
         </div>
 
         <h2 class="ad-h2">🔎 Try a lookup</h2>
