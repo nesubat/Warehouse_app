@@ -34,7 +34,11 @@ REMIND_DAYS = 30
 AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT', 'OT'}
 
 GNAF_PACKAGE = 'https://data.gov.au/data/api/3/action/package_show?id=geocoded-national-address-file-g-naf'
-LINZ_LAYER = 105689  # NZ Addresses
+# NZ Addresses' layer number. LINZ republishes it under a new number now and then (105689 went in Sept 2025, and the
+# old number then answers "Feature type unknown"), so the current one is looked up first (_linz_layer); this is the fallback.
+LINZ_LAYER = 123113
+LINZ_TITLE = 'NZ Addresses'
+LINZ_CATALOGUE = 'https://data.linz.govt.nz/services/api/v1.x/data/?q={q}&kind=vector&page_size=20'
 LINZ_WFS = 'https://data.linz.govt.nz/services;key={key}/wfs'
 LINZ_PAGE = 100000
 USER_AGENT = 'Mozilla/5.0 (Warehouse app address data)'
@@ -362,16 +366,27 @@ def _load_au(log=None):
             os.remove(os.path.join(DOWNLOADS, f))
 
 
+def _linz_layer():
+    """NZ Addresses' current layer number, from LINZ's public catalogue (no key needed); LINZ_LAYER when the catalogue
+    can't be reached or doesn't list it."""
+    try:
+        found = _get_json(LINZ_CATALOGUE.format(q=urllib.parse.quote(LINZ_TITLE)), tries=2)
+        return next(d['id'] for d in found if d.get('type') == 'layer' and d.get('title', '').strip() == LINZ_TITLE)
+    except (RuntimeError, StopIteration, KeyError, TypeError):
+        return LINZ_LAYER
+
+
 def _linz_pages(key):
     """NZ Addresses from the LINZ Data Service as CSV pages (WFS), joined into one file in reference_downloads."""
     os.makedirs(DOWNLOADS, exist_ok=True)
     out = os.path.join(DOWNLOADS, f"linz-nz-addresses-{datetime.now():%Y%m%d}.csv")
     base = LINZ_WFS.format(key=urllib.parse.quote(key.strip()))
+    layer = _linz_layer()
     start, header, rows = 0, None, 0
     with open(out + '.part', 'w', encoding='utf-8', newline='') as f:
         while True:
             q = urllib.parse.urlencode({'service': 'WFS', 'version': '2.0.0', 'request': 'GetFeature',
-                                        'typeNames': f'data.linz.govt.nz:layer-{LINZ_LAYER}', 'outputFormat': 'csv',
+                                        'typeNames': f'data.linz.govt.nz:layer-{layer}', 'outputFormat': 'csv',
                                         'count': LINZ_PAGE, 'startIndex': start, 'sortBy': 'address_id'})
             for attempt in range(8):
                 try:
@@ -381,6 +396,11 @@ def _linz_pages(key):
                 except urllib.error.HTTPError as e:
                     if 400 <= e.code < 500:  # LINZ said no (a wrong key, a key without access): no point retrying
                         said = re.sub(r'\s+', ' ', re.sub('<[^>]+>', ' ', e.read().decode('utf-8', 'replace'))).strip()
+                        if 'feature type' in said.lower() and 'unknown' in said.lower():
+                            # The key worked; the layer number didn't (LINZ moved NZ Addresses to a new layer)
+                            raise RuntimeError(f"LINZ doesn't know NZ Addresses as layer {layer} any more: {said[:200]}. "
+                                               f"Your API key is fine. Find the layer's number on data.linz.govt.nz "
+                                               f"(search \"{LINZ_TITLE}\") and put it in LINZ_LAYER in address_reference.py.")
                         raise RuntimeError(f"LINZ refused the request ({e.code}): {said[:250] or e.reason}. Check the API key "
                                            f"on data.linz.govt.nz (My account → API keys).")
                     if attempt == 7:

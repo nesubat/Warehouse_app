@@ -54,7 +54,7 @@
     </div>
 
     <!-- Inject Metadata for JS -->
-    <script id="meta-data" type="application/json">{{ metadata_json | safe }}</script>
+    <script id="meta-data" type="application/json">{{ metadata | tojson }}</script>
 
     <!-- Master External Script -->
     <script src="{{ url_for('static', filename='script.js') }}"></script>

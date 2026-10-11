@@ -1679,7 +1679,7 @@ Projects that contain a courier CSV show a **🚚 Courier CSV** file group and a
 
 **Nav scroll targets:** `#home { scroll-margin-top: 100vh }` makes the Home link land at the very top (the margin is larger than the page above it), and `#dashboard-section { scroll-margin-top: 72px }` stops "Recent Projects" just below the sticky bar instead of under it.
 
-The tools at the top are **square tiles** (`.portal-grid` is a CSS grid, each `.portal-card` `aspect-ratio: 1 / 1`): 1. Create Packing Sheets, 2. Labels shuffler, 3. Generate Packing Labels, 4. Courier Import.
+The tools at the top are **square tiles** (`.portal-grid` is a CSS grid, each `.portal-card` `aspect-ratio: 1 / 1`): 1. Create Packing Sheets, 2. Labels shuffler, 3. Generate Labels, 4. Courier Import.
 
 **The nav bar** is one macro, `templates/_nav.html`, imported by every page: `nav()` gives Home · Dashboard · Address Book · Packing Specs; `nav('📦 Packing Labels', url)` adds a tool's own link (highlighted) between Dashboard and Address Book, so a tool's link shows only on its own pages; `nav(active='book')` / `nav(active='specs')` highlights those two.
 

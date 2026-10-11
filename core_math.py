@@ -10,6 +10,39 @@ import pandas as pd
 DIVIDER_BARCODE_SHEET = "Divider Barcodes"
 DIVIDER_BARCODE_COLUMNS = ["Tab", "Pack", "Code", "Job Number", "Kind", "Qty", "Barcode"]
 
+# Extra tab in the Signature Links file (File 3): what Packing Sheets was told about each tab (rows, store column,
+# packs and their stock columns), so the Packing Labels user can read the horizontal distribution file with no
+# mapping. One row per tab and pack. Skipped by the Label Shuffler when it lists tabs/packs.
+LABEL_PLUGIN_SHEET = "Label Plugin"
+LABEL_PLUGIN_COLUMNS = ["Tab", "Pack", "Pack Order", "Pack Group Row", "Job Number Row", "First Store Row",
+                        "Last Store Row", "Store Column", "Stock Column", "Stock Column (Final file)", "Item Columns",
+                        "Codes", "Selected", "Installer", "Final File"]
+NOT_STORE_TABS = (DIVIDER_BARCODE_SHEET, LABEL_PLUGIN_SHEET)  # Signature Links tabs that aren't a tab of store codes
+
+
+def label_plugin_rows(tab_name, tab_info, inputs, pack_summaries, file1_name):
+    """The Label Plugin rows of one tab (LABEL_PLUGIN_COLUMNS). tab_info: generate_tab_map's backend_data;
+    inputs: the tab's user inputs (selected_packs, installer); pack_summaries: the tab's packs left to right, with
+    'name', 'unique_sigs' and 'is_selected'. Column letters are given for the original file; the stock column also
+    as it sits in the Final file, after a code column went in at the start of every selected pack to its left."""
+    from openpyxl.utils import get_column_letter
+    packs = tab_info["pack_ranges"]
+    selected = {p["name"] for p in pack_summaries if p.get("is_selected")}
+    codes = {p["name"]: len(p.get("unique_sigs") or []) for p in pack_summaries}
+    first_row = max(tab_info["pack_group_row"], tab_info["job_id_row"]) + 1
+    rows = []
+    for order, pack in enumerate(packs, start=1):
+        stock = tab_info["stock_start_col"] + order - 1
+        stock = stock if stock <= tab_info["last_stock_col"] else None
+        shift = sum(1 for p in packs if p["name"] in selected and p["start"] <= (stock or 0))
+        rows.append([tab_name, pack["name"], order, tab_info["pack_group_row"], tab_info["job_id_row"], first_row,
+                     tab_info["last_row"], get_column_letter(tab_info["store_col_idx"]),
+                     get_column_letter(stock) if stock else "", get_column_letter(stock + shift) if stock else "",
+                     f"{get_column_letter(pack['start'])}-{get_column_letter(pack['end'])}",
+                     codes.get(pack["name"], ""), "Y" if pack["name"] in selected else "N",
+                     "Y" if inputs.get("installer") else "N", file1_name or ""])
+    return rows
+
 def clean_file_name(raw_string):
     """Cleans messy strings into safe file names."""
     if not raw_string:
