@@ -392,3 +392,7 @@ def test_preview_ranks_file_problems_and_has_one_open_excel_button(client, tmp_p
     assert first["tab"] == "Spring Sale"
     assert "1 needs attention" in page  # the tab card's heading says so too, in red (the two rows are one problem)
     assert page.count('id="fx-open"') == 1 and "Open Excel File" not in page
+    # Auto-Map stays under the tabs; Update Previews floats with Open Excel and sends the same form
+    assert '>Auto-Map</button>' in page
+    floating = page[page.index('id="fx-open"'):page.index('</div>', page.index('id="fx-open"'))]
+    assert 'form="pl-form" name="preview"' in floating and "Update Previews" in floating

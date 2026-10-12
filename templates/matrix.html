@@ -49,9 +49,9 @@
     <h3 style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
         ✅ File Detected: {{ filename }}
     </h3>
-    {{ open_excel(filename) }}
+    {{ open_excel(filename, 'mx-form' if previews else None) }}
 
-    <form action="/preview" method="POST">
+    <form action="/preview" method="POST" id="mx-form">
         <input type="hidden" name="filename" value="{{ filename }}">
         
         {% for tab in tabs %}
@@ -80,7 +80,7 @@
         </div>
         {% endfor %}
         
-        <button type="submit" class="btn-full">{% if previews %}Update Previews{% else %}Map Blueprints{% endif %}</button>
+        <button type="submit" class="btn-full">Map Blueprints</button>
     </form>
     {% endif %}
 
@@ -88,7 +88,7 @@
     <!-- Added ID for Preview Auto-Scroll -->
     <hr class="hr-divider" id="preview-section">
     <h3>🗺️ Blueprint Previews</h3>
-    <p>Verify the grid boundaries below. Edit coordinates above and click "Update Previews" if anything looks wrong.</p>
+    <p>Verify the grid boundaries below. Edit coordinates above and click "Map Blueprints" if anything looks wrong; after changing the file in Excel, save it and click 🔄 Update Previews (bottom right).</p>
     
     <!-- Added ID to the Generate Form -->
     <form action="/generate" method="POST" id="generate-form">
@@ -176,7 +176,7 @@
 
         {% if lock.has_dupes %}
             <div class="warning-box warning-box-center">
-                ❌ Generation is locked. Please fix the duplicate store names in your Excel file (📂 Open Excel, bottom right), save it, then click "Update Previews" above to recheck — no need to re-upload.
+                ❌ Generation is locked. Please fix the duplicate store names in your Excel file (📂 Open Excel, bottom right), save it, then click 🔄 Update Previews (bottom right) to recheck — no need to re-upload.
             </div>
             <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
         {% else %}

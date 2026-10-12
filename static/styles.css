@@ -1913,4 +1913,7 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .fx-open-grip { cursor: grab; color: #95a5a6; padding: 4px 5px; font-size: 15px; line-height: 1; user-select: none; touch-action: none; }
 .fx-open.fx-dragging .fx-open-grip { cursor: grabbing; }
 .fx-open .fx-open-btn { border-radius: 18px; white-space: nowrap; }
+.fx-open .fx-preview-btn { border: none; border-radius: 18px; padding: 6px 12px; font: inherit; font-size: 13px; font-weight: bold;
+                           white-space: nowrap; cursor: pointer; background: #f39c12; color: #fff; margin-left: 2px; }
+.fx-open .fx-preview-btn:hover { background: #d68910; }
 @media (prefers-reduced-motion: reduce) { .fx-open { transition: none; } }

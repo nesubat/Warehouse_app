@@ -1,9 +1,15 @@
 {# The one "Open Excel" button of a page that previews an uploaded file (Packing Sheets, Packing Labels, horizontal
-   labels, Courier Import). It floats at the bottom right as the page scrolls, steps aside when a button, box or link
-   is under it, and can be dragged anywhere by its handle (script.js section 26 keeps the spot for next time). #}
-{% macro open_excel(filename) %}
+   labels, Courier Import), with "Update Previews" next to it once there are previews (preview_form: the id of the
+   form it sends, as its own Update Previews button would; the button sits outside that form). It floats at the bottom
+   right as the page scrolls, steps aside when a button, box or link is under it, and can be dragged anywhere by its
+   handle (script.js section 26 keeps the spot for next time). #}
+{% macro open_excel(filename, preview_form=None) %}
 <div class="fx-open" id="fx-open" hidden>
     <span class="fx-open-grip" title="Drag to move. Double-click to put it back in the corner." aria-hidden="true">⠿</span>
     <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open fx-open-btn" title="Open {{ filename }} in Excel">📂 Open Excel</a>
+    {% if preview_form %}
+    <button type="submit" form="{{ preview_form }}" name="preview" class="fx-preview-btn"
+            title="Read the file again (save it in Excel first) and refresh the previews below">🔄 Update Previews</button>
+    {% endif %}
 </div>
 {% endmacro %}
