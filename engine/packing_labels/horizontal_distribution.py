@@ -248,7 +248,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             p['plugin'] = hit
         missing = [n for n in known if not any(_norm(n) == _norm(p['name']) for p in packs)]
         if missing:
-            warnings.append(_issue('', f"Row {pack_row}", f"Packs in the Label Plugin not found here: {', '.join(missing)}"))
+            warnings.append(_issue('', f"Row {pack_row}", f"Packs in the Label Plugin not found here: {', '.join(missing)}", major=True))
 
     # 4. Inside each pack: code columns (headers 'Code for …') and item columns (job numbers)
     for p in packs:
@@ -412,17 +412,18 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         errors.append(_issue(str(r), f"Pack {p['name']}", "No Packing Spec for this pack",
                              "Add the pack's Packing Spec column (headed with the pack's number), or a Packing Spec row."))
     for r, p in spec_no_qty:
-        warnings.append(_issue(str(r), f"Pack {p['name']}", "Packing Spec but no quantities: no label made"))
+        warnings.append(_issue(str(r), f"Pack {p['name']}", "Packing Spec but no quantities: no label made",
+                               "The store has this pack's spec but no units in it. Check the distribution file.", major=True))
     uncoded = [g['excel_rows'][0] for g in groups.values() if not g['pack_code']]
     if uncoded:
         errors.append(_issue(_row_ranges(uncoded), 'Code', "Store gets a pack but has no packing-sheet code"))
     dupes = [s for s, k in names.items() if k > 1 and s]
     if dupes:
         warnings.append(_issue('', L(store_col), f"Store listed twice: {', '.join(dupes)}",
-                               "The packing sheets and the Label Shuffler can't tell them apart."))
+                               "The packing sheets and the Label Shuffler can't tell them apart.", major=True))
     no_barcode = sorted({i['job_no'] for g in groups.values() for i in g['items'] if i['job_no'] and code128_modules(i['job_no']) is None})
     if no_barcode:
-        warnings.append(_issue('', f"Row {job_row}", f"Job number can't be a barcode: {', '.join(no_barcode)}"))
+        warnings.append(_issue('', f"Row {job_row}", f"Job number can't be a barcode: {', '.join(no_barcode)}", major=True))
     if abs(grid_units - label_units) > 1e-9:
         errors.append(_issue('', 'Quantities', f"{grid_units - label_units:g} units in the grid are on no label",
                              "Fix the problems above: every unit must land on a packing label."))
@@ -431,7 +432,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     if totals:  # a TOTAL row with its numbers in: they must add up to the stores' quantities
         sheet_total = sum(totals)
         if abs(sheet_total - grid_units) > 1e-9:
-            warnings.append(_issue(str(totals_row), 'TOTAL', f"TOTAL row says {sheet_total:g}, the stores add up to {grid_units:g}"))
+            warnings.append(_issue(str(totals_row), 'TOTAL', f"TOTAL row says {sheet_total:g}, the stores add up to {grid_units:g}", major=True))
     if errors:
         raise PackCheckError(errors, warnings)
 

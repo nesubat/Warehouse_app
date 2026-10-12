@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 {% from '_nav.html' import nav with context %}
+{% from '_open_excel.html' import open_excel %}
 <html>
 <head>
     <title>Warehouse Distribution Mapper</title>
@@ -47,10 +48,8 @@
     {% if tabs %}
     <h3 style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
         ✅ File Detected: {{ filename }}
-        <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open" style="font-size: 13px;">
-            📂 Open Excel File
-        </a>
     </h3>
+    {{ open_excel(filename) }}
 
     <form action="/preview" method="POST">
         <input type="hidden" name="filename" value="{{ filename }}">
@@ -177,12 +176,7 @@
 
         {% if lock.has_dupes %}
             <div class="warning-box warning-box-center">
-                ❌ Generation is locked. Please fix the duplicate store names in your Excel file, save it, then click "Update Previews" above to recheck — no need to re-upload.
-            </div>
-            <div style="text-align: center; margin-bottom: 15px;">
-                <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open">
-                    📂 Open File to Fix Duplicates
-                </a>
+                ❌ Generation is locked. Please fix the duplicate store names in your Excel file (📂 Open Excel, bottom right), save it, then click "Update Previews" above to recheck — no need to re-upload.
             </div>
             <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
         {% else %}

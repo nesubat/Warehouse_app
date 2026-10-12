@@ -20,6 +20,7 @@ from engine.packing_sheets.matrix_engine import scan_excel_tabs, generate_tab_ma
 from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
 from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
+                                     group_issues,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from engine.addresses.address_book import AddressBook, AddressBookError
@@ -37,7 +38,6 @@ from collections import Counter
 import secrets
 from engine.courier.courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
-                            save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
@@ -441,7 +441,7 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
          'items': [f"{x['item_reference']} ({x['packing_spec']}) - {receiver(by_number[x['consignment']])}" for x in left_out]},
         {'title': "No size saved for the packing spec - dimensions blank in the CSV", 'level': 'warn',
          'items': [f"{x['item_reference']}: {x['packing_spec']}" for x in no_size]},
-        {'title': "Don't match the official address data (G-NAF / LINZ) - check before dispatch", 'level': 'warn',
+        {'title': "Don't match the official address data (G-NAF / LINZ), or the street isn't on record - check before dispatch", 'level': 'warn',
          'items': list(ref_issues or [])},
         {'title': "New to the address book - check before dispatch", 'level': 'warn',
          'items': [f"#{c['number']} {receiver(c)} - {one_line(c['destination'])}" for c in new_addresses]},
@@ -1565,6 +1565,38 @@ def _book_options(pack_groups, edits):
     return options
 
 
+app.add_template_filter(group_issues, 'group_issues')
+
+# Courier checks shown in the To check list in their own way: per packing spec with a link, and per row
+SPEC_WARNINGS = ("No size saved for packing spec", "Couldn't read the size from")
+# Courier checks that mean the courier can't take a consignment as it is: listed with the major problems
+MAJOR_COURIER_WARNINGS = ("No store / receiver name and no address", "No receiver name for", "Consignment ")
+
+
+def _review(previews, cartons, courier_warnings):
+    """What the To check list shows besides the rows' own problems (script.js section 25 adds those):
+      file     each tab's problems, grouped (group_issues), with the tab's name
+      specs    packing specs with no size saved (or a size that can't be read), the consignments they're in and a
+               link to put it in on the Packing Specs page: their dimensions are blank in the courier CSV
+      courier  the other courier checks, major or not"""
+    file = [{**g, 'tab': bp['sheet_name']} for bp in previews for g in group_issues(bp.get('warnings'))]
+    specs = {}
+    for x in cartons:
+        if x['size_cm'] is None:
+            s = specs.setdefault(x['packing_spec'], {'spec': x['packing_spec'], 'cartons': 0, 'consignments': [],
+                                                     'unread': x['spec_kind'] in ('OB', 'CS', 'PALLET', 'FP')})
+            s['cartons'] += 1
+            if x['consignment'] not in s['consignments']:
+                s['consignments'].append(x['consignment'])
+    for s in specs.values():
+        # A code the size couldn't be read from goes to Check a code; any other spec to its own row
+        s['url'] = (url_for('packing_specs_page', code=s['spec']) + '#ps-try' if s['unread']
+                    else url_for('packing_specs_page', spec=s['spec']))
+    courier = [{'text': w, 'major': w.startswith(MAJOR_COURIER_WARNINGS)} for w in courier_warnings
+               if not w.startswith(SPEC_WARNINGS + ("No address for ",))]
+    return {'file': file, 'specs': list(specs.values()), 'courier': courier}
+
+
 def _option_view(entry, why, current=None):
     """An address-book option as the preview shows it, with the fields one click puts in. 'parts': the address as
     [(text, changed)] against the current one, so the page can mark what differs ('Shop 2 *Woolworths* Curlewis Town
@@ -1757,14 +1789,17 @@ def _check_against_book(consignments, edits, book_options=None):
         levels = Counter(c['ref']['level'] + ('-saved' if c['ref'].get('soft') else '') for c in consignments)
         log_book.info("  official address data: %s in %.2fs", ", ".join(f"{k} {v}" for k, v in sorted(levels.items())),
                       time.perf_counter() - started)
-    # The problems first (no address, then not in the book or not matching the official data), then the rows the
-    # address book has an option for, then the rest in consignment order
+    # What would make a consignment go wrong first: no address (left out of the CSV), then the official data saying
+    # a suburb, state, postcode, country or street doesn't exist there; then the address book's options and hints;
+    # then addresses that are only new to the address book (they're saved on Generate); then the rest
     def rank(c):
         if c['book'] == 'missing':
             return 0
-        if c['book'] == 'unverified' or (c['ref']['level'] == 'mismatch' and not c['ref'].get('soft')):
+        if c['ref']['level'] in ('mismatch', 'note') and not c['ref'].get('soft'):
             return 1
-        return 2 if c['book_options'] or c['locality_hints'] else 3
+        if c['ref']['level'] == 'mismatch' or c['book_options'] or c['locality_hints']:
+            return 2
+        return 3 if c['book'] == 'unverified' else 4
     return sorted(consignments, key=rank)
 
 
@@ -2444,6 +2479,7 @@ def _distribution_page(mode):
                 'ref_loaded': address_reference.available(),
                 'missing': sum(c['book'] == 'missing' for c in consignments),
                 'warnings': courier_warnings,
+                'review': _review(previews, cartons, courier_warnings),
                 'fixed': {'reference': series, **fixed},
                 'edits_json': json.dumps(edits),
                 'book_option_rows': sum(1 for c in consignments if c['book_options']),
@@ -2594,7 +2630,9 @@ def _distribution_page(mode):
                 ref_issues = []
                 for c in consignments:
                     r = _reference_for(c['destination'], _consignment_edits(request.form).get(c['id'], {}))
-                    if r['level'] == 'mismatch':
+                    # A street not on record counts too (unless the address is saved in the book): the preview
+                    # ranks it with the major problems
+                    if r['level'] == 'mismatch' or (r['level'] == 'note' and not r.get('soft')):
                         ref_issues.append(f"#{c['number']} {c['destination']['receiver']} - {one_line(c['destination'])}: {r['message']}")
                 report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,

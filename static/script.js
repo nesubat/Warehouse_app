@@ -1497,6 +1497,17 @@ document.addEventListener('DOMContentLoaded', function () {
         const drop = e.target.closest('.ps-drop-new');
         if (drop) drop.closest('tr').remove();
     });
+    // ?spec=NAME (the preview's "Add its size" link): that spec's row, highlighted, the cursor in its first empty box.
+    // Names compare as the app does: capitals, spaces and punctuation don't matter
+    const wanted = new URLSearchParams(location.search).get('spec');
+    const key = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const row = wanted && [...body.querySelectorAll('tr[data-spec]')].find((r) => key(r.dataset.spec) === key(wanted));
+    if (row) {
+        row.classList.add('ps-focus');
+        row.scrollIntoView({ block: 'center' });
+        const box = [...row.querySelectorAll('input.ps-num')].find((i) => !i.value) || row.querySelector('input.ps-num');
+        if (box) box.focus({ preventScroll: true });
+    }
 });
 
 // Packing Labels preview: a carton's weight typed in the consignment table is kept in the hidden
@@ -2552,14 +2563,16 @@ function renderAddressParts(el, d) {
 // again after an edit). Soft on purpose:
 //   mismatch  the part that differs underlined in amber; under the address the reason, "Use …" fixes and Keep as is
 //             (only a grey note when the address is saved in the address book: the book's address may well be right)
-//   note      the street isn't on record: a grey line, no buttons (the official data lags new streets and centres)
+//   note      the street isn't on record, in the suburb or next to it: flagged like a mismatch, with the closest
+//             streets as fixes and Keep as is (a new street or centre the official data hasn't caught up with); only a
+//             grey line when the address is saved in the address book
 //   ok        a small ✓ after the address; a number not on record only shows when hovering the street
 const PL_REF = (() => {
     const refNote = () => document.getElementById('courier-ref-note');
     function count() {
         const note = refNote();
         if (!note) return;
-        const n = [...document.querySelectorAll('.pl-con-row')].filter((r) => r.dataset.refLevel === 'mismatch' && r.dataset.refSoft !== 'true').length;
+        const n = [...document.querySelectorAll('.pl-con-row')].filter((r) => ['mismatch', 'note'].includes(r.dataset.refLevel) && r.dataset.refSoft !== 'true').length;
         note.hidden = !n;
         note.querySelector('strong').textContent = n;
         note.querySelector('span').textContent = n === 1 ? 'address doesn’t' : 'addresses don’t';
@@ -2582,7 +2595,7 @@ const PL_REF = (() => {
         address.querySelectorAll('.pl-ref-ok').forEach((x) => x.remove());
         box.replaceChildren();
         box.className = 'pl-ref';
-        const flag = ref.level === 'mismatch' ? (ref.soft ? 'soft' : 'bad') : null;
+        const flag = ref.level === 'mismatch' ? (ref.soft ? 'soft' : 'bad') : (ref.level === 'note' && !ref.soft ? 'bad' : null);
         Object.entries(ref.fields || {}).forEach(([field, f]) => {
             let span = address.querySelector(`.pl-af[data-f="${field}"]`) || (field === 'line1' && address.querySelector('.pl-af[data-f="line2"]'));
             if (!span && field === 'country') {  // AU isn't shown: add it, to have something to underline
@@ -2761,8 +2774,11 @@ document.addEventListener('DOMContentLoaded', function () {
 // The preview shows each Excel address as written. What the address book knows about it (the address it learned for
 // this spelling, who is at an address with no name, a name-only receiver's saved addresses) is offered under the
 // address, after any problem, with one click to use it: nothing is filled in by itself.
-// The "To check" list above the table gathers every row's problems (no address, not in the address book, the official
-// data disagreeing) and its address-book options, worst first; a click goes to the row. It follows every fix.
+// The "To check" list above the table gathers everything to look at, ranked in three tiers and grouped by problem (one
+// line per problem, its consignments under it): Needs attention first (the file's major problems, packing specs with no
+// size, no address, the official data saying a part of the address doesn't exist there), Worth a check (the other
+// checks, address-book options and hints), For information (new to the address book). A click on a consignment goes
+// to its row; it follows every fix.
 document.addEventListener('DOMContentLoaded', function () {
     const panel = document.getElementById('pl-issues');
     const rows = [...document.querySelectorAll('.pl-con-row')];
@@ -2833,20 +2849,15 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!panel) return;
     const list = panel.querySelector('.pl-issues-list');
     const summary = panel.querySelector('.pl-issues-summary');
-    const RANK = { bad: 0, warn: 1, info: 2 };
+    let review = {};
+    try { review = JSON.parse(panel.dataset.review || '{}'); } catch (e) { review = {}; }
+    const numberOf = (row) => row.querySelector('.pl-courier-num').textContent.replace(/\D/g, '');  // the number, not the ✏️ button
+    const nameOf = (row) => row.querySelector('.pl-show-receiver').textContent;
+    const refOf = (row) => ({ level: row.dataset.refLevel, soft: row.dataset.refSoft === 'true', message: row.dataset.refMessage || '' });
+    const SHOWN = 6;  // consignments listed under a problem before "Show all"
+    const expanded = new Set();  // problems whose consignments are all shown, kept when the list is rebuilt after a fix
+    let infoOpen = false;
 
-    function issuesOf(row) {
-        const out = [];
-        if (row.classList.contains('pl-no-address')) out.push(['bad', 'No address: left out of the courier CSV', 'missing']);
-        const level = row.dataset.refLevel, soft = row.dataset.refSoft === 'true', message = row.dataset.refMessage || '';
-        if (level === 'mismatch' && !soft) out.push(['warn', `Official data (G-NAF / LINZ): ${message}`, 'official']);
-        if (row.classList.contains('pl-needs-check')) out.push(['warn', 'Not in the address book', 'book']);
-        if (level === 'mismatch' && soft) out.push(['info', `Official data differs from the saved address: ${message}`, 'official-soft']);
-        if (level === 'note') out.push(['info', message, 'note']);
-        row.querySelectorAll('.pl-book-opt strong').forEach((s) => out.push(['info', `Address book has ${s.textContent}`, 'option']));
-        row.querySelectorAll('.pl-book-hint').forEach((l) => out.push(['info', `Saved addresses: ${l.querySelector('strong').textContent}`, 'hint']));
-        return out;
-    }
     function goTo(row) {
         if (row.hidden) {  // hidden by the state or text filter: show everything again
             const state = document.getElementById('courier-state-filter'), text = document.getElementById('courier-text-filter');
@@ -2858,39 +2869,158 @@ document.addEventListener('DOMContentLoaded', function () {
         void row.offsetWidth;  // restart the flash
         row.classList.add('pl-flash');
     }
-    function refresh() {
-        const found = rows.map((row, i) => ({ row, i, issues: issuesOf(row) })).filter((x) => x.issues.length);
-        found.sort((a, b) => Math.min(...a.issues.map((x) => RANK[x[0]])) - Math.min(...b.issues.map((x) => RANK[x[0]])) || a.i - b.i);
-        list.replaceChildren();
-        const counts = {};
-        found.forEach(({ row, issues }) => {
-            issues.forEach(([, , kind]) => { counts[kind] = (counts[kind] || 0) + 1; });
-            const li = document.createElement('li');
-            li.className = `pl-issue pl-issue-${issues.map((x) => x[0]).sort((a, b) => RANK[a] - RANK[b])[0]}`;
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'pl-issue-go';
-            const num = row.querySelector('.pl-courier-num').textContent.replace(/\D/g, '');  // the number, not the ✏️ button
-            const who = document.createElement('strong');
-            who.textContent = `#${num} ${row.querySelector('.pl-show-receiver').textContent}`;
-            button.append(who);
-            issues.forEach(([level, text]) => {
-                const span = document.createElement('span');
-                span.className = `pl-issue-text pl-issue-${level}`;
-                span.textContent = text;
-                button.append(span);
+    // A consignment under a problem: "#12 Macpac Perth" and what's wrong with it; a click goes to its row
+    function entry(row, text) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pl-issue-go';
+        const who = document.createElement('strong');
+        who.textContent = `#${numberOf(row)} ${nameOf(row)}`;
+        b.append(who);
+        if (text) {
+            const span = document.createElement('span');
+            span.className = 'pl-issue-text';
+            span.textContent = text;
+            b.append(span);
+        }
+        b.addEventListener('click', () => goTo(row));
+        return b;
+    }
+    // One problem: the link to fix it (a packing spec's row), what's wrong and how many, why it matters, where in the
+    // file, and the consignments it's on
+    function group(g) {
+        const li = document.createElement('li');
+        li.className = 'pl-issue-group';
+        const head = document.createElement('div');
+        head.className = 'pl-issue-title';
+        if (g.link) {
+            const link = document.createElement('a');
+            link.href = g.link.href;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.className = 'pl-issue-link';
+            link.textContent = g.link.text;
+            head.append(link, ' ');
+        }
+        head.append(g.title);
+        const entries = g.entries || [];
+        if (entries.length > 1) {
+            const n = document.createElement('span');
+            n.className = 'pl-issue-count';
+            n.textContent = entries.length;
+            head.append(' ', n);
+        }
+        li.append(head);
+        if (g.detail) {
+            const d = document.createElement('div');
+            d.className = 'pl-issue-detail';
+            d.textContent = g.detail;
+            li.append(d);
+        }
+        if (g.where && g.where.length) {
+            const w = document.createElement('div');
+            w.className = 'pl-issue-where';
+            w.textContent = g.where.join(' · ');
+            li.append(w);
+        }
+        if (entries.length) {
+            const box = document.createElement('div');
+            box.className = 'pl-issue-entries';
+            const all = expanded.has(g.key);
+            entries.forEach(([row, text], i) => {
+                const b = entry(row, text);
+                b.hidden = !all && i >= SHOWN;
+                box.append(b);
             });
-            button.addEventListener('click', () => goTo(row));
-            li.append(button);
-            list.append(li);
+            if (!all && entries.length > SHOWN) {
+                const more = document.createElement('button');
+                more.type = 'button';
+                more.className = 'pl-issue-more';
+                more.textContent = `Show all ${entries.length}`;
+                more.addEventListener('click', () => {
+                    expanded.add(g.key);
+                    box.querySelectorAll('.pl-issue-go[hidden]').forEach((x) => { x.hidden = false; });
+                    more.remove();
+                });
+                box.append(more);
+            }
+            li.append(box);
+        }
+        return li;
+    }
+    // Every problem, in the order it needs fixing: first what makes labels or consignments come out wrong or go
+    // missing (the file's own problems, packing specs with no size, no address, the official data saying a part of
+    // the address doesn't exist there), then what's worth a look, then what's only for information
+    function problems() {
+        const tiers = { fix: [], check: [], info: [] };
+        const tabs = new Set((review.file || []).map((g) => g.tab));
+        (review.file || []).forEach((g) => tiers[g.major ? 'fix' : 'check'].push({
+            key: `file:${g.tab}:${g.text}`, detail: g.detail, where: g.where,
+            title: `${g.text}${g.count > 1 ? ` × ${g.count}` : ''}${tabs.size > 1 ? ` (tab ${g.tab})` : ''}` }));
+        (review.specs || []).forEach((sp) => tiers.fix.push({
+            key: `spec:${sp.spec}`,
+            title: sp.unread ? `Couldn't read the size from packing spec ${sp.spec}` : `No size saved for packing spec ${sp.spec}`,
+            detail: `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press "Auto-Map & Update Previews".`,
+            link: { href: sp.url, text: sp.unread ? '📐 Check the code in Packing Specs' : '📐 Add its size in Packing Specs' },
+            entries: sp.consignments.map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
+        (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text }));
+        const rowGroup = (tier, key, title, detail, found) => { if (found.length) tiers[tier].push({ key, title, detail, entries: found }); };
+        const withRef = (test) => rows.filter((r) => test(refOf(r))).map((r) => [r, refOf(r).message]);
+        rowGroup('fix', 'missing', 'No address', "Left out of the courier CSV until it has one: pick a saved address or type one in with ✏️.",
+            rows.filter((r) => r.classList.contains('pl-no-address')).map((r) => [r, '']));
+        rowGroup('fix', 'official', "Doesn't match the official data (G-NAF / LINZ)",
+            "A suburb, state, postcode or country that isn't on record, or isn't where the address puts it. Use the suggestion under the address, or Keep as is if you know it's right.",
+            withRef((x) => x.level === 'mismatch' && !x.soft));
+        rowGroup('fix', 'street', 'Street not on record',
+            "The official data has no street of that name in the suburb or next to it. Check the street and suburb; Keep as is if it's a new street.",
+            withRef((x) => x.level === 'note' && !x.soft));
+        rowGroup('check', 'official-soft', 'Saved address differs from the official data', '', withRef((x) => x.level === 'mismatch' && x.soft));
+        rowGroup('check', 'street-soft', 'Saved address: street not on record', '', withRef((x) => x.level === 'note' && x.soft));
+        rowGroup('check', 'option', 'The address book has another address for these', 'Use it, or Keep as is.',
+            rows.filter((r) => r.querySelector('.pl-book-opt')).map((r) => [r, [...r.querySelectorAll('.pl-book-opt strong')].map((x) => x.textContent).join(' | ')]));
+        rowGroup('check', 'hint', 'Saved addresses can fill in a part of these', '',
+            rows.filter((r) => r.querySelector('.pl-book-hint')).map((r) => [r, [...r.querySelectorAll('.pl-book-hint strong')].map((x) => x.textContent).join(', ')]));
+        rowGroup('info', 'book', 'Not in the address book yet', "Nothing to fix: they're saved to the address book when you generate.",
+            rows.filter((r) => r.classList.contains('pl-needs-check')).map((r) => [r, '']));
+        return tiers;
+    }
+    function refresh() {
+        const tiers = problems();
+        list.replaceChildren();
+        [['fix', 'Needs attention first', 'These make labels or consignments come out wrong or go missing.'],
+         ['check', 'Worth a check', ''], ['info', 'For information', '']].forEach(([tier, name, why]) => {
+            if (!tiers[tier].length) return;
+            const section = document.createElement(tier === 'info' ? 'details' : 'section');
+            section.className = `pl-tier pl-tier-${tier}`;
+            const head = document.createElement(tier === 'info' ? 'summary' : 'div');
+            head.className = 'pl-tier-head';
+            head.textContent = name;
+            if (why) {
+                const w = document.createElement('span');
+                w.className = 'pl-tier-why';
+                w.textContent = why;
+                head.append(' ', w);
+            }
+            const ol = document.createElement('ol');
+            ol.className = 'pl-issue-groups';
+            tiers[tier].forEach((g) => ol.append(group(g)));
+            section.append(head, ol);
+            if (tier === 'info') {
+                section.open = infoOpen;
+                section.addEventListener('toggle', () => { infoOpen = section.open; });
+            }
+            list.append(section);
         });
-        const words = [['missing', 'no address'], ['official', "don't match the official data"], ['book', 'not in the address book'],
-                       ['official-soft', 'saved address differs from the official data'], ['note', 'street not on record'],
-                       ['option', 'address-book option'], ['hint', 'saved-address hint']];
-        summary.textContent = found.length
-            ? `${found.length} consignment${found.length === 1 ? '' : 's'}: ` + words.filter(([k]) => counts[k]).map(([k, w]) => `${counts[k]} ${w}`).join(' · ')
-            : '';
-        panel.hidden = !found.length;
+        // The rows with a problem that needs attention first are marked red in the table too (only when that changes,
+        // so the table watcher below isn't set off again)
+        const urgent = new Set(tiers.fix.flatMap((g) => (g.entries || []).map(([r]) => r)));
+        rows.forEach((r) => { if (r.classList.contains('pl-row-major') !== urgent.has(r)) r.classList.toggle('pl-row-major', urgent.has(r)); });
+        const newToBook = tiers.info.length ? tiers.info[0].entries.length : 0;
+        summary.textContent = [[tiers.fix.length, tiers.fix.length === 1 ? 'problem needs attention first' : 'problems need attention first'],
+                               [tiers.check.length, 'to check'], [newToBook, 'new to the address book']]
+            .filter(([n]) => n).map(([n, w]) => `${n} ${w}`).join(' · ');
+        panel.classList.toggle('pl-issues-urgent', tiers.fix.length > 0);
+        panel.hidden = !list.children.length;
     }
     let timer = null;
     const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 60); };
@@ -2898,4 +3028,99 @@ document.addEventListener('DOMContentLoaded', function () {
     new MutationObserver(soon).observe(document.querySelector('.pl-courier-table tbody'),
         { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-ref-level', 'data-ref-soft'] });
     refresh();
+});
+
+
+// =========================================
+// 26. THE FLOATING "OPEN EXCEL" BUTTON (_open_excel.html)
+// =========================================
+// One per page that previews an uploaded file. It sits at the bottom right, or where it was last dragged to (kept in
+// this browser), and when it would cover a button, box, link or checkbox it slides along that edge to the nearest
+// free spot, so it never blocks anything. Checked when the page scrolls, resizes or something is clicked; no timer.
+document.addEventListener('DOMContentLoaded', function () {
+    const box = document.getElementById('fx-open');
+    if (!box) return;
+    const grip = box.querySelector('.fx-open-grip');
+    const KEY = 'fx-open-spot';
+    const GAP = 16;
+    const CONTROLS = 'button, a, input, select, textarea, label, summary, [role="button"], [contenteditable="true"], .dropzone';
+    let home = null;  // where it was dragged to, as fractions of the window, so it stays sensible after a resize
+    try { home = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { home = null; }
+    let dragging = false;
+    box.hidden = false;
+
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    function wanted(r) {
+        const maxX = window.innerWidth - r.width - GAP, maxY = window.innerHeight - r.height - GAP;
+        return home ? { x: clamp(home.x * window.innerWidth, GAP, maxX), y: clamp(home.y * window.innerHeight, GAP, maxY) }
+                    : { x: maxX, y: maxY };
+    }
+    // A control under this spot? Six points across it; the button itself is left out while looking
+    function covers(x, y, w, h) {
+        for (const fx of [0.1, 0.5, 0.9]) {
+            for (const fy of [0.2, 0.8]) {
+                const hit = document.elementsFromPoint(x + w * fx, y + h * fy).find((el) => !box.contains(el));
+                if (hit && hit.closest(CONTROLS)) return true;
+            }
+        }
+        return false;
+    }
+    function place() {
+        if (dragging) return;
+        const r = box.getBoundingClientRect();
+        const { x, y } = wanted(r);
+        box.style.pointerEvents = 'none';
+        let top = y;
+        if (covers(x, y, r.width, r.height)) {
+            const highest = GAP, lowest = window.innerHeight - r.height - GAP;
+            top = null;
+            for (let d = 10; d <= window.innerHeight && top === null; d += 10) {
+                if (y - d >= highest && !covers(x, y - d, r.width, r.height)) top = y - d;
+                else if (y + d <= lowest && !covers(x, y + d, r.width, r.height)) top = y + d;
+            }
+            if (top === null) top = y;  // nothing free along this edge: it stays, and can be dragged aside
+        }
+        box.style.pointerEvents = '';
+        box.style.left = `${x}px`;
+        box.style.top = `${top}px`;
+    }
+    let frame = 0;
+    const soon = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(place); };
+    window.addEventListener('scroll', soon, { passive: true });
+    window.addEventListener('resize', soon);
+    document.addEventListener('click', () => setTimeout(soon, 50));  // after a click has opened or closed something
+    place();
+
+    // Dragging by the handle; double-click puts it back in the corner
+    grip.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        dragging = true;
+        box.classList.add('fx-dragging');
+        grip.setPointerCapture(e.pointerId);
+        const r = box.getBoundingClientRect();
+        const dx = e.clientX - r.left, dy = e.clientY - r.top;
+        const move = (ev) => {
+            box.style.left = `${clamp(ev.clientX - dx, 0, window.innerWidth - r.width)}px`;
+            box.style.top = `${clamp(ev.clientY - dy, 0, window.innerHeight - r.height)}px`;
+        };
+        const up = () => {
+            grip.removeEventListener('pointermove', move);
+            grip.removeEventListener('pointerup', up);
+            grip.removeEventListener('pointercancel', up);
+            dragging = false;
+            box.classList.remove('fx-dragging');
+            const now = box.getBoundingClientRect();
+            home = { x: now.left / window.innerWidth, y: now.top / window.innerHeight };
+            try { localStorage.setItem(KEY, JSON.stringify(home)); } catch (err) { /* kept for this page only */ }
+            place();
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', up);
+        grip.addEventListener('pointercancel', up);
+    });
+    grip.addEventListener('dblclick', () => {
+        home = null;
+        try { localStorage.removeItem(KEY); } catch (err) { /* nothing kept */ }
+        place();
+    });
 });

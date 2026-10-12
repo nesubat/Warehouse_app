@@ -281,8 +281,33 @@ class PackCheckError(ValueError):
         super().__init__("\n".join(_issue_line(i) for i in issues))
 
 
-def _issue(rows, col, text, detail=''):
-    return {'rows': rows, 'col': col, 'text': text, 'detail': detail}
+def _issue(rows, col, text, detail='', major=False):
+    """A problem found in the file, with its Excel rows and column. major: generation goes on, but labels, units or
+    consignments go missing or don't add up (a Packing Spec with no quantities, no address, no barcode): listed first,
+    in red, in the preview's To check list."""
+    return {'rows': rows, 'col': col, 'text': text, 'detail': detail, 'major': major}
+
+
+def group_issues(issues):
+    """A tab's problems as the page lists them: the same problem once, with every place it's at ('Packing Spec but
+    no quantities: no label made' on fifteen rows is one line, 'Pack 1: rows 11, 13, 19 …'), major ones first.
+    [{'text', 'detail', 'major', 'count', 'where': ['Pack 1: rows 11, 13', …]}]"""
+    groups = {}
+    for i in issues or []:
+        g = groups.setdefault((i['text'], i.get('detail', '')), {'text': i['text'], 'detail': i.get('detail', ''),
+                                                                 'major': bool(i.get('major')), 'count': 0, 'cols': {}})
+        g['count'] += 1
+        rows = g['cols'].setdefault(i.get('col') or '', [])
+        if i.get('rows'):
+            rows.append(str(i['rows']))
+    out = []
+    for g in groups.values():
+        where = []
+        for col, rows in g.pop('cols').items():
+            rows_text = f"row{'s' if len(rows) > 1 or any(c in r for r in rows for c in ',-') else ''} {', '.join(rows)}" if rows else ''
+            where.append(": ".join(x for x in (col, rows_text) if x))
+        out.append({**g, 'where': [w for w in where if w]})
+    return sorted(out, key=lambda g: not g['major'])
 
 
 def _issue_line(i):
@@ -409,7 +434,7 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
                 warnings.append(_issue(span, col['address'], "Merged address shared with next pack"))
 
     if no_address_packs:
-        warnings.append(_issue(_row_ranges(no_address_packs), col['address'], "No address"))
+        warnings.append(_issue(_row_ranges(no_address_packs), col['address'], "No address", major=True))
 
     # Across packs of the same store: store deliveries must agree, installer deliveries may differ
     if has_address:
@@ -645,7 +670,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
         warnings.append(_issue(_row_ranges(rows_without_image), col_ref['thumbnail'], "No image"))
     if rows_no_barcode:
         warnings.append(_issue(_row_ranges(rows_no_barcode), col_ref['job_no'],
-                               "No barcode: Job Number has a line break or a character a barcode can't hold"))
+                               "No barcode: Job Number has a line break or a character a barcode can't hold", major=True))
 
     pack_errors, pack_warnings = _check_pack_consistency(pack_groups, pack_rows, bool(address_keys), col_ref)
     errors += pack_errors
