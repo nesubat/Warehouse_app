@@ -17,7 +17,7 @@ import re
 import threading
 import time
 
-from packing_label_generator import _norm
+from engine.packing_labels.packing_label_generator import _norm
 
 ITEM_TYPES = ('Carton', 'Pallet')
 FORMULA_PREFIXES = ('OB', 'CS', 'PALLET', 'FP')

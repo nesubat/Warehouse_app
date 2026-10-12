@@ -27,8 +27,8 @@ from collections import Counter
 import pymupdf as fitz
 from PIL import Image, ImageOps
 
-import app_log
-from packing_label_generator import _norm, draw_report_pages
+from engine.core import app_log
+from engine.packing_labels.packing_label_generator import _norm, draw_report_pages
 
 log = app_log.get('stitch')
 DPI = 600
@@ -151,7 +151,7 @@ def place_label(page, region, img):
     top-aligned, covering the region's placeholder. A landscape label is turned a quarter (reading bottom to top) to
     suit the portrait region, so it stays near full size instead of shrinking to the region's width."""
     if (img.width > img.height) != (region.width > region.height):
-        img = img.rotate(90, expand=True, fillcolor=255)
+        img = img.rotate(-90, expand=True, fillcolor=255)
     scale = min(region.width / img.width, region.height / img.height)
     w, h = img.width * scale, img.height * scale
     target = fitz.Rect(region.x0 + (region.width - w) / 2, region.y0, region.x0 + (region.width + w) / 2, region.y0 + h)

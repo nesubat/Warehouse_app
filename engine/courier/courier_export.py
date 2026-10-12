@@ -4,6 +4,7 @@ One CSV row per pack (= one packing label = one carton). Packs going to the same
 form one consignment: the first row of a consignment carries the consignment reference, later rows
 leave it blank and repeat the exact same address so the courier joins them.
 """
+from engine.core import paths
 import csv
 import json
 import os
@@ -11,8 +12,8 @@ import re
 from collections import Counter
 from datetime import date
 
-from packing_label_generator import _address_key, _norm, assign_label_numbers, assign_barcodes, normalize_postcode, STREET_TYPES
-from packing_specs import SpecStore, MAX_KG, _num as _round_to
+from engine.packing_labels.packing_label_generator import _address_key, _norm, assign_label_numbers, assign_barcodes, normalize_postcode, STREET_TYPES
+from engine.courier.packing_specs import SpecStore, MAX_KG, _num as _round_to
 
 AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
 # New Zealand regions: the official ISO 3166-2:NZ codes, plus the codes Toll's portal uses
@@ -619,7 +620,7 @@ def build_consignments(pack_groups, edits=None, default_service='', resolve_spec
                             + " · ".join(f"#{c['number']} {one_line(c['destination'])}" for c in group))
     for street, group in by_street.items():
         if street and len(group) > 1:
-            warnings.append(f"Same street, different suburb/postcode: "
+            warnings.append("Same street, different suburb/postcode: "
                             + " · ".join(f"#{c['number']} {one_line(c['destination'])}" for c in group))
     return cons, cartons, warnings
 
@@ -653,7 +654,7 @@ def write_courier_csv(path, cartons, consignments, reference, fixed, sender=None
     the weight and cubic of both boxes. A delivery outside Australia gets the export details (export: the
     preview's values, clean_export; the built-in EXPORT_DEFAULTS when not given), with Contents Weight = the row's
     weight."""
-    from packing_specs import split_count
+    from engine.courier.packing_specs import split_count
     by_number = {c['number']: c for c in consignments}
     item_refs = item_refs or {}
     export = clean_export(export or EXPORT_DEFAULTS)[0]
@@ -782,7 +783,7 @@ def write_open360_csv(path, items, reference, despatch=None, numbering='row', it
       Sender columns       kept but empty: the portal uses the account's sender
     Dates are d/m/yyyy, as Excel saves them; UTF-8 without a BOM, CRLF line endings.
     Returns [(Item Reference, code)] per row."""
-    from packing_specs import split_count
+    from engine.courier.packing_specs import split_count
     item_refs = item_refs or open360_item_references(items, numbering)  # given when the OpenFreight CSV shares them
     despatch = despatch or date.today()
     yes_no = lambda v: 'Y' if v else 'N'
@@ -824,7 +825,7 @@ def project_open360_items(project_dir):
     file's) order. Boxes whose size wasn't known then are sized now from the Packing Specs page.
     Returns (items, reference)."""
     import glob
-    from packing_specs import SpecStore
+    from engine.courier.packing_specs import SpecStore
     map_path = next(iter(glob.glob(os.path.join(project_dir, '*.labelmap.json'))), None)
     if not map_path:
         raise ValueError("This project has no label map (it was made before courier CSVs were added).")
@@ -838,7 +839,7 @@ def project_open360_items(project_dir):
     ref_col = len(rows[0]) - 1  # the last 'Reference' column holds the item reference
     carton_of = {pk['item_reference']: {**pk, 'store': store} for store, packs in label_map['stores'].items() for pk in packs}
     con_of = {c['number']: c for c in label_map['consignments']}
-    resolve = SpecStore(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'packing_specs.json')).resolver()
+    resolve = SpecStore(os.path.join(paths.DATA_DIR, 'packing_specs.json')).resolver()
     items = []
     for r in rows[1:]:
         pk = carton_of.get(r[ref_col])

@@ -1,3 +1,4 @@
+from engine.core import paths
 import time
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, send_file
@@ -14,46 +15,42 @@ import subprocess
 import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
-from pdf_engine import process_and_shuffle_pdf
-from matrix_engine import clean_file_name, scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from core_math import clean_file_name, get_available_project_files, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, DIVIDER_BARCODE_SHEET, NOT_STORE_TABS, read_divider_barcodes
-from subgroup_engine import execute_subgroups, SubgroupValidationError
-from packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
+from engine.label_shuffler.pdf_engine import process_and_shuffle_pdf
+from engine.packing_sheets.matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
+from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes
+from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
+from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
-from address_book import AddressBook, AddressBookError
-from address_import import build_review, apply_review, all_label_maps, ImportProblem
-from address_match import suggestions as closest_addresses, name_score
-from packing_specs import SpecStore, SpecError, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
-from courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
+from engine.addresses.address_book import AddressBook, AddressBookError
+from engine.addresses.address_import import build_review, apply_review, all_label_maps, ImportProblem
+from engine.addresses.address_match import suggestions as closest_addresses
+from engine.courier.packing_specs import SpecStore, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
+from engine.courier.courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
     FIELD_NAMES as IMPORT_FIELD_NAMES
-import address_reference
-import data_transfer
-from address_book import one_line as address_one_line
-from label_stitcher import plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label
+from engine.addresses import address_reference
+from engine.core import data_transfer
+from engine.addresses.address_book import one_line as address_one_line
+from engine.packing_labels.label_stitcher import plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label
 import threading
 from collections import Counter
 import secrets
-from courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
+from engine.courier.courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
-                            save_export_defaults, EXPORT_DEFAULTS, EXPORT_COLUMNS,
-                            open360_items, write_open360_csv,
+                            save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
-import app_log
-from horizontal_distribution import read_horizontal, read_signature_file
-from horizontal_labels import generate_horizontal_labels
+from engine.core import app_log
+from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file
+from engine.packing_labels.horizontal_labels import generate_horizontal_labels
 import logging
 
 
 
 
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = paths.BASE_DIR  # the app folder (next to the .exe when built)
 
         
 
@@ -1511,54 +1508,145 @@ def _carton_weights(form):
     return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
 
 
-def _book_offered(form):
-    """Excel addresses the address book has already been asked about, so a Reset to Excel sticks."""
-    offered = _edits_field(form).get('__offered__', [])
-    return [str(x) for x in offered] if isinstance(offered, list) else []
-
-
 def _same_address(a, b):
     return all(str(a.get(k) or '').strip() == str(b.get(k) or '').strip() for k in EDITABLE_FIELDS) \
         and bool(a.get('authority_to_leave')) == bool(b.get('authority_to_leave'))
 
 
-def _apply_address_book(pack_groups, edits, offered):
-    """Fills in addresses the book has learned for these Excel spellings (each spelling is offered once).
-
-    A pack with a receiver name but no address (a file with only receiver names) that the book hasn't learned
-    yet is looked up by receiver: when every saved entry for that receiver is at one address, it's filled in.
-    Several different addresses are left for the user to choose from in the preview."""
+def _book_options(pack_groups, edits):
+    """What the address book knows for each Excel address, offered in the preview (nothing is filled in by itself:
+    the preview shows the Excel address, and the user picks an option with one click). {source id: [(entry, why)]}:
+      - the address the book learned for this exact Excel spelling (a correction made before)
+      - an address with no name in it: who the book has at that address
+      - a receiver with no address in the file: the receiver's saved addresses (up to 3)
+      - a receiver whose Excel address isn't what the book has for them: the receiver's saved addresses (up to 2,
+        verified first), the same name or a near-identical spelling, so a store that moved or was spelt differently
+        shows its saved address with what differs marked
+    Excel addresses the user has already edited in this preview get none, nor do ones kept as is ('book_keep')."""
     sources = source_destinations(pack_groups)
-    new = [sid for sid in sources if sid not in edits and sid not in offered]
+    ask = [sid for sid in sources if not any(k in edits.get(sid, {}) for k in EDITABLE_FIELDS)
+           and not (isinstance(edits.get(sid, {}).get('book_keep'), dict) and _same_place(edits[sid]['book_keep'], sources[sid]))]
+    options = {}
     try:
-        learned = ADDRESS_BOOK.lookup_aliases(new)
-        for sid in new:
+        learned = ADDRESS_BOOK.lookup_aliases(ask)
+        for sid in ask:
             dest = sources[sid]
             if sid in learned:
-                continue
-            if dest['postcode']:
-                if not dest['receiver']:
-                    # Address with no name in it: the book knows who's at that address
-                    here = ADDRESS_BOOK.at_address(dest)
-                    if here:
-                        learned[sid] = {**dest, **{k: here[0][k] for k in ('receiver', 'contact')},
-                                        'authority_to_leave': dest['authority_to_leave']}
-                continue
-            saved = ADDRESS_BOOK.find_by_receiver(dest['receiver'])
-            places = {(e['line1'], e['line2'], e['suburb'], e['state'], e['postcode']) for e in saved}
-            if len(places) == 1:
-                learned[sid] = saved[0]  # most used first
+                options[sid] = [(learned[sid], "Saved for this Excel spelling")]
+            elif dest['postcode'] and not dest['receiver']:
+                here = ADDRESS_BOOK.at_address(dest)
+                if here:
+                    options[sid] = [({**dest, **{k: here[0][k] for k in ('receiver', 'contact')}}, "Saved at this address")]
+            elif dest['postcode'] and dest['receiver']:
+                # The receiver is saved, at another address (or this one spelt differently): offer theirs, unless
+                # the book already holds this exact address for them
+                saved = ADDRESS_BOOK.receiver_entries(dest['receiver'])
+                if saved and not any(_same_place(e, dest) for e in saved):
+                    seen, found = set(), []
+                    for e in saved:
+                        place = _address_key(one_line(e))
+                        if place not in seen:
+                            seen.add(place)
+                            found.append((e, "Verified for this receiver" if e['verified_at'] else "Saved for this receiver"))
+                    options[sid] = found[:2]
+            elif not dest['postcode'] and dest['receiver']:
+                seen, found = set(), []
+                for e in ADDRESS_BOOK.find_by_receiver(dest['receiver']):  # most used first
+                    place = _address_key(one_line(e))
+                    if place not in seen:
+                        seen.add(place)
+                        found.append((e, "Saved for this receiver"))
+                if found:
+                    options[sid] = found[:3]
     except Exception as e:
         log_book.exception("Address book lookup failed: %s", e)
-        learned = {}
-    filled = 0
-    for sid, entry in learned.items():
-        if not _same_address(entry, sources[sid]):
-            edits[sid] = {**{k: entry[k] for k in EDITABLE_FIELDS}, 'authority_to_leave': entry['authority_to_leave'], 'source': 'book'}
-            filled += 1
-            log_book.debug("Filled from the book: %s -> %s", sid, one_line(entry))
-    log_book.info("Address book: %d Excel addresses, %d new to ask about, %d filled from the book", len(sources), len(new), filled)
-    return edits, offered + new
+    log_book.info("Address book: %d Excel addresses, %d with an address-book option", len(sources), len(options))
+    return options
+
+
+def _option_view(entry, why, current=None):
+    """An address-book option as the preview shows it, with the fields one click puts in. 'parts': the address as
+    [(text, changed)] against the current one, so the page can mark what differs ('Shop 2 *Woolworths* Curlewis Town
+    Centre … VIC *3222*'): words of the street lines the current address doesn't have, whole fields otherwise."""
+    fields = {k: str(entry.get(k) or '') for k in EDITABLE_FIELDS}
+    fields['country'] = fields['country'] or 'AU'
+    fields['authority_to_leave'] = bool(entry.get('authority_to_leave'))
+    label = one_line(fields) + (f", {fields['country']}" if fields['country'] != 'AU' else '')
+    parts, changed = [], []
+    current = current or {}
+    have_words = set(_norm(" ".join(str(current.get(k) or '') for k in ('line1', 'line2'))).split())
+    order = ['line1', 'line2', 'suburb', 'state', 'postcode'] + (['country'] if fields['country'] != 'AU' else [])
+    for k in order:
+        value = fields[k]
+        if not value:
+            continue
+        if parts:
+            parts.append((', ', False))
+        if k in ('line1', 'line2'):
+            words = value.split(' ')
+            for i, w in enumerate(words):
+                diff = bool(current) and bool(_norm(w)) and _norm(w) not in have_words
+                parts.append((w + (' ' if i < len(words) - 1 else ''), diff))
+                if diff and k not in changed:
+                    changed.append(k)
+        else:
+            diff = bool(current) and _norm(value) != _norm(current.get(k) or ('AU' if k == 'country' else ''))
+            parts.append((value, diff))
+            if diff:
+                changed.append(k)
+    return {'label': label, 'receiver': fields['receiver'], 'contact': fields['contact'], 'why': why,
+            'verified': bool(entry.get('verified_at')), 'fields': fields, 'parts': parts, 'changed': changed}
+
+
+LOCALITY_FIELD_NAMES = {'suburb': 'Suburb', 'state': 'State', 'postcode': 'Postcode', 'country': 'Country'}
+
+
+def _locality_hints(dest, ref):
+    """What the saved addresses say about this address's suburb, field by field: the state, postcode and country
+    other saved (verified first) addresses in that suburb have, and the suburb other addresses with this postcode
+    have. Offered only for a field that's empty, or that the official data can't check (New Zealand postcodes and
+    regions, or no official data loaded); a field the official data checks is left to it. Each hint changes only its
+    own field. [{'field', 'value', 'label', 'why', 'verified'}]"""
+    country = (dest.get('country') or 'AU').upper()
+    official = address_reference.available() and ref.get('level') not in ('none', None)
+    checked_by_official = {'suburb', 'state', 'postcode'} if (official and country == 'AU') else ({'suburb'} if official else set())
+    hints = []
+    try:
+        suburb, postcode = (dest.get('suburb') or '').strip(), (dest.get('postcode') or '').strip()
+        if suburb:
+            rows = [r for r in ADDRESS_BOOK.localities(suburb) if (r['country'] or 'AU') == country] or ADDRESS_BOOK.localities(suburb)
+            best = rows[0] if rows else None
+            # Supported well enough: verified, or saved more than once, and not contradicted by an equal alternative
+            if best and (best['verified'] or best['entries'] > 1) and not (len(rows) > 1 and rows[1]['verified'] == best['verified']
+                                                                          and rows[1]['entries'] == best['entries']):
+                for field in ('state', 'postcode', 'country'):
+                    value = (best[field] or ('AU' if field == 'country' else '')).strip()
+                    have = (dest.get(field) or ('AU' if field == 'country' else '')).strip()
+                    if not value or _norm(value) == _norm(have):
+                        continue
+                    if have and field in checked_by_official:
+                        continue
+                    if field == 'country' and official and ref.get('level') in ('ok', 'note', 'verified'):
+                        continue  # the official data recognised it in this country
+                    hints.append({'field': field, 'value': value,
+                                  'label': f"{LOCALITY_FIELD_NAMES[field]} {value}",
+                                  'why': f"{suburb.upper()} is {value} in {best['verified'] or best['entries']} "
+                                         f"{'verified' if best['verified'] else 'saved'} address{'es' if (best['verified'] or best['entries']) != 1 else ''}"
+                                         + (f" (this says {have})" if have else ''),
+                                  'verified': bool(best['verified'])})
+        elif postcode:
+            rows = ADDRESS_BOOK.suburbs_at(postcode, country)
+            if rows and (rows[0]['verified'] or rows[0]['entries'] > 1) and len({r['suburb'] for r in rows[:2]}) == 1:
+                r = rows[0]
+                hints.append({'field': 'suburb', 'value': r['suburb'], 'label': f"Suburb {r['suburb']}",
+                              'why': f"{postcode} is {r['suburb']} in your {'verified' if r['verified'] else 'saved'} addresses",
+                              'verified': bool(r['verified'])})
+    except Exception as e:
+        log_book.warning("Saved-address suburb lookup failed for %s: %s", one_line(dest), e)
+    return hints
+
+
+
 
 
 SUGGESTION_FIELDS = EDITABLE_FIELDS + ('authority_to_leave',)
@@ -1603,7 +1691,7 @@ def _reference_for(dest, edit=None, here=None):
             'country': r.get('country', ''), 'soft': bool(here)}
 
 
-def _check_against_book(consignments, edits):
+def _check_against_book(consignments, edits, book_options=None):
     """Sets each consignment's 'book' status for the preview:
       book       filled in from the address book (a spelling it learned)
       matched    the book holds this address, under this receiver or another one (an address can have several
@@ -1613,9 +1701,19 @@ def _check_against_book(consignments, edits):
       missing    no address at all (only a receiver name): listed first of all, with the receiver's saved
                  addresses as suggestions. Left out of the courier CSV until it has one."""
     cache = {}
+    book_options = book_options or {}
     for c in consignments:
         d = c['destination']
         c['book'], c['book_note'], c['suggestions'] = 'unverified', '', []
+        # The address book's options for this consignment's Excel address(es), unless they're what it already says
+        offered = []
+        for sid in dict.fromkeys([c['id']] + [x['source_id'] for x in c['cartons']]):
+            for entry, why in book_options.get(sid, []):
+                view = _option_view(entry, why, d)
+                same = _same_place(view['fields'], d) and _norm(view['receiver']) == _norm(d['receiver'])
+                if not same and view['label'] not in [o['label'] for o in offered]:
+                    offered.append(view)
+        c['book_options'] = offered[:3]
         # Every ✏️ form lists the closest saved addresses (for a row filled from the book, that entry comes
         # first), so undoing a fill or a wrong edit leaves the good address one click away
         try:
@@ -1651,12 +1749,21 @@ def _check_against_book(consignments, edits):
     for c in consignments:
         c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['book'] == 'missing'
                     else _reference_for(c['destination'], edits.get(c['id'], {})))
+        # What the saved addresses say about its suburb: only fields left empty or the official data can't check
+        # (a row with no postcode included: its suburb may be all it needs to be completed)
+        c['locality_hints'] = [] if c['ref']['level'] == 'verified' else _locality_hints(c['destination'], c['ref'])
     if address_reference.available():
         levels = Counter(c['ref']['level'] + ('-saved' if c['ref'].get('soft') else '') for c in consignments)
         log_book.info("  official address data: %s in %.2fs", ", ".join(f"{k} {v}" for k, v in sorted(levels.items())),
                       time.perf_counter() - started)
-    # No address first, then not in the book, then not matching the official data; otherwise consignment order
-    rank = lambda c: {'missing': 0, 'unverified': 1}.get(c['book'], 3 if c['ref']['level'] != 'mismatch' or c['ref'].get('soft') else 2)
+    # The problems first (no address, then not in the book or not matching the official data), then the rows the
+    # address book has an option for, then the rest in consignment order
+    def rank(c):
+        if c['book'] == 'missing':
+            return 0
+        if c['book'] == 'unverified' or (c['ref']['level'] == 'mismatch' and not c['ref'].get('soft')):
+            return 1
+        return 2 if c['book_options'] or c['locality_hints'] else 3
     return sorted(consignments, key=rank)
 
 
@@ -1996,6 +2103,26 @@ def api_address_data_complete():
                 n += 1
                 out.append({'source': 'verified' if verified else 'saved', 'label': r['address'] + (f", {r['country']}" if r['country'] != 'AU' else ''),
                             'detail': r['receiver'], 'fields': {k: r[k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}})
+    # Places from the saved addresses (verified first): a suburb with its state, postcode and country, or the suburbs
+    # of a postcode. They come before the official data, and are the only source for NZ postcodes and regions.
+    try:
+        places = []
+        if field == 'suburb':
+            places = ADDRESS_BOOK.localities_starting(value)
+        elif field == 'postcode' and re.fullmatch(r'\d{4}', value):
+            places = [{**r, 'postcode': value} for r in ADDRESS_BOOK.suburbs_at(value)]
+        shown = {o['label'] for o in out}
+        for p in places[:4]:
+            label = " ".join(x for x in (p['suburb'], p['state'], p['postcode']) if x) + (f", {p['country']}" if p['country'] != 'AU' else '')
+            if label in shown:
+                continue
+            shown.add(label)
+            n = p['verified'] or p['entries']
+            out.append({'source': 'verified' if p['verified'] else 'saved', 'label': label,
+                        'detail': f"in {n} {'verified' if p['verified'] else 'saved'} address{'es' if n != 1 else ''}",
+                        'fields': {'suburb': p['suburb'], 'state': p['state'], 'postcode': p['postcode'], 'country': p['country'] or 'AU'}})
+    except Exception as e:
+        log_book.warning("Saved-place suggestions failed for %s=%r: %s", field, value, e)
     try:
         out += [{**o, 'source': 'official'} for o in address_reference.complete(field, value, ctx)]
     except Exception as e:
@@ -2254,7 +2381,10 @@ def _distribution_page(mode):
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
                 if courier_mode:
                     _import_refs(groups, selected_tabs.index(tab) + 1)
-            edits, offered = _apply_address_book(combined, _consignment_edits(request.form), _book_offered(request.form))
+            # The Excel address as written; what the address book knows is offered in the row, never filled in by itself
+            edits = _consignment_edits(request.form)
+            edits.pop('__offered__', None)
+            book_options = _book_options(combined, edits)
             options = service_options(load_service_usage(SERVICE_USAGE_FILE))
             most_used = options[0]['code'] if options[0]['used'] else ''
             fixed = {**DEFAULT_FIXED, 'service_code': most_used,
@@ -2264,7 +2394,7 @@ def _distribution_page(mode):
                                                                          SPEC_STORE.resolver(), weights)
             if courier_mode:
                 _import_item_refs(cartons, combined)
-            consignments = _receiver_groups(_check_against_book(consignments, edits))  # one receiver's next to each other
+            consignments = _receiver_groups(_check_against_book(consignments, edits, book_options))  # one receiver's next to each other
             # Specs the Packing Specs page doesn't know yet are listed there for the user to fill in
             try:
                 SPEC_STORE.note_unknown(x['packing_spec'] for x in cartons if x['spec_kind'] == 'unknown')
@@ -2301,7 +2431,8 @@ def _distribution_page(mode):
                 'missing': sum(c['book'] == 'missing' for c in consignments),
                 'warnings': courier_warnings,
                 'fixed': {'reference': series, **fixed},
-                'edits_json': json.dumps({**edits, '__offered__': offered}),
+                'edits_json': json.dumps(edits),
+                'book_option_rows': sum(1 for c in consignments if c['book_options']),
                 # Export details for deliveries outside Australia (OpenFreight): as typed so far, else the defaults
                 'export': _export_values(request.form),
                 'international': sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU'),

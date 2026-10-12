@@ -30,15 +30,15 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
-from packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
+from engine.packing_labels.packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
                                      is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field)
-from courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
+from engine.courier.courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
                             NO_PACK, TOTAL_ROW)
-from courier_export import attn_text
-from core_math import (generate_pack_signatures, sanitize_cell, clean_store_name, LABEL_PLUGIN_SHEET,
+from engine.courier.courier_export import attn_text
+from engine.core.core_math import (generate_pack_signatures, sanitize_cell, clean_store_name, LABEL_PLUGIN_SHEET,
                        DIVIDER_BARCODE_SHEET, read_divider_barcodes)
-from pdf_engine import code128_modules
-from packing_specs import split_count
+from engine.label_shuffler.pdf_engine import code128_modules
+from engine.courier.packing_specs import split_count
 
 JOB = re.compile(r'^[A-Z]{1,3}\d{4,8}(-\d{1,4})?[A-Z]?$', re.I)
 CODE_HEADER = re.compile(r'^\s*code\s+for\s+(.+?)\s*$', re.I)

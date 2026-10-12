@@ -11,7 +11,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Files whose changes can move a label, a code or a courier reference: the tests cover them
-WATCHED = ('horizontal_', 'packing_label', 'courier_', 'label_stitcher', 'core_math', 'matrix_engine', 'app.py', 'tests/')
+WATCHED = ('engine/', 'app.py', 'tests/')
 
 
 def changed_file():

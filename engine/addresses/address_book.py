@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 
-from packing_label_generator import _address_key, _norm, normalize_postcode
+from engine.packing_labels.packing_label_generator import _address_key, _norm, normalize_postcode
 
 FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave')
 TEXT_FIELDS = FIELDS[:-1]
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS addresses (
 CREATE INDEX IF NOT EXISTS addresses_recent ON addresses (last_used_at DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS addresses_receiver ON addresses (receiver_key);
 CREATE INDEX IF NOT EXISTS addresses_postcode ON addresses (postcode);
+CREATE INDEX IF NOT EXISTS addresses_suburb ON addresses (suburb);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS addresses_fts USING fts5(
     receiver, contact, line1, line2, suburb, state, postcode,
@@ -365,6 +366,50 @@ class AddressBook:
         rows = self._connect().execute("SELECT * FROM addresses WHERE receiver_key = ? ORDER BY use_count DESC LIMIT 50",
                                        (_norm(receiver),)).fetchall()
         return [self._row(r) for r in rows]
+
+    def receiver_entries(self, receiver, limit=6):
+        """The receiver's saved addresses: the same name (ignoring capitals and punctuation), then near-identical
+        spellings found by search ('Spectacle Hub - Curlewis'). Verified ones first, then the most used."""
+        from engine.addresses.address_match import name_score
+        found = {e['id']: e for e in self.find_by_receiver(receiver)}
+        if receiver and len(_norm(receiver)) >= 3:
+            for e in self.search(receiver, 15)[0]:
+                if e['id'] not in found and name_score(receiver, e['receiver']) >= 0.85:
+                    found[e['id']] = e
+        ranked = sorted(found.values(), key=lambda e: (not e['verified_at'], -(e['use_count'] or 0)))
+        return ranked[:limit]
+
+    # ---------- what the saved addresses say about places ----------
+    # The book as a gazetteer: every saved address tells which state, postcode and country its suburb has. Entries
+    # the courier portal verified count most. Used where the official data can't help (New Zealand has no postcodes
+    # or regions in LINZ) and to fill a part of an address that's missing.
+
+    def localities(self, suburb):
+        """[{'country', 'state', 'postcode', 'entries', 'verified'}] seen with this suburb, best supported first."""
+        rows = self._connect().execute(
+            "SELECT country, state, postcode, COUNT(*) AS entries, SUM(verified_at IS NOT NULL) AS verified "
+            "FROM addresses WHERE suburb = ? AND postcode != '' GROUP BY country, state, postcode "
+            "ORDER BY verified DESC, entries DESC LIMIT 10", (str(suburb or '').strip().upper(),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def suburbs_at(self, postcode, country=None):
+        """[{'suburb', 'state', 'country', 'entries', 'verified'}] saved with this postcode, best supported first."""
+        sql = ("SELECT suburb, state, country, COUNT(*) AS entries, SUM(verified_at IS NOT NULL) AS verified "
+               "FROM addresses WHERE postcode = ? AND suburb != ''" + (" AND country = ?" if country else '') +
+               " GROUP BY suburb, state, country ORDER BY verified DESC, entries DESC LIMIT 10")
+        args = (str(postcode or '').strip(),) + ((country,) if country else ())
+        return [dict(r) for r in self._connect().execute(sql, args).fetchall()]
+
+    def localities_starting(self, text, limit=8):
+        """Suburbs saved in the book that start like this ('frank' -> FRANKTON NZ 9300), for typing suggestions."""
+        lo = str(text or '').strip().upper()
+        if len(lo) < 2:
+            return []
+        rows = self._connect().execute(
+            "SELECT suburb, state, postcode, country, COUNT(*) AS entries, SUM(verified_at IS NOT NULL) AS verified "
+            "FROM addresses WHERE suburb >= ? AND suburb < ? AND postcode != '' GROUP BY suburb, state, postcode, country "
+            "ORDER BY verified DESC, entries DESC LIMIT ?", (lo, lo + '￿', limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def same_identity(self, entry):
         """The receiver's other entries with the same Attn (other addresses, or stale copies of this one)."""

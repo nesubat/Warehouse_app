@@ -1033,15 +1033,25 @@ document.addEventListener('DOMContentLoaded', function () {
             const d = { ...current(), ...e.detail.fields };
             if ('suburb' in e.detail.fields) d.suburb = (d.suburb || '').toUpperCase();
             const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
-            edits[id] = { ...keep, checked: true, ...d };
+            // From the address book: tagged as such (and its options are done with); else an edit
+            const fromBook = e.detail.source === 'book';
+            edits[id] = { ...keep, checked: true, ...d, ...(fromBook ? { source: 'book' } : {}) };
             tidy(id);
             show(row, d);
-            row.querySelector('.pl-tag-edited').hidden = false;
-            row.querySelector('.pl-tag-book').hidden = true;
+            row.querySelector('.pl-tag-edited').hidden = fromBook;
+            row.querySelector('.pl-tag-book').hidden = !fromBook;
+            if (fromBook) row.querySelector('.pl-book-opts').replaceChildren();
             markChecked(row);
             if (d.postcode) markAddressed(row);
             applyFilters();
             PL_REF.recheck(row, d, null);
+        });
+        // Keep as is for the address book's option: not offered again for this exact address (Update Previews too)
+        row.addEventListener('pl-book-keep', () => {
+            const d = current();
+            editOf(id).book_keep = Object.fromEntries(['line1', 'line2', 'suburb', 'state', 'postcode'].map((k) => [k, d[k] || '']));
+            save();
+            row.querySelector('.pl-book-opts').replaceChildren();
         });
         // Keep as is: this exact address stops being flagged (the address book remembers it on Generate)
         row.addEventListener('pl-ref-keep', () => {
@@ -2538,6 +2548,7 @@ const PL_REF = (() => {
         ref = ref || {};
         row.dataset.refLevel = ref.level || 'none';
         row.dataset.refSoft = String(!!ref.soft);
+        row.dataset.refMessage = ref.message || '';
         const address = row.querySelector('.pl-show-address');
         const box = row.querySelector('.pl-ref');
         if (!address || !box) return;
@@ -2716,4 +2727,149 @@ document.addEventListener('DOMContentLoaded', function () {
             if (error) error.hidden = false;
         }, true);
     });
+});
+
+// =========================================
+// 25. ADDRESS BOOK OPTIONS AND THE "TO CHECK" LIST (packing labels preview)
+// =========================================
+// The preview shows each Excel address as written. What the address book knows about it (the address it learned for
+// this spelling, who is at an address with no name, a name-only receiver's saved addresses) is offered under the
+// address, after any problem, with one click to use it: nothing is filled in by itself.
+// The "To check" list above the table gathers every row's problems (no address, not in the address book, the official
+// data disagreeing) and its address-book options, worst first; a click goes to the row. It follows every fix.
+document.addEventListener('DOMContentLoaded', function () {
+    const panel = document.getElementById('pl-issues');
+    const rows = [...document.querySelectorAll('.pl-con-row')];
+    if (!rows.length) return;
+
+    const button = (text, cls, title, onClick) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = `pl-btn-small ${cls}`; b.textContent = text; b.title = title;
+        b.addEventListener('click', onClick);
+        return b;
+    };
+    rows.forEach((row) => {
+        // The address book's saved address for this receiver / spelling: what differs from the address shown is marked
+        const box = row.querySelector('.pl-book-opts');
+        if (box) {
+            let options = [];
+            try { options = JSON.parse(box.dataset.options || '[]'); } catch (e) { options = []; }
+            options.forEach((o) => {
+                const line = document.createElement('div');
+                line.className = 'pl-book-opt';
+                const what = document.createElement('span');
+                what.className = 'pl-book-opt-text';
+                const name = o.receiver && o.receiver !== row.querySelector('.pl-show-receiver').textContent ? ` · ${o.receiver}` : '';
+                what.append('📇 Address book: ');
+                const strong = document.createElement('strong');
+                (o.parts && o.parts.length ? o.parts : [[o.label, false]]).forEach(([text, changed]) => {
+                    if (!changed) { strong.append(text); return; }
+                    const mark = document.createElement('mark');
+                    mark.className = 'pl-diff';
+                    mark.textContent = text;
+                    strong.append(mark);
+                });
+                what.append(strong, `${name}${o.contact ? ` · Attn ${o.contact}` : ''} · ${o.why}${o.verified ? ' · ✓ Verified' : ''}`);
+                line.title = o.changed && o.changed.length ? `Differs from the address shown in: ${o.changed.join(', ')}` : '';
+                line.append(what,
+                    button('Use', '', 'Put this saved address in, instead of the one shown',
+                        () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: o.fields, source: 'book' } }))),
+                    button('Keep as is', 'pl-btn-plain', 'The address shown is right: stop offering this one for it',
+                        () => row.dispatchEvent(new CustomEvent('pl-book-keep'))));
+                box.append(line);
+            });
+        }
+        // What the saved addresses say about the suburb: each hint changes only its own field
+        const hintsBox = row.querySelector('.pl-book-hints');
+        if (hintsBox) {
+            let hints = [];
+            try { hints = JSON.parse(hintsBox.dataset.hints || '[]'); } catch (e) { hints = []; }
+            hints.forEach((h) => {
+                const line = document.createElement('div');
+                line.className = 'pl-book-hint';
+                line.dataset.field = h.field;
+                const what = document.createElement('span');
+                const strong = document.createElement('strong');
+                strong.textContent = h.label;
+                what.append('📇 Saved addresses: ', strong, ` · ${h.why}`);
+                line.append(what, button(`Use ${h.value}`, '', `Change only the ${h.field} to ${h.value}`,
+                    () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: { [h.field]: h.value } } }))));
+                hintsBox.append(line);
+            });
+        }
+        // A fix applied (an option, a hint, an official suggestion): hints about the fields it changed are done with
+        row.addEventListener('pl-ref-use', (e) => {
+            const changed = Object.keys(e.detail.fields || {});
+            if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => { if (changed.includes(l.dataset.field) || e.detail.source === 'book') l.remove(); });
+        });
+    });
+
+    if (!panel) return;
+    const list = panel.querySelector('.pl-issues-list');
+    const summary = panel.querySelector('.pl-issues-summary');
+    const RANK = { bad: 0, warn: 1, info: 2 };
+
+    function issuesOf(row) {
+        const out = [];
+        if (row.classList.contains('pl-no-address')) out.push(['bad', 'No address: left out of the courier CSV', 'missing']);
+        const level = row.dataset.refLevel, soft = row.dataset.refSoft === 'true', message = row.dataset.refMessage || '';
+        if (level === 'mismatch' && !soft) out.push(['warn', `Official data (G-NAF / LINZ): ${message}`, 'official']);
+        if (row.classList.contains('pl-needs-check')) out.push(['warn', 'Not in the address book', 'book']);
+        if (level === 'mismatch' && soft) out.push(['info', `Official data differs from the saved address: ${message}`, 'official-soft']);
+        if (level === 'note') out.push(['info', message, 'note']);
+        row.querySelectorAll('.pl-book-opt strong').forEach((s) => out.push(['info', `Address book has ${s.textContent}`, 'option']));
+        row.querySelectorAll('.pl-book-hint').forEach((l) => out.push(['info', `Saved addresses: ${l.querySelector('strong').textContent}`, 'hint']));
+        return out;
+    }
+    function goTo(row) {
+        if (row.hidden) {  // hidden by the state or text filter: show everything again
+            const state = document.getElementById('courier-state-filter'), text = document.getElementById('courier-text-filter');
+            if (state) { state.value = ''; state.dispatchEvent(new Event('change')); }
+            if (text) { text.value = ''; text.dispatchEvent(new Event('input')); }
+        }
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        row.classList.remove('pl-flash');
+        void row.offsetWidth;  // restart the flash
+        row.classList.add('pl-flash');
+    }
+    function refresh() {
+        const found = rows.map((row, i) => ({ row, i, issues: issuesOf(row) })).filter((x) => x.issues.length);
+        found.sort((a, b) => Math.min(...a.issues.map((x) => RANK[x[0]])) - Math.min(...b.issues.map((x) => RANK[x[0]])) || a.i - b.i);
+        list.replaceChildren();
+        const counts = {};
+        found.forEach(({ row, issues }) => {
+            issues.forEach(([, , kind]) => { counts[kind] = (counts[kind] || 0) + 1; });
+            const li = document.createElement('li');
+            li.className = `pl-issue pl-issue-${issues.map((x) => x[0]).sort((a, b) => RANK[a] - RANK[b])[0]}`;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'pl-issue-go';
+            const num = row.querySelector('.pl-courier-num').textContent.replace(/\D/g, '');  // the number, not the ✏️ button
+            const who = document.createElement('strong');
+            who.textContent = `#${num} ${row.querySelector('.pl-show-receiver').textContent}`;
+            button.append(who);
+            issues.forEach(([level, text]) => {
+                const span = document.createElement('span');
+                span.className = `pl-issue-text pl-issue-${level}`;
+                span.textContent = text;
+                button.append(span);
+            });
+            button.addEventListener('click', () => goTo(row));
+            li.append(button);
+            list.append(li);
+        });
+        const words = [['missing', 'no address'], ['official', "don't match the official data"], ['book', 'not in the address book'],
+                       ['official-soft', 'saved address differs from the official data'], ['note', 'street not on record'],
+                       ['option', 'address-book option'], ['hint', 'saved-address hint']];
+        summary.textContent = found.length
+            ? `${found.length} consignment${found.length === 1 ? '' : 's'}: ` + words.filter(([k]) => counts[k]).map(([k, w]) => `${counts[k]} ${w}`).join(' · ')
+            : '';
+        panel.hidden = !found.length;
+    }
+    let timer = null;
+    const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 60); };
+    // Every change to a row (a fix, Keep as is, a Save, an option used) updates the list
+    new MutationObserver(soon).observe(document.querySelector('.pl-courier-table tbody'),
+        { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-ref-level', 'data-ref-soft'] });
+    refresh();
 });

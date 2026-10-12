@@ -18,8 +18,8 @@ import io
 import json
 import os
 
-from packing_label_generator import _norm, normalize_postcode
-from address_match import best_match, best_by_address, address_score, suggestions
+from engine.packing_labels.packing_label_generator import _norm, normalize_postcode
+from engine.addresses.address_match import best_match, best_by_address, address_score, suggestions
 
 # Only the columns the address book needs are read; everything else in the file is ignored.
 # Each field is recognised by keywords in its header (ignoring capitals and punctuation), so other
@@ -128,7 +128,7 @@ def read_sheets(data, filename):
         with open(path, 'wb') as f:
             f.write(data)
         if ext == '.xls':
-            from matrix_engine import convert_legacy_excel_to_xlsx
+            from engine.packing_sheets.matrix_engine import convert_legacy_excel_to_xlsx
             path = convert_legacy_excel_to_xlsx(path)
         try:
             return _sheets_from_xlsx(path)

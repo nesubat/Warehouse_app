@@ -1,0 +1,1 @@
+"""Packing labels: reading vertical (packing_label_generator) and horizontal (horizontal_distribution) files, drawing the labels (packing_label_generator, horizontal_labels) and stitching courier labels onto them (label_stitcher)."""

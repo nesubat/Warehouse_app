@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - requirements.txt installs it
     import xml.etree.ElementTree as ET
 import pymupdf as fitz
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
-from pdf_engine import code128_modules, _draw_code128, BARCODE_QUIET_MODULES, BARCODE_MAX_MODULE
+from engine.label_shuffler.pdf_engine import code128_modules, _draw_code128, BARCODE_QUIET_MODULES, BARCODE_MAX_MODULE
 
 def extract_rich_value_images(excel_path, sheet_name):
     ns = {
@@ -1070,7 +1070,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     serials: {pack_key: '01T1'}, the label's serial in its tab, written before the store name ('01T1. Blue Star
     Moorabbin') on every page of the pack. tabs: {pack_key: (tab number, tab name)}; a divider page goes between
     the labels of one tab and the next (none before the first tab)."""
-    from packing_specs import split_count
+    from engine.courier.packing_specs import split_count
     addresses = addresses or {}
     doc = fitz.open()
 

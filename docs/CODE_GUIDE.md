@@ -118,21 +118,22 @@ These words appear everywhere in the code. If you're ever confused reading a fun
 
 ```mermaid
 graph TD
-    app["app.py"] --> matrix["matrix_engine.py"]
-    app --> sub["subgroup_engine.py"]
-    app --> pdf["pdf_engine.py"]
-    app --> core["core_math.py"]
-    app --> plg["packing_label_generator.py"]
-    app --> ce["courier_export.py"]
-    app --> ci["courier_import.py"]
-    app --> ar["address_reference.py"]
-    app --> dt["data_transfer.py"]
-    ci --> plg
-    ci --> ce
-    matrix --> core
-    sub --> core
-    ce --> plg
+    app["app.py (routes)"] --> sheets["engine/packing_sheets/<br>matrix_engine · subgroup_engine"]
+    app --> shuffler["engine/label_shuffler/<br>pdf_engine"]
+    app --> labels["engine/packing_labels/<br>packing_label_generator · horizontal_distribution<br>horizontal_labels · label_stitcher"]
+    app --> courier["engine/courier/<br>courier_export · courier_import · packing_specs"]
+    app --> addresses["engine/addresses/<br>address_book · address_match · address_import · address_reference"]
+    app --> core["engine/core/<br>core_math · app_log · paths · data_transfer"]
+    sheets --> core
+    labels --> core
+    courier --> labels
+    addresses --> labels
 ```
+
+The Python files are grouped by feature under one `engine/` folder, one subfolder each; `app.py` stays at the top (the
+start script runs it) and imports from them, e.g. `from engine.courier.courier_export import build_consignments`. A
+module never works out a path from its own file: `engine/core/paths.py` says where the app folder and `data/` are
+(next to the .exe when built).
 
 Only `app.py` talks to Flask/the browser. The engines never render a web page themselves — they take plain Python data in, and return plain Python data (or files on disk) out. This separation means you could, in theory, delete the entire website and still call `generate_all_outputs()` or `generate_packing_labels()` from a Python script.
 
@@ -140,8 +141,15 @@ Only `app.py` talks to Flask/the browser. The engines never render a web page th
 
 ```
 Warehouse_app/
-├── app.py, core_math.py, matrix_engine.py, pdf_engine.py, subgroup_engine.py
-├── packing_label_generator.py, courier_export.py, address_book.py, address_import.py, address_match.py, packing_specs.py, label_stitcher.py
+├── app.py                → the routes (run this)
+├── engine/               → the Python files, grouped by feature
+│   ├── core/             → core_math.py, app_log.py, paths.py, data_transfer.py
+│   ├── packing_sheets/   → matrix_engine.py, subgroup_engine.py
+│   ├── label_shuffler/   → pdf_engine.py
+│   ├── packing_labels/   → packing_label_generator.py, horizontal_distribution.py, horizontal_labels.py, label_stitcher.py
+│   ├── courier/          → courier_export.py, courier_import.py, packing_specs.py
+│   └── addresses/        → address_book.py, address_match.py, address_import.py, address_reference.py
+├── tests/                → pytest tests (python -m pytest -q)
 ├── templates/            → the 5 HTML pages Flask renders
 ├── static/               → script.js + styles.css (shared by all pages)
 ├── docs/CODE_GUIDE.md    → this guide
@@ -1251,9 +1259,9 @@ Because the key is the address alone, packs for **different stores going to the 
 
 **Packs with a receiver name but no address** (a file with only a Store/Receiver column, or rows with no postcode) aren't dropped. `pack_destination()` gives each one a consignment of its own receiver, with the id `name:<receiver>|<whatever address there is>`, so the address book and the ✏️ form can fill it in:
 
-1. **Learned before:** Generate saved that id as a spelling (alias), so the next file fills the address in like any other learned spelling.
-2. **First time:** `_apply_address_book()` looks the receiver up (`find_by_receiver()`). When every saved entry for that receiver is at one address, it's filled in (blue **Address book** tag).
-3. **Several saved addresses, or none:** the row is listed first in red, marked **No address**, with a note above the table. Its ✏️ form lists the receiver's saved addresses to click ("Saved for this receiver"), or says there are none and the address should be typed in.
+1. **Learned before:** Generate saved that id as a spelling (alias), so the next file offers the saved address, like any other learned spelling.
+2. **First time:** `_book_options()` looks the receiver up (`find_by_receiver()`) and offers its saved addresses (up to 3) under the row.
+3. Either way nothing is filled in by itself: the row is listed first in red, marked **No address**, with the options under it ("Saved for this receiver", **Use**) and in its ✏️ form, or nothing when the book has none, and the address should be typed in.
 
 A consignment still without an address when you Generate is left out of the courier CSV, the label map and the address book (`sendable()`). Its label shows just the store name. Packs with neither a name nor an address are left out with a warning, as before.
 
@@ -1400,8 +1408,8 @@ Each pack's **`open360_code`** (serial + the row's code, `01T1QWXK`) is what Sti
 **How it learns**
 
 1. **Generate** calls `record_used()` with every consignment's final address (after any ✏️ edits) and the source ids of all its packs, in one transaction. A known receiver + Attn + address gets its details refreshed and `use_count` + 1. A receiver or Attn not yet saved at that address is added as its **own entry** next to the others (nothing is overwritten); a blank Attn just counts as a use of the receiver's existing entry. A new entry at an address the courier portal already verified is marked verified too. Every raw spelling is pointed at the entry.
-2. **Preview** calls `_apply_address_book()`: for each Excel address not yet asked about, `lookup_aliases()` finds what the book learned for that spelling. If it differs from what was read from Excel, it's applied as an edit marked `'source': 'book'`, and the row shows a blue **Address book** tag.
-3. Each spelling is offered **once per scan** (listed in `__offered__`), so **Reset to Excel** sticks. Saving your own edit replaces the book's.
+2. **Preview** keeps the Excel address as written and calls `_book_options()`: for each Excel address the user hasn't edited, what the book knows becomes an **option** shown under the address (`c['book_options']`, `_option_view()`): the address learned for that spelling ("Saved for this Excel spelling"), who is at an address with no name ("Saved at this address"), a name-only receiver's saved addresses ("Saved for this receiver"), or, for a receiver saved at another address (or this one spelt differently), up to 2 of its saved addresses, verified first (`receiver_entries()`: the same name or a near-identical spelling, `name_score` ≥ 0.85; "Verified for this receiver"). An option that is exactly the Excel address isn't shown. `_option_view(entry, why, current)` also returns `parts` ([text, changed]: words of the street lines the Excel address doesn't have, whole fields otherwise) and `changed`, so the page marks what differs (`mark.pl-diff`). **Keep as is** stores `book_keep` (the Excel address) in the edits: that address gets no options again in this preview. **Use** applies it as an edit marked `'source': 'book'` (blue **Address book** tag); nothing is filled in by itself.
+3. Rows are ordered: no address, then problems (not in the book, the official data disagreeing), then rows with an address-book option or a saved-address hint, then the rest. The **To check** list above the table (`PL_ISSUES`, script.js section 25) gathers every row's problems and options, worst first; a click goes to the row; it follows every fix (a MutationObserver on the table).
 
 So correcting an address once — in the ✏️ form before Generate, or on the Address Book page — fixes it for every future file that spells it the same way.
 
@@ -1631,7 +1639,7 @@ The input is an **address list**: one row per store / receiver, and one column p
 
 ### 10.17 Address Data (`address_reference.py`, `/address-data`)
 
-Official address data kept locally, to check delivery addresses against (on trial: not wired into the previews yet).
+Official address data kept locally, to check delivery addresses against (used by the preview, the address book and the forms: see 10.18).
 
 - **Files:** `data/address_ref_au.db` (G-NAF) and `data/address_ref_nz.db` (LINZ NZ Addresses), one SQLite file per country with the same tables: `locality` (name, state; NZ: suburb + town, territorial authority as `state`), `locality_name` (its names and G-NAF's other names), `locality_postcode` (every postcode used in it: the primary one, aliases', and every address's), `street` (per locality), `number` (first-last per street), `street_type` (`RD` → `ROAD`), `meta` (version, loaded_at, counts). Settings (the LINZ key, last checked) in `data/address_reference.json`.
 - **Loading** (`start(country)`, a background thread, progress in `JOB`, polled by the page): G-NAF's newest GDA2020 PSV zip is found through data.gov.au's CKAN API (`gnaf_latest()`), downloaded with resume after dropped connections (`_download`), and read straight out of the zip (STATE, LOCALITY, LOCALITY_ALIAS, STREET_LOCALITY, ADDRESS_DETAIL per state; retired rows skipped). New Zealand comes from the newest LINZ website export in `reference_downloads` when there is one (`linz_export()`: `lds-nz-addresses*.zip`, a Shapefile; `_dbf_rows()` reads its attribute table without the shapes, columns cut to 10 characters, e.g. `suburb_loc`, `full_road_`, `address_nu`), otherwise page by page through LINZ's WFS as CSV with the API key (`_linz_pages`, 100,000 a page; a 4xx answer stops at once with LINZ's reason). Only `Current` addresses are kept. Each NZ locality is found by its suburb and its town, with and without macrons (`_key` folds accents). Each database is built as `<file>.building` and swapped in with `os.replace`, so lookups carry on and a failed load leaves the old data.
@@ -1643,7 +1651,8 @@ Official address data kept locally, to check delivery addresses against (on tria
 - **`assess(address)`** (address_reference.py): field by field, for the preview and the book: `level` (`ok`, `note`: only the street isn't on record, `mismatch`, `none`), `message`, `fields` ({field: {level `bad` / `note` / `info`, text}}), `options` (one-click fixes, likeliest first). AU: the suburb by its own name, then its other names; a postcode that isn't the suburb's is blamed on the postcode unless the street is found in a suburb of that postcode (then the suburb is: 671 Glenferrie Rd, Richmond 3122 → "The street is in HAWTHORN"); a suburb spelt nearly like one of the postcode's is "spelt …"; a suburb not in the state given → the state. An address the given country doesn't know (unknown suburb, or a postcode that isn't Australian) whose suburb and street are on record in the other country → `country`. The street is only a `note`, a number not on record only `info` (the data lags new streets). Cached per address and `data_version()` (the files' load times), so a big preview is checked once.
 - **Preview** (`_reference_for` in app.py, called by `_check_against_book`): a verified address-book entry at the address settles it (`verified`); an entry kept as is, or `ref_keep` in the preview's edits for this exact address → `kept`; otherwise `assess()`, with `soft` when the address is saved in the book (not verified): then only a grey note. Rows: missing, unverified, then mismatching (not soft), then the rest. The page shows each address as one span per part (`address_parts` macro / `renderAddressParts`), `PL_REF.render` underlines the parts in `fields` and puts the reason, **Use …** (`pl-ref-use` → applied as an edit, counted as checked) and **Keep as is** (`pl-ref-keep` → `ref_keep` in the edits) under it; `PL_REF.recheck` asks `/api/address-data/assess` again after a ✏️ Save or a fix. Generate lists the remaining mismatches on the report (`ref_issues`) and marks kept addresses in the book (`keep_address_as_is`).
 - **Address book** (address_book.py): columns `ref_status`, `ref_detail` (message, fields, options as JSON), `ref_version`, `ref_checked_at`, `ref_kept` (the address_key kept as is: a changed address asks again). `NEEDS_LOOK` (mismatch, not verified, not kept) orders the unfiltered list and is the **Needs a look** filter (`/api/addresses?needs=1`, `needs_look` count in every answer). `recheck_book_async()` checks the entries `stale_for_reference(version)` in a background thread, never on a timer: every entry once after an Address Data load (`start(..., on_done=…)`; the version changes), and after a Generate or an import only the entries those just saved; added or edited entries are checked at once (`_check_entry`). Opening the Address Book checks nothing; while a post-update check runs, the page says so once (no polling). Verified (✓, from the courier portal's CSV) is never set by the official data.
-- **Suggestions while typing** (`attachFieldSuggest` in script.js section 23, `/api/address-data/complete`): saved addresses (verified first, up to 3 each, whose typed field matches), then `address_reference.complete(field, value, context)`: suburb → "RICHMOND VIC 3121" (own names before other names, the typed state and postcode first); postcode → its suburbs; state → the suburb's states; line1/2 → the typed suburb's streets starting like this (street types read as in the checker), or, with no suburb yet, streets anywhere as whole addresses (index `street_key`, added to older databases on first open by `_ensure_indexes`); country → AU / NZ. Enter / ↑ ↓ / Esc work inside the ✏️ form without saving or closing it.
+- **Saved addresses as a suburb directory** (`_locality_hints(dest, ref)` in app.py; `localities(suburb)`, `suburbs_at(postcode)` in address_book.py, index `addresses_suburb`): for each row (not missing, not verified) the state, postcode and country other saved addresses in its suburb have, grouped and ordered verified first, then by how many. Offered only when the best answer is verified or saved more than once and not tied with another, and only for a field that's empty or that the official data can't check (AU with data loaded: suburb, state and postcode are left to it; NZ: only the suburb is); a country is left alone when the official data recognised the address. A row with a postcode and no suburb gets the suburb saved addresses use for it. Shown under the address as 📇 Saved addresses: Postcode 3222 · CURLEWIS is 3222 in 1 verified address **Use 3222** (`c['locality_hints']`, `.pl-book-hints`, script.js section 25); **Use** sends `pl-ref-use` with that one field, so only it changes; a hint disappears once its field is fixed, and each is listed in **To check**.
+- **Suggestions while typing** (`attachFieldSuggest` in script.js section 23, `/api/address-data/complete`): saved places first (suburb: `localities_starting`, "CURLEWIS VIC 3222 · in 1 verified address"; a 4-digit postcode: `suburbs_at`), saved addresses (verified first, up to 3 each, whose typed field matches), then `address_reference.complete(field, value, context)`: suburb → "RICHMOND VIC 3121" (own names before other names, the typed state and postcode first); postcode → its suburbs; state → the suburb's states; line1/2 → the typed suburb's streets starting like this (street types read as in the checker), or, with no suburb yet, streets anywhere as whole addresses (index `street_key`, added to older databases on first open by `_ensure_indexes`); country → AU / NZ. Enter / ↑ ↓ / Esc work inside the ✏️ form without saving or closing it.
 
 ### 10.19 Back up & move data (`data_transfer.py`, `/data-transfer`)
 
@@ -2054,5 +2063,5 @@ sequenceDiagram
 | Change what counts as an abandoned Label Shuffler folder | `app.py` → `is_abandoned_project()` |
 | Change how the courier portal's verified CSV is read or matched | `address_import.py` → `HEADER_NAMES`, `map_columns()`, `build_review()`; how close a "likely match" must be: `address_match.py` → `MIN_NAME`, `MIN_ADDRESS`, `MIN_TOTAL`, `MIN_LEAD` |
 | Change how the address book searches or ranks | `address_book.py` → `_match_query()`, `RANK`, `search()` |
-| Change what the address book saves after Generate, or when it fills addresses in | `address_book.py` → `record_used()`; `app.py` → `_apply_address_book()` |
+| Change what the address book saves after Generate, or what it offers in the preview | `engine/addresses/address_book.py` → `record_used()`; `app.py` → `_book_options()` |
 | Move the address book somewhere else (e.g. a cloud database) | replace `address_book.py`, keeping the `AddressBook` methods; the file path is set in `app.py` (`ADDRESS_BOOK`) |

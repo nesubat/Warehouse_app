@@ -15,9 +15,9 @@ import tempfile
 
 import pymupdf as fitz
 
-from packing_label_generator import generate_packing_labels, draw_report_pages, A4_W, A4_H, MM2PT, _latin
-from pdf_engine import build_divider_sheet
-from horizontal_distribution import pack_blocks, pack_summary
+from engine.packing_labels.packing_label_generator import generate_packing_labels, draw_report_pages, A4_W, A4_H, MM2PT, _latin
+from engine.label_shuffler.pdf_engine import build_divider_sheet
+from engine.packing_labels.horizontal_distribution import pack_blocks, pack_summary
 
 GREEN, RED, AMBER = (0.18, 0.63, 0.36), (0.75, 0.22, 0.17), (0.85, 0.55, 0.0)
 INK, MUTED, RULE = (0.2, 0.2, 0.2), (0.45, 0.45, 0.45), (0.82, 0.82, 0.82)

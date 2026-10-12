@@ -20,7 +20,6 @@ import os
 import shutil
 import sqlite3
 import tempfile
-import time
 import zipfile
 from datetime import datetime
 
@@ -177,7 +176,7 @@ ENTRY_COLUMNS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'po
 def _import_book(book, raw, mode):
     """Merges the exported address book into this one (or replaces it). The export is opened through AddressBook
     first, so a book from an older version of the app is brought up to date before it's read."""
-    from address_book import AddressBook
+    from engine.addresses.address_book import AddressBook
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, 'import.db')
         with open(path, 'wb') as f:

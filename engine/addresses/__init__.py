@@ -1,0 +1,1 @@
+"""Addresses: the address book (address_book), matching saved addresses (address_match), the bulk update from the courier portal (address_import) and the official G-NAF / LINZ data (address_reference)."""

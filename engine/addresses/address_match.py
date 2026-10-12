@@ -12,7 +12,7 @@ Address: the numbers must agree (shop/unit/street numbers like 3047B, 4-10), str
 """
 from difflib import SequenceMatcher
 
-from packing_label_generator import _address_key, _norm
+from engine.packing_labels.packing_label_generator import _address_key, _norm
 
 NAME_NOISE = {'the', 'pty', 'ltd', 'limited', 'co', 'and', 'inc', 'store', 'shop'}
 ADDRESS_NOISE = {'shop', 'level', 'lvl', 'unit', 'suite', 'tenancy', 'cnr', 'corner', 'of', 'and', 'the', 'sc', 's', 'c'}

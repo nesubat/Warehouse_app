@@ -1,13 +1,12 @@
 import os
 import shutil
-import re
 import openpyxl
 import xlwings as xw
 import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
-from core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, update_metadata_for_subgroup, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
+from engine.core.core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
 
 
 
@@ -595,7 +594,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     for i, val in enumerate(sig):
                         if val: 
                             try:
-                                numeric_val = float(val)
+                                float(val)  # only a number counts
                                 totals[i] += (val * p_sum["counts"][sig])
                             except (ValueError, TypeError):
                                 pass  

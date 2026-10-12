@@ -349,18 +349,13 @@
                     {% endif %}
 
 
-                    {% if courier.missing %}
-                    <p class="pl-missing-note" id="courier-missing-note"><strong>{{ courier.missing }} consignment{{ ' has' if courier.missing == 1 else 's have' }} no address</strong> (the file only gives the receiver name).
-                        {{ 'It’s' if courier.missing == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-missing">No address</span>. Open ✏️ to pick one of the receiver's saved addresses or type it in, then Save. Without an address a consignment is left out of the courier CSV.</p>
-                    {% endif %}
-                    {% if courier.unverified %}
-                    <p class="pl-check-note" id="courier-check-note"><strong>{{ courier.unverified }} {{ 'address isn’t' if courier.unverified == 1 else 'addresses aren’t' }} in the address book yet.</strong>
-                        {{ 'It’s' if courier.unverified == 1 else 'They’re' }} listed first, marked <span class="pl-courier-tag pl-tag-check">Check address</span>. Open ✏️ to compare with the closest saved addresses, then Save.</p>
-                    {% endif %}
-                    {% if courier.ref_loaded %}
-                    <p class="pl-ref-note" id="courier-ref-note"{% if not courier.ref_mismatch %} hidden{% endif %}><strong>{{ courier.ref_mismatch }}</strong>
-                        <span>{{ 'address doesn’t' if courier.ref_mismatch == 1 else 'addresses don’t' }}</span> match the official address data (G-NAF / LINZ): the part that differs is underlined in amber, with a suggestion to apply in one click, or Keep as is.</p>
-                    {% endif %}
+                    {# Everything to look at, in one list: no address, not in the address book, the official data (G-NAF / LINZ)
+                       disagreeing, and the address book's options. Built by script.js (PL_ISSUES) from the rows, so it follows
+                       every fix; a click goes to the row. #}
+                    <div class="pl-issues" id="pl-issues" hidden>
+                        <div class="pl-issues-head"><strong>To check</strong> <span class="pl-issues-summary"></span></div>
+                        <ol class="pl-issues-list"></ol>
+                    </div>
                     <table class="pl-courier-table">
                         <thead><tr><th>#</th><th>Receiver</th><th>Address · Items</th><th>Service Code</th></tr></thead>
                         <tbody>
@@ -400,6 +395,10 @@
                             <td class="pl-address-cell">
                                 <div class="pl-show-address">{% if c.address %}{{ address_parts(d) }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
                                 <div class="pl-ref" aria-live="polite"></div>
+                                {# The address book's options: after the problems above; one click puts the address in #}
+                                <div class="pl-book-opts" data-options="{{ (c.book_options or [])|tojson|forceescape }}"></div>
+                                {# What the saved addresses say about this suburb: one field at a time #}
+                                <div class="pl-book-hints" data-hints="{{ (c.locality_hints or [])|tojson|forceescape }}"></div>
                                 <div class="pl-items-label">Items <span class="pl-items-count">{{ c.cartons|length }}</span></div>
                                 <div class="pl-items">{% for x in c.cartons %}
                                 <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
