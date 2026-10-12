@@ -1748,6 +1748,8 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .ad-page .ad-key { margin: 18px 0; }
 .ad-page .ad-key-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
 .ad-page .ad-key-row input { flex: 1; max-width: 420px; padding: 7px 9px; border: 1px solid #ccd1d1; border-radius: 6px; }
+.ad-page .ad-layer-label { display: block; margin-top: 14px; }
+.ad-page .ad-layer-now { margin: 6px 0 0; }
 .ad-page .ad-h2 { margin-top: 30px; }
 .ad-page .ad-lookup { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 12px; align-items: end; }
 .ad-page .ad-lookup label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: #2c3e50; }

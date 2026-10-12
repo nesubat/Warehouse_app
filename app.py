@@ -38,6 +38,7 @@ import secrets
 from engine.courier.courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
+                            save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
 import openpyxl
@@ -1931,7 +1932,8 @@ def address_data_page():
     """Official address data (G-NAF for Australia, LINZ for New Zealand): what's loaded, updates, a lookup tester."""
     return render_template('address_data.html', au=address_reference.loaded_info('AU'), nz=address_reference.loaded_info('NZ'),
                            due=address_reference.reminder(), settings=address_reference.load_settings(),
-                           job=address_reference.job_status(), remind_days=address_reference.REMIND_DAYS)
+                           job=address_reference.job_status(), remind_days=address_reference.REMIND_DAYS,
+                           linz_layer=address_reference.linz_layer_info())
 
 
 @app.route('/api/address-data/key', methods=['POST'])
@@ -1941,6 +1943,18 @@ def api_address_data_key():
     address_reference.save_settings({'linz_key': key})
     log_book.info("Address data: LINZ API key %s", "saved" if key else "removed")
     return {'saved': bool(key)}
+
+
+@app.route('/api/address-data/layer', methods=['POST'])
+def api_address_data_layer():
+    """Sets NZ Addresses' LINZ layer number by hand, for when LINZ republishes it under a new one; blank goes back
+    to looking it up in LINZ's catalogue."""
+    layer = str((request.get_json(silent=True) or {}).get('linz_layer', '')).strip()
+    if layer and not (layer.isdigit() and len(layer) <= 9):
+        return {'error': "A layer number is digits only, e.g. 123113 (from the layer's page address on data.linz.govt.nz)."}, 400
+    address_reference.save_settings({'linz_layer': layer})
+    log_book.info("Address data: NZ Addresses layer %s", f"set by hand to {layer}" if layer else "back to automatic")
+    return {'layer': int(layer) if layer else None}
 
 
 @app.route('/api/address-data/updates')

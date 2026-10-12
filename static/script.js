@@ -2459,6 +2459,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     : r.newer ? `🆕 ${c === 'AU' ? `Newer release: ${r.latest} (${r.size_mb} MB)` : 'Worth refreshing: LINZ updates every week'}${r.loaded ? '' : ' (not loaded yet)'}`
                               : `✓ Up to date (${r.latest})`;
                 el.classList.toggle('ad-newer', !!r.newer);
+                if (c === 'NZ' && r.layer) showLayerCheck(el, r.layer);
             });
             $('ad-last-checked').textContent = 'Last checked just now';
         } catch (err) { alert('Could not check for updates.'); }
@@ -2469,6 +2470,31 @@ document.addEventListener('DOMContentLoaded', function () {
         const res = await fetch('/api/address-data/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ linz_key: $('ad-linz-key').value }) });
         $('ad-key-status').textContent = (await res.json()).saved ? '✓ Saved' : 'Removed';
     });
+
+    // NZ Addresses' LINZ layer: blank = looked up in LINZ's catalogue, a number = set by hand
+    $('ad-layer-save').addEventListener('click', async () => {
+        const res = await fetch('/api/address-data/layer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ linz_layer: $('ad-linz-layer').value.trim() }) });
+        const data = await res.json();
+        $('ad-layer-status').textContent = data.error ? `⚠ ${data.error}`
+            : data.layer ? `✓ Saved: the next NZ download uses layer ${data.layer}` : '✓ Automatic: looked up in LINZ’s catalogue';
+    });
+
+    // After "Check for updates": what LINZ lists now against the layer the loaded data came from
+    function showLayerCheck(el, info) {
+        const note = document.createElement('div');
+        if (info.moved) {
+            note.textContent = `⚠ LINZ has moved NZ Addresses: it's layer ${info.catalogue} now, your NZ data came from layer ${info.used}. `
+                + (info.hand && info.hand !== info.catalogue ? `Your layer box says ${info.hand}: clear it (or type ${info.catalogue}), save, then Download & load.`
+                                                             : 'Download & load to switch to it.');
+            note.className = 'ad-newer';
+        } else if (info.catalogue) {
+            note.textContent = `✓ LINZ layer ${info.catalogue}${info.used ? ` (same as your NZ data)` : ''}`
+                + (info.hand && info.hand !== info.catalogue ? `. Your layer box says ${info.hand}: clear it unless you need that one.` : '');
+        } else {
+            note.textContent = `Couldn't reach LINZ's catalogue to check the layer number.`;
+        }
+        el.appendChild(note);
+    }
 
     function renderResult(r) {
         return `<div class="ad-status ad-status-${r.status}">${STATUS[r.status] || r.status} <span class="issue-detail">${esc(r.country)} · ${r.ms} ms</span></div>`
