@@ -2960,7 +2960,7 @@ document.addEventListener('DOMContentLoaded', function () {
         (review.specs || []).forEach((sp) => tiers.fix.push({
             key: `spec:${sp.spec}`,
             title: sp.unread ? `Couldn't read the size from packing spec ${sp.spec}` : `No size saved for packing spec ${sp.spec}`,
-            detail: `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press "Auto-Map & Update Previews".`,
+            detail: `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press 🔄 Update Previews.`,
             link: { href: sp.url, text: sp.unread ? '📐 Check the code in Packing Specs' : '📐 Add its size in Packing Specs' },
             entries: sp.consignments.map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
         (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text }));

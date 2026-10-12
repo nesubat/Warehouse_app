@@ -200,7 +200,7 @@
         <h3 class="pl-file-detected">
             ✅ File Detected: {{ filename }}
         </h3>
-        {{ open_excel(filename) }}
+        {{ open_excel(filename, 'pl-form' if previews else None) }}
 
         <!-- Single form handles both Preview and Generate. novalidate: Update Previews always goes through;
              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
@@ -225,13 +225,13 @@
             </div>
             {% endfor %}
             
-            <button type="submit" name="preview" class="btn-full pl-btn-preview">Auto-Map & Update Previews</button>
+            <button type="submit" name="preview" class="btn-full pl-btn-preview">Auto-Map</button>
 
             <!-- STEP 3: PREVIEW & GENERATE -->
             {% if previews %}
             <hr class="hr-divider pl-preview-divider" id="preview-section">
             <h3>🗺️ Data Previews</h3>
-            <p class="pl-preview-hint">Edit the Header Row above and click "Update Previews" if the metrics below look incorrect.</p>
+            <p class="pl-preview-hint">Edit the Header Row above and click "Auto-Map" if the metrics below look incorrect. After changing the file in Excel, save it and click 🔄 Update Previews (bottom right).</p>
             {% if file_note %}
             <p class="pl-file-note{% if file_note.excel == 'busy' %} pl-file-note-warn{% endif %}">
                 📄 Read <strong>{{ filename }}</strong> as saved at <strong>{{ file_note.saved_at }}</strong>.
@@ -292,7 +292,7 @@
             
             {% if lock.has_error %}
                 <div class="warning-box warning-box-center">
-                    ❌ Generation is locked. Please fix the formatting errors in your Excel file, save it, then click "Update Previews" above to recheck.
+                    ❌ Generation is locked. Please fix the formatting errors in your Excel file, save it, then click 🔄 Update Previews (bottom right) to recheck.
                 </div>
                 <button type="button" class="btn-generate btn-locked" disabled>Cannot Generate</button>
             {% else %}
@@ -301,7 +301,7 @@
                 {% if courier %}
                 <div class="pl-courier">
                     <h4 class="pl-config-title">Courier Consignments</h4>
-                    <p class="pl-config-hint">{{ courier.carton_count }} {{ 'items' if courier_mode else 'cartons' }} in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then "Auto-Map &amp; Update Previews" to regroup.</p>
+                    <p class="pl-config-hint">{{ courier.carton_count }} {{ 'items' if courier_mode else 'cartons' }} in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then 🔄 Update Previews to regroup.</p>
                     <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
                     <input type="hidden" id="carton-weights" name="carton_weights" value="{{ courier.weights_json }}">
 
