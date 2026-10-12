@@ -1832,3 +1832,38 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-optional-tag { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 10px; background: #eaf2f8; color: #1f618d;
     font-size: 12px; font-weight: 600; vertical-align: middle; }
 .pl-page .pl-divider-choice { margin-bottom: 14px; }
+
+/* Address book options under the address (after any problem) */
+.pl-page .pl-book-opts:empty { display: none; }
+.pl-page .pl-book-opts { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+.pl-page .pl-book-opt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: #2471a3;
+                        background: #f4f9fd; border: 1px solid #d6eaf8; border-radius: 6px; padding: 4px 8px; }
+.pl-page .pl-book-opt-text strong { color: #1b4f72; }
+.pl-page .pl-book-opt .pl-btn-small { padding: 2px 10px; font-size: 12px; }
+
+/* "To check": every row's problems and options in one list above the table */
+.pl-page .pl-issues { margin: 14px 0 10px; background: #fff; border: 1px solid #f5d77a; border-left: 4px solid #f0b400; border-radius: 6px; padding: 10px 14px; }
+.pl-page .pl-issues-head { font-size: 14px; margin-bottom: 6px; }
+.pl-page .pl-issues-summary { color: #7f8c8d; font-size: 13px; margin-left: 6px; }
+.pl-page .pl-issues-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.pl-page .pl-issue + .pl-issue { border-top: 1px solid #f4f6f6; }
+.pl-page .pl-issue-go { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; width: 100%; text-align: left; background: none;
+                        border: 0; padding: 5px 4px; cursor: pointer; font: inherit; font-size: 13px; color: #2c3e50; }
+.pl-page .pl-issue-go:hover { background: #fbfcfc; }
+.pl-page .pl-issue-go strong { min-width: 180px; }
+.pl-page .pl-issue-text.pl-issue-bad { color: #c0392b; font-weight: 600; }
+.pl-page .pl-issue-text.pl-issue-warn { color: #9c640c; }
+.pl-page .pl-issue-text.pl-issue-info { color: #2471a3; }
+.pl-page .pl-con-row.pl-flash > td { animation: pl-flash 1.6s ease-out; }
+@keyframes pl-flash { 0% { background: #fdebd0; } 100% { background: inherit; } }
+@media (prefers-reduced-motion: reduce) { .pl-page .pl-con-row.pl-flash > td { animation: none; outline: 2px solid #f0b400; } }
+
+/* Address book option: what differs from the address shown */
+.pl-page .pl-book-opt mark.pl-diff { background: #fdebd0; color: #9c4f0c; border-radius: 3px; padding: 0 2px; }
+.pl-page .pl-book-opt .pl-btn-plain { background: #fff; }
+/* Saved addresses' hints about the suburb: one field each */
+.pl-page .pl-book-hints:empty { display: none; }
+.pl-page .pl-book-hints { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+.pl-page .pl-book-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: #2471a3;
+                         border: 1px dashed #aed6f1; border-radius: 6px; padding: 3px 8px; }
+.pl-page .pl-book-hint .pl-btn-small { padding: 2px 10px; font-size: 12px; }

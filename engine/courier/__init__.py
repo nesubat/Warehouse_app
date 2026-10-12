@@ -1,0 +1,1 @@
+"""Courier CSVs: consignments, addresses and the Open360 / OpenFreight files (courier_export), Courier Import's address lists (courier_import) and the sizes and weights per Packing Spec (packing_specs)."""

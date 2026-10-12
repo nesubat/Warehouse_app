@@ -3,7 +3,7 @@ import json
 import re
 import xlwings as xw
 from openpyxl.utils import get_column_letter
-from core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, get_next_stage_filenames, close_if_open_elsewhere
+from engine.core.core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, close_if_open_elsewhere
 
 
 class SubgroupValidationError(Exception):
@@ -318,7 +318,6 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     merge_range.api.HorizontalAlignment = -4108
 
                     original_font_size = ws1.range((pack_group_row, s_col)).font.size
-                    original_font_color = ws1.range((pack_group_row, s_col)).font.color
                     original_color = ws1.range((pack_group_row, s_col)).color
                     merge_range.color = original_color
                     merge_range.font.size = original_font_size
@@ -394,7 +393,6 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             pass
 
     # Save Metadata Tracker
-    meta_path = os.path.join(project_dir, "project_metadata.json")
     with open(new_json_path, 'w') as f:
         json.dump(metadata, f, indent=4)
         

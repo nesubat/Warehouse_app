@@ -22,9 +22,9 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
-from packing_label_generator import (_header_field, _issue, _row_ranges, _norm, _address_key, PackCheckError,
+from engine.packing_labels.packing_label_generator import (_header_field, _issue, _row_ranges, _norm, _address_key, PackCheckError,
                                      ADDRESS_FIELDS)
-from courier_export import job_series, _tidy, attn_text
+from engine.courier.courier_export import job_series, attn_text
 
 # The columns the Column mapping can set by hand: (field, label, required). The pack columns are added per file
 # as 'pack_<number>' fields (pack_fields()).

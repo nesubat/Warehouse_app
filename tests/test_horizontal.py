@@ -19,8 +19,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fixtures import build_final_file, build_signature_links  # noqa: E402
-from horizontal_distribution import read_horizontal, read_signature_file, item_references  # noqa: E402
-from packing_label_generator import PackCheckError, assign_barcodes  # noqa: E402
+from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file, item_references  # noqa: E402
+from engine.packing_labels.packing_label_generator import PackCheckError, assign_barcodes  # noqa: E402
 
 FINAL = "Final J476699 Spring rollout.xlsx"
 SIG = "Signature links_J476699.xlsx"
@@ -130,7 +130,7 @@ def test_barcode_kinds_of_vertical_files_unchanged():
 
 
 def test_stitcher_reads_horizontal_codes():
-    from label_stitcher import find_code
+    from engine.packing_labels.label_stitcher import find_code
     known = {"03T1P2", "12T2P1"}
     assert find_code("Item Ref: 03T1P2 Chadstone", known) == "03T1P2"
     assert find_code("Item Reference 12T2P1 Rundle Mall", known) == "12T2P1"
@@ -139,7 +139,7 @@ def test_stitcher_reads_horizontal_codes():
 
 
 def test_signature_links_tabs_skipped_by_shuffler():
-    from core_math import NOT_STORE_TABS, LABEL_PLUGIN_SHEET, DIVIDER_BARCODE_SHEET
+    from engine.core.core_math import NOT_STORE_TABS, LABEL_PLUGIN_SHEET, DIVIDER_BARCODE_SHEET
     assert set(NOT_STORE_TABS) == {LABEL_PLUGIN_SHEET, DIVIDER_BARCODE_SHEET}
 
 
@@ -172,7 +172,7 @@ def run_page(client, final, sig, dividers=True):
     preview = r.data.decode()
     assert "Cannot Generate" not in preview, preview[preview.find("issue"):][:800]
     assert "Signature Links loaded" in preview
-    from courier_export import SERVICE_CODES
+    from engine.courier.courier_export import SERVICE_CODES
     service = SERVICE_CODES[0][0]
     gen = {**form, "generate": "1", "who_pays": "S", "service_code": service, "reference": "J476699",
            "project_name": "Spring rollout", "courier_csv": ["open360", "openfreight"],
@@ -228,7 +228,7 @@ def test_courier_labels_stitch_onto_their_packing_labels(client, files):
     """Courier labels booked from the Open360 CSV (Item Ref '03T1P2 Chadstone'), in any order, land on their own
     packing label; a pack of two boxes takes two."""
     import csv
-    from label_stitcher import stitch
+    from engine.packing_labels.label_stitcher import stitch
     final, sig, _ = files
     folder = run_page(client, final, sig)
     names = os.listdir(folder)
@@ -250,7 +250,7 @@ def test_courier_labels_stitch_onto_their_packing_labels(client, files):
 
 def test_pack_tag_leaves_packing_spec_full_size(tmp_path):
     """The PACK/CODE tag must not shrink the Packing Spec printed under it (they once shared a variable)."""
-    from packing_label_generator import generate_packing_labels
+    from engine.packing_labels.packing_label_generator import generate_packing_labels
     group = lambda tag: {"g": {"pack_spec_name": "2 x CS450320150", "store_name": "Chadstone", "receiver_name": "", "install": False,
                                "address_1": "", "address_2": "", "suburb": "", "state": "", "postcode": "", "country": "",
                                "pack_tag": tag, "excel_rows": [9], "items": [{"job_no": "J1-01", "qty": "1", "desc": "", "dimension": "",

@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import xlwings as xw
 import pandas as pd
 
 # Extra tab in the Signature Links file (File 3) holding the job numbers behind every code of

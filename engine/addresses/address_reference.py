@@ -12,6 +12,7 @@ swapped in only when complete: lookups carry on during an update, and a failed u
 check_address(address) says whether suburb + postcode + state belong together, whether the street is in that suburb and
 whether the number is on it, with suggestions and the time it took.
 """
+from engine.core import paths
 import csv
 import difflib
 import io
@@ -26,7 +27,7 @@ import urllib.request
 import zipfile
 from datetime import datetime
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+DATA_DIR = paths.DATA_DIR  # the app folder's data/, not this package's folder
 DOWNLOADS = os.path.join(DATA_DIR, 'reference_downloads')
 DB_PATHS = {'AU': os.path.join(DATA_DIR, 'address_ref_au.db'), 'NZ': os.path.join(DATA_DIR, 'address_ref_nz.db')}
 SETTINGS_FILE = os.path.join(DATA_DIR, 'address_reference.json')  # LINZ key, what's loaded, last checked

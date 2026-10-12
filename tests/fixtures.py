@@ -20,7 +20,7 @@ from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core_math import (generate_pack_signatures, label_plugin_rows, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS,  # noqa: E402
+from engine.core.core_math import (generate_pack_signatures, label_plugin_rows, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS,  # noqa: E402
                        DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS)
 
 ADDRESS = ["Store Name", "Attn", "Address 1", "Suburb", "State", "Postcode", "Install"]

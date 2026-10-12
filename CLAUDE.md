@@ -13,16 +13,22 @@ Full plain-language guide to every file: `docs/CODE_GUIDE.md`. Feature list: `RE
 - The hook in `.claude/settings.json` lints each edited `.py` and runs the tests; fix what it reports before moving on
 
 ## Where things are
-- `matrix_engine.py` Packing Sheets (xlwings). Writes Final file (a "Code for Pack <name>" column at the start of
+Code is grouped by feature under `engine/`; `app.py` (routes) stays at the top and imports from it
+(`from engine.courier.courier_export import …`). Paths to `data/` and the app folder come from `engine/core/paths.py`.
+- `engine/core/` shared: `core_math.py`, `app_log.py`, `paths.py`, `data_transfer.py` (Back up & Move).
+- `engine/packing_sheets/matrix_engine.py` Packing Sheets (xlwings). Writes Final file (a "Code for Pack <name>" column at the start of
   each selected pack), Packing Sheet, and Signature Links (a tab of store codes per tab, `Divider Barcodes`,
-  `Label Plugin`). `subgroup_engine.py` adds "Code for pack <name>: 1-5" columns.
-- `pdf_engine.py` Label Shuffler (codes A, B … Z, AA order, divider sheets, audit report).
-- `packing_label_generator.py` vertical files → packing labels (`parse_packing_data`, `generate_packing_labels`).
-- `horizontal_distribution.py` + `horizontal_labels.py` horizontal files → the same pack groups → labels in
+  `Label Plugin`). `engine/packing_sheets/subgroup_engine.py` adds "Code for pack <name>: 1-5" columns.
+- `engine/label_shuffler/pdf_engine.py` Label Shuffler (codes A, B … Z, AA order, divider sheets, audit report).
+- `engine/packing_labels/packing_label_generator.py` vertical files → packing labels (`parse_packing_data`, `generate_packing_labels`).
+- `engine/packing_labels/horizontal_distribution.py` + `horizontal_labels.py` horizontal files → the same pack groups → labels in
   packing-sheet order (audit page per pack, divider per code). Item Reference `03T1P2 Store`. Each label starts
   with a box per packing-sheet code (`code_cells`: header in the job number's place, code in the quantity's).
-- `courier_import.py`, `courier_export.py` consignments and the Open360 / OpenFreight CSVs.
-- `label_stitcher.py` puts courier labels on packing labels by the code in their Item Ref.
+- `engine/courier/`: `courier_import.py`, `courier_export.py` consignments and the Open360 / OpenFreight CSVs;
+  `packing_specs.py` sizes and weights per Packing Spec.
+- `engine/addresses/`: `address_book.py`, `address_match.py`, `address_import.py` (bulk update), `address_reference.py`
+  (official G-NAF / LINZ data).
+- `engine/packing_labels/label_stitcher.py` puts courier labels on packing labels by the code in their Item Ref.
 - `app.py` routes. Packing Labels, horizontal labels and Courier Import share `_distribution_page(mode)`.
 
 ## Rules that keep labels right
@@ -31,7 +37,7 @@ Full plain-language guide to every file: `docs/CODE_GUIDE.md`. Feature list: `RE
 - Code order is `(len(code), code)` everywhere (Packing Sheets, Shuffler, labels). Don't invent another.
 - Item References must stay unique within a job and match what Stitch Labels parses (`label_stitcher.find_code`).
 - Changing barcode text, references or label order changes what's printed: add or update a test in `tests/`.
-- Signature Links tabs that aren't store codes are listed in `core_math.NOT_STORE_TABS`; add new ones there.
+- Signature Links tabs that aren't store codes are listed in `engine.core.core_math.NOT_STORE_TABS`; add new ones there.
 
 ## Security (applied; keep it that way)
 - Local app on 127.0.0.1. Actions are guarded by `same_origin_only` in `app.py`; don't add GET routes that change
