@@ -257,12 +257,13 @@ def read_allocation(excel_path, header_row, sheet_name=None, columns=None):
     if no_packs:
         warnings.append(_issue(_row_ranges(no_packs), store_ref, "No pack for this store (blank or x in every pack column): left out"))
     if no_receiver:
-        warnings.append(_issue(_row_ranges(no_receiver), store_ref, "Pack spec with no store and no address: left out"))
+        warnings.append(_issue(_row_ranges(no_receiver), store_ref, "Pack spec with no store and no address: left out", major=True))
     if no_address:
-        warnings.append(_issue(_row_ranges(no_address), address_ref, "No address"))
+        warnings.append(_issue(_row_ranges(no_address), address_ref, "No address", major=True))
     for n, rows in numbers_only.items():
         warnings.append(_issue(_row_ranges(rows), pack_ref(n), "A number, not a Packing Spec",
-                               "The pack's cell should hold its spec (e.g. OB600100100), or x when the store doesn't get it."))
+                               "The pack's cell should hold its spec (e.g. OB600100100), or x when the store doesn't get it.",
+                               major=True))
     for name, first, row in twice:
         warnings.append(_issue(f"{first}, {row}", store_ref, f"{name} listed twice at the same address",
                                "Their packs go in one consignment."))

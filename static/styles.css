@@ -1110,6 +1110,16 @@ button:hover {
 .issue-heading { margin: 0; font-size: 14px; }
 .issue-heading.error { color: #c0392b; }
 .issue-heading.warning { color: #a04000; margin-top: 14px; }
+/* A problem that makes labels, units or consignments go missing: generation goes on, but it can't be missed */
+.issue-heading.major { color: #c0392b; margin-top: 14px; font-weight: 700; }
+.issue-table tr.issue-major td { background: #fdedec; }
+.issue-table tr.issue-major td:first-child { border-left: 4px solid #c0392b; }
+.issue-major-tag { display: inline-block; background: #c0392b; color: #fff; font-size: 11px; font-weight: 700; padding: 1px 7px;
+                   border-radius: 10px; margin-right: 4px; vertical-align: 1px; }
+.issue-table tr.issue-major .issue-text { font-weight: 600; }
+.issue-count { color: #7f8c8d; font-weight: 400; }
+.issue-where { color: #34495e; font-size: 12px; margin-top: 2px; font-variant-numeric: tabular-nums; font-weight: 400; }
+.issue-see-below { font-size: 13px; color: #566573; margin: 4px 0 0; }
 
 .sticky-nav .divider { color: #ccc; }
 
@@ -1120,7 +1130,6 @@ button:hover {
 .pl-page .pl-instructions { margin-bottom: 30px; }
 .pl-page .pl-submit { margin-top: 10px; }
 .pl-page .pl-file-detected { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.pl-page .pl-open-file { font-size: 13px; }
 .pl-page .pl-header-row-group { margin-bottom: 5px; }
 .pl-page .pl-header-row-field { width: 250px; }
 .pl-page .pl-btn-preview { background-color: #f39c12; }
@@ -1318,9 +1327,11 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 
 /* Consignments whose address isn't in the address book: listed first, amber, with the closest saved addresses */
 .pl-page .pl-check-note { background: #fff8e1; border: 1px solid #f5d27a; border-radius: 6px; padding: 10px 12px; margin: 14px 0 0; font-size: 13px; color: #6d4c00; }
-.pl-page .pl-tag-check { border-color: #e0a100; color: #9a6700; background: #fff8e1; margin-left: 4px; }
-.pl-page .pl-con-row.pl-needs-check > td { background: #fffbef; }
-.pl-page .pl-con-row.pl-needs-check > td:first-child { box-shadow: inset 4px 0 0 #f0b400; }
+.pl-page .pl-tag-check { border-color: #ccd1d1; color: #7f8c8d; background: #f8f9f9; margin-left: 4px; }
+.pl-page .pl-con-row.pl-needs-check > td:first-child { box-shadow: inset 4px 0 0 #d5d8dc; }
+/* A row with a problem that needs attention first (set by script.js section 25) */
+.pl-page .pl-con-row.pl-row-major > td { background: #fef5f4; }
+.pl-page .pl-con-row.pl-row-major > td:first-child { box-shadow: inset 4px 0 0 #e74c3c; }
 .pl-page .pl-also-for { margin-top: 3px; }
 .pl-page .pl-closest { margin: 6px 0 10px; max-width: 760px; }
 .pl-page .pl-closest-title { font-size: 13px; font-weight: 600; color: #2c3e50; margin-bottom: 6px; }
@@ -1351,6 +1362,7 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .ps-na { color: #bdc3c7; }
 .ps-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; font-size: 11px; font-weight: 600; border: 1px solid #e0a100; color: #9a6700; background: #fff8e1; border-radius: 3px; }
 .ps-table tr.ps-needs > td { background: #fffbef; }
+.ps-table tr.ps-focus > td { background: #eaf2f8; box-shadow: inset 0 2px 0 #2471a3, inset 0 -2px 0 #2471a3; }
 .ps-table tr.ps-row-error > td { background: #fdedec; }
 .ps-error { color: #a93226; font-size: 13px; padding-top: 0; }
 .ps-remove { white-space: nowrap; font-size: 13px; color: #7f8c8d; }
@@ -1847,15 +1859,36 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-issues { margin: 14px 0 10px; background: #fff; border: 1px solid #f5d77a; border-left: 4px solid #f0b400; border-radius: 6px; padding: 10px 14px; }
 .pl-page .pl-issues-head { font-size: 14px; margin-bottom: 6px; }
 .pl-page .pl-issues-summary { color: #7f8c8d; font-size: 13px; margin-left: 6px; }
-.pl-page .pl-issues-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
-.pl-page .pl-issue + .pl-issue { border-top: 1px solid #f4f6f6; }
-.pl-page .pl-issue-go { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; width: 100%; text-align: left; background: none;
-                        border: 0; padding: 5px 4px; cursor: pointer; font: inherit; font-size: 13px; color: #2c3e50; }
-.pl-page .pl-issue-go:hover { background: #fbfcfc; }
-.pl-page .pl-issue-go strong { min-width: 180px; }
-.pl-page .pl-issue-text.pl-issue-bad { color: #c0392b; font-weight: 600; }
-.pl-page .pl-issue-text.pl-issue-warn { color: #9c640c; }
-.pl-page .pl-issue-text.pl-issue-info { color: #2471a3; }
+.pl-page .pl-issues.pl-issues-urgent { border-color: #f1948a; border-left-color: #c0392b; }
+.pl-page .pl-issues-list { max-height: 460px; overflow-y: auto; }
+.pl-page .pl-tier + .pl-tier { margin-top: 10px; }
+.pl-page .pl-tier-head { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 4px 0; }
+.pl-page .pl-tier-why { text-transform: none; letter-spacing: 0; font-weight: 400; color: #7f8c8d; }
+.pl-page .pl-tier-fix .pl-tier-head { color: #c0392b; }
+.pl-page .pl-tier-check .pl-tier-head { color: #9c640c; }
+.pl-page .pl-tier-info .pl-tier-head { color: #7f8c8d; cursor: pointer; }
+.pl-page .pl-issue-groups { list-style: none; margin: 0; padding: 0; }
+.pl-page .pl-issue-group { padding: 6px 8px 6px 10px; border-left: 3px solid #f0b400; background: #fffdf5; border-radius: 0 4px 4px 0; }
+.pl-page .pl-issue-group + .pl-issue-group { margin-top: 6px; }
+.pl-page .pl-tier-fix .pl-issue-group { border-left: 4px solid #c0392b; background: #fdf2f1; }
+.pl-page .pl-tier-info .pl-issue-group { border-left-color: #d5d8dc; background: #fbfcfc; }
+.pl-page .pl-issue-title { font-size: 13px; font-weight: 600; color: #2c3e50; }
+.pl-page .pl-tier-fix .pl-issue-title { color: #922b21; }
+.pl-page .pl-issue-count { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 9px; background: #e5e8e8; color: #2c3e50;
+                           font-size: 11px; text-align: center; font-weight: 700; }
+.pl-page .pl-issue-detail, .pl-page .pl-issue-where { font-size: 12px; color: #7f8c8d; margin-top: 2px; }
+.pl-page .pl-issue-where { color: #34495e; font-variant-numeric: tabular-nums; }
+.pl-page .pl-issue-link { display: inline-block; font-size: 12px; font-weight: 700; color: #fff; background: #2471a3; padding: 2px 8px;
+                          border-radius: 4px; text-decoration: none; margin-right: 2px; }
+.pl-page .pl-issue-link:hover { background: #1a5276; }
+.pl-page .pl-issue-entries { margin-top: 4px; }
+.pl-page .pl-issue-more { background: none; border: 0; color: #2471a3; font: inherit; font-size: 12px; cursor: pointer; padding: 3px 4px; }
+.pl-page .pl-issue-more:hover { text-decoration: underline; }
+.pl-page .pl-issue-go { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline; width: 100%; text-align: left; background: none;
+                        border: 0; padding: 3px 4px; cursor: pointer; font: inherit; font-size: 13px; color: #2c3e50; border-radius: 3px; }
+.pl-page .pl-issue-go:hover { background: rgba(0, 0, 0, .04); }
+.pl-page .pl-issue-go strong { min-width: 180px; font-weight: 600; }
+.pl-page .pl-issue-go .pl-issue-text { color: #566573; }
 .pl-page .pl-con-row.pl-flash > td { animation: pl-flash 1.6s ease-out; }
 @keyframes pl-flash { 0% { background: #fdebd0; } 100% { background: inherit; } }
 @media (prefers-reduced-motion: reduce) { .pl-page .pl-con-row.pl-flash > td { animation: none; outline: 2px solid #f0b400; } }
@@ -1869,3 +1902,15 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-book-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: #2471a3;
                          border: 1px dashed #aed6f1; border-radius: 6px; padding: 3px 8px; }
 .pl-page .pl-book-hint .pl-btn-small { padding: 2px 10px; font-size: 12px; }
+
+/* The floating "Open Excel" button (_open_excel.html, script.js section 26): placed by the script, under the nav bar */
+.fx-open { position: fixed; right: 16px; bottom: 16px; z-index: 900; display: flex; align-items: center; gap: 2px;
+           background: #fff; border: 1px solid #d5d8dc; border-radius: 22px; padding: 3px 4px 3px 2px;
+           box-shadow: 0 4px 14px rgba(0, 0, 0, .18); transition: top .15s ease; }
+.fx-open[style*="top"] { right: auto; bottom: auto; }
+.fx-open[hidden] { display: none; }
+.fx-open.fx-dragging { transition: none; box-shadow: 0 8px 22px rgba(0, 0, 0, .25); }
+.fx-open-grip { cursor: grab; color: #95a5a6; padding: 4px 5px; font-size: 15px; line-height: 1; user-select: none; touch-action: none; }
+.fx-open.fx-dragging .fx-open-grip { cursor: grabbing; }
+.fx-open .fx-open-btn { border-radius: 18px; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .fx-open { transition: none; } }

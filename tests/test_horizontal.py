@@ -148,8 +148,19 @@ def test_signature_links_tabs_skipped_by_shuffler():
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     import app as app_module
+    from engine.addresses.address_book import AddressBook
+    from engine.courier.packing_specs import SpecStore
     monkeypatch.setitem(app_module.app.config, "UPLOAD_FOLDER", str(tmp_path / "projects"))
     os.makedirs(tmp_path / "projects", exist_ok=True)
+    # Every store the page reads or writes on temp files of the test's own: Generate saves addresses, service codes
+    # and kept pages, and the preview adds unknown packing specs; none of it may reach the real data/ folder
+    data = tmp_path / "data"
+    os.makedirs(data, exist_ok=True)
+    monkeypatch.setattr(app_module, "ADDRESS_BOOK", AddressBook(str(data / "address_book.db")))
+    monkeypatch.setattr(app_module, "SPEC_STORE", SpecStore(str(data / "packing_specs.json")))
+    monkeypatch.setattr(app_module, "SERVICE_USAGE_FILE", str(data / "service_code_usage.json"))
+    monkeypatch.setattr(app_module, "EXPORT_FILE", str(data / "export_details.json"))
+    monkeypatch.setattr(app_module, "VIEW_FOLDER", str(data / "page_views"))
     for name in ("close_if_open_elsewhere", "save_if_open_elsewhere"):  # Excel-only helpers
         monkeypatch.setattr(app_module, name, lambda *a, **k: None)
     monkeypatch.setattr(app_module, "convert_legacy_excel_to_xlsx", lambda p: p)
@@ -321,3 +332,63 @@ def test_page_offers_layout_blocks_and_previews_code_box_first(client, files):
     first, item = preview["items"][0], preview["items"][1]
     assert first["job_no"].startswith("Code for Pack") and not first["modules"]  # the code box: no barcode
     assert item["job_no"].startswith("J476699") and item["modules"]
+
+
+# ------------------------------------------------------------------ problems ranked and grouped
+
+def test_issues_grouped_with_major_first():
+    """The same problem on many rows is one line listing the rows; the ones that lose labels or units come first."""
+    from engine.packing_labels.packing_label_generator import _issue, group_issues
+    issues = [_issue("4", "C", "No artwork image"),
+              _issue("11", "Pack 1", "Packing Spec but no quantities: no label made", major=True),
+              _issue("13", "Pack 1", "Packing Spec but no quantities: no label made", major=True),
+              _issue("19", "Pack 2", "Packing Spec but no quantities: no label made", major=True)]
+    groups = group_issues(issues)
+    assert [g["text"] for g in groups] == ["Packing Spec but no quantities: no label made", "No artwork image"]
+    assert groups[0]["major"] and groups[0]["count"] == 3
+    assert groups[0]["where"] == ["Pack 1: rows 11, 13", "Pack 2: row 19"]
+    assert not groups[1]["major"] and groups[1]["where"] == ["C: row 4"]
+
+
+def _spec_without_quantities(tmp_path, monkeypatch):
+    """The sample file with Carindale given pack 2's spec but no units in it, and Garden City pack 1's."""
+    import fixtures
+    tabs = copy.deepcopy(fixtures.TABS)
+    stores = tabs["Spring Sale"]["stores"]
+    for i, st in enumerate(stores):
+        if st[0] == "Carindale":
+            stores[i] = st[:7] + (["OB600100100", "CS450320150"], st[8])
+        if st[0] == "Garden City":
+            stores[i] = st[:7] + (["OB600100100", "CS450320150"], st[8])
+    monkeypatch.setattr(fixtures, "TABS", tabs)
+    codes = build_final_file(tmp_path / FINAL)
+    build_signature_links(tmp_path / SIG, codes)
+    return tmp_path / FINAL, tmp_path / SIG
+
+
+def test_packing_spec_without_quantities_is_major(tmp_path, monkeypatch):
+    final, sig = _spec_without_quantities(tmp_path, monkeypatch)
+    _, _, _, warnings = read(final, sig=sig)
+    found = [w for w in warnings if w["text"].startswith("Packing Spec but no quantities")]
+    assert {(w["rows"], w["col"]) for w in found} == {("13", "Pack 2"), ("15", "Pack 1")}
+    assert all(w["major"] for w in found)
+
+
+def test_preview_ranks_file_problems_and_has_one_open_excel_button(client, tmp_path, monkeypatch):
+    """The preview's To check list gets the file's problems, grouped, major first; the page has one floating Open
+    Excel button and none fixed in the heading."""
+    final, sig = _spec_without_quantities(tmp_path, monkeypatch)
+    c, app_module, _ = client
+    with open(final, "rb") as f, open(sig, "rb") as s:
+        c.post("/packing-labels/horizontal", data={"file": (f, final.name), "signature_file": (s, sig.name)},
+               content_type="multipart/form-data", follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale"],
+            "selected_tabs": ["Spring Sale"], "header_row_Spring Sale": "8", "preview": "1"}
+    page = c.post("/packing-labels/horizontal", data=form, follow_redirects=True).data.decode()
+    import html as html_lib
+    review = json.loads(html_lib.unescape(re.search(r'id="pl-issues" data-review="([^"]*)"', page).group(1)))
+    first = review["file"][0]
+    assert first["major"] and first["text"].startswith("Packing Spec but no quantities") and first["count"] == 2
+    assert first["tab"] == "Spring Sale"
+    assert "1 needs attention" in page  # the tab card's heading says so too, in red (the two rows are one problem)
+    assert page.count('id="fx-open"') == 1 and "Open Excel File" not in page

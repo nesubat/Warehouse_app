@@ -810,6 +810,9 @@ def _check_in(country, db, suburb, state, postcode, lines):
                 suggestions.append({'suburb': l['name'], 'state': l['state'], 'postcode': (l['postcodes'] or [''])[0]})
     # The street, in the matched suburb(s)
     sid, street, place, close_streets = _find_street(db, [l['id'] for l in matched], lines)
+    if not sid and country == 'AU' and matched:
+        # Filed under a neighbouring suburb (postal vs official suburb names: see _street_nearby)
+        sid, street, place = _street_nearby(db, matched, postcode, lines)
     if sid:
         checks.append({'what': 'Street', 'ok': True, 'text': f"{street} is in {place}"})
         num = _number_in(lines, street)
@@ -923,6 +926,37 @@ def _street_in(db, localities, lines):
     return _find_street(db, [l['id'] for l in localities], lines)
 
 
+NEARBY_POSTCODES = 3  # how far apart two postcodes can be and still count as neighbours for a street filed next door
+
+
+def _street_nearby(db, matched, postcode, lines):
+    """(street id, street name, 'SUBURB POSTCODE' it's filed under) for a street the official data files under a
+    neighbouring suburb, else (None, None, ''). Postal suburbs aren't always the official (gazetted) ones G-NAF files
+    addresses under: Chadstone Shopping Centre, 1341 Dandenong Rd, CHADSTONE 3148 (Australia Post's name) is filed
+    under MALVERN EAST 3145. G-NAF has no suburb shapes here, so a neighbour is another suburb of the same state with
+    the same postcode, or one within NEARBY_POSTCODES of it whose street also has this number: tight enough that a
+    street of that name across town doesn't count."""
+    if not (matched and postcode.isdigit() and len(postcode) == 4):
+        return None, None, ''
+    mine, state, p = {l['id'] for l in matched}, matched[0]['state'], int(postcode)
+    ids = [i for (i,) in db.execute("SELECT DISTINCT locality FROM locality_postcode WHERE postcode BETWEEN ? AND ?",
+                                    (f"{max(p - NEARBY_POSTCODES, 0):04d}", f"{p + NEARBY_POSTCODES:04d}"))]
+    near = [l for l in _localities(db, ids) if l['id'] not in mine and l['state'] == state]
+    same = [l for l in near if postcode in l['postcodes']]
+    for group, need_number in ((same, False), ([l for l in near if l not in same], True)):
+        sid, street, where, _ = _street_in(db, group, lines)
+        if not sid:
+            continue
+        num = _number_in(lines, street)
+        has_number = num is not None and db.execute(
+            "SELECT 1 FROM number WHERE street = ? AND first <= ? AND last >= ? LIMIT 1", (sid, num, num)).fetchone()
+        if need_number and not has_number:
+            continue
+        pcs = next((l['postcodes'] for l in group if l['name'] == where), [])
+        return sid, street, f"{where} {postcode if postcode in pcs else (pcs or [''])[0]}".strip()
+    return None, None, ''
+
+
 def _assess_in(country, db, a):
     suburb, state, postcode = _key(a['suburb']), _key(a['state']), a['postcode'].strip()
     lines = [a['line1'], a['line2']]
@@ -1017,12 +1051,19 @@ def _assess_in(country, db, a):
     # The street: soft, the official data lags new streets and centres. A number not on record is only mentioned.
     street_found, place = False, (matched[0]['name'] if matched else '')
     sid, street, where, close_streets = _street_in(db, matched, lines)
+    filed_under = ''
+    if not sid and country == 'AU' and matched:
+        sid, street, filed_under = _street_nearby(db, matched, postcode, lines)
+        where = filed_under or where
     if sid:
         street_found, place = True, where
         num = _number_in(lines, street)
         if num is not None and not db.execute("SELECT 1 FROM number WHERE street = ? AND first <= ? AND last >= ? LIMIT 1",
                                               (sid, num, num)).fetchone():
             fields['line1'] = {'level': 'info', 'text': f"{num} {street.title()} isn't on record (new or unlisted?)"}
+        elif filed_under:
+            fields['line1'] = {'level': 'info', 'text': f"{street.title()} is filed under {filed_under} in the official data "
+                                                        f"(postal and official suburb names can differ)"}
     elif matched and any(x.strip() for x in lines):
         fields['line1'] = {'level': 'note', 'text': f"Street not on record in {matched[0]['name']}"
                            + (f" (closest: {', '.join(n.title() for n in close_streets[:3])})" if close_streets else '')}

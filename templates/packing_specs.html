@@ -61,7 +61,7 @@
                     {% for i, s in named_rows %}
                     {% set err = errors['named-' ~ i] %}
                     {% set missing = not (s.length and s.width and s.height) %}
-                    <tr class="ps-named-row{% if missing %} ps-needs{% endif %}{% if err %} ps-row-error{% endif %}">
+                    <tr class="ps-named-row{% if missing %} ps-needs{% endif %}{% if err %} ps-row-error{% endif %}" data-spec="{{ s.name or '' }}">
                         <td>
                             <input type="hidden" name="row" value="{{ i }}">
                             <input type="text" name="named_{{ i }}_name" value="{{ s.name or '' }}" aria-label="Packing Spec name" class="ps-name">

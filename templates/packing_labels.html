@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 {% from '_nav.html' import nav with context %}
+{% from '_open_excel.html' import open_excel %}
 {# One page for two features: Packing Labels (mode 'labels': packing labels PDF + courier CSVs) and Courier Import
    (mode 'courier': only the courier CSV, from an address list with a column per pack, headed 1, 2, 3 …) #}
 {% set courier_mode = mode == 'courier' %}
@@ -7,16 +8,24 @@
 {% set horizontal_mode = mode == 'horizontal' %}
 {% set page_url = url_for('courier_import') if courier_mode else (url_for('create_horizontal_labels') if horizontal_mode else url_for('create_packing_labels')) %}
 {% set feature_name = '🚚 Courier Import' if courier_mode else '📦 Generate Labels' %}
+{# The same problem once, with every row it's on; the ones that make labels or units go missing first, in red #}
 {% macro issue_table(items, kind) %}
 <table class="issue-table issue-{{ kind }}">
-    {% for i in items %}
-    <tr>
-        <td class="issue-rows">{{ ('Row ' ~ i.rows) if i.rows else '' }}</td>
-        <td class="issue-col">{{ i.col }}</td>
-        <td class="issue-text">{{ i.text }}{% if i.detail %}<div class="issue-detail">{{ i.detail }}</div>{% endif %}</td>
+    {% for g in items|group_issues %}
+    <tr{% if g.major %} class="issue-major"{% endif %}>
+        <td class="issue-text">{% if g.major %}<span class="issue-major-tag">Needs attention</span> {% endif %}{{ g.text }}{% if g.count > 1 %} <span class="issue-count">× {{ g.count }}</span>{% endif %}
+            {% if g.where %}<div class="issue-where">{{ g.where|join(' · ') }}</div>{% endif %}
+            {% if g.detail %}<div class="issue-detail">{{ g.detail }}</div>{% endif %}</td>
     </tr>
     {% endfor %}
 </table>
+{% endmacro %}
+
+{% macro warning_heading(warnings) %}
+{% set groups = warnings|group_issues %}
+{% set major = groups|selectattr('major')|list %}
+{% if major %}<p class="issue-heading major">⚠️ {{ major|length }} need{{ 's' if major|length == 1 }} attention{% if groups|length > major|length %} · {{ groups|length - major|length }} to check{% endif %}</p>
+{% else %}<p class="issue-heading warning">{{ groups|length }} to check</p>{% endif %}
 {% endmacro %}
 
 {% macro colmap_select(tab, it, m, hidden=false) %}
@@ -190,10 +199,8 @@
         {% if tabs %}
         <h3 class="pl-file-detected">
             ✅ File Detected: {{ filename }}
-            <a href="{{ url_for('open_upload_file', filename=filename) }}" class="btn-file open pl-open-file">
-                📂 Open Excel File
-            </a>
         </h3>
+        {{ open_excel(filename) }}
 
         <!-- Single form handles both Preview and Generate. novalidate: Update Previews always goes through;
              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
@@ -232,7 +239,7 @@
                 {% elif file_note.excel == 'busy' %}⚠️ It's open in Excel in the middle of editing a cell, so your latest changes couldn't be saved: press Enter (or Esc) in Excel, then Update Previews again.
                 {% elif file_note.excel == 'open' %}It's open in Excel, with nothing unsaved.
                 {% elif file_note.excel == 'protected' %}It's open in Excel in Protected View (read-only): changes made there can't be read until you enable editing and save.
-                {% else %}Editing your own copy of the file? Changes there don't reach this one: use Open (above) to edit this copy, or scan the changed file again.{% endif %}
+                {% else %}Editing your own copy of the file? Changes there don't reach this one: use 📂 Open Excel (bottom right) to edit this copy, or scan the changed file again.{% endif %}
             </p>
             {% endif %}
             
@@ -255,7 +262,7 @@
                     <p class="issue-heading error">{{ bp.issues|length }} to fix before generating</p>
                     {{ issue_table(bp.issues, 'error') }}
                     {% if bp.warnings %}
-                    <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
+                    {{ warning_heading(bp.warnings) }}
                     {{ issue_table(bp.warnings, 'warning') }}
                     {% endif %}
                 </div>
@@ -275,8 +282,9 @@
                     </div>
                     {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                     {% if bp.warnings %}
-                    <p class="issue-heading warning">{{ bp.warnings|length }} to check</p>
-                    {{ issue_table(bp.warnings, 'warning') }}
+                    {{ warning_heading(bp.warnings) }}
+                    {% if courier %}<p class="issue-see-below">Listed in <a href="#pl-issues">To check</a> above the consignments, with everything else, most urgent first.</p>
+                    {% else %}{{ issue_table(bp.warnings, 'warning') }}{% endif %}
                     {% endif %}
                 </div>
                 {% endif %}
@@ -340,21 +348,14 @@
                         <span class="pl-filter-count" id="courier-filter-count"></span>
                     </div>
 
-                    {% if courier.warnings %}
-                    <p class="issue-heading warning">{{ courier.warnings|length }} to check</p>
-                    <table class="issue-table issue-warning">
-                        {% for w in courier.warnings %}<tr><td class="issue-text">{{ w }}</td></tr>{% endfor %}
-                    </table>
-                    {% if courier.spec_gaps %}<p class="pl-spec-link"><a href="{{ url_for('packing_specs_page') }}" target="_blank" rel="noopener">📐 Open Packing Specs</a> in a new tab, fill in the sizes, then press "Auto-Map &amp; Update Previews" here.</p>{% endif %}
-                    {% endif %}
-
-
-                    {# Everything to look at, in one list: no address, not in the address book, the official data (G-NAF / LINZ)
-                       disagreeing, and the address book's options. Built by script.js (PL_ISSUES) from the rows, so it follows
-                       every fix; a click goes to the row. #}
-                    <div class="pl-issues" id="pl-issues" hidden>
+                    {# Everything to look at, in one list ranked by what would make labels or consignments come out wrong:
+                       the file's problems, packing specs with no size (with a link), no address, the official data (G-NAF /
+                       LINZ) saying a part of the address doesn't exist there; then the courier checks, address-book options
+                       and hints; last, addresses only new to the address book. Built by script.js (section 25) from
+                       data-review and the rows, so it follows every fix; a click on a consignment goes to its row. #}
+                    <div class="pl-issues" id="pl-issues" data-review="{{ courier.review|tojson|forceescape }}" hidden>
                         <div class="pl-issues-head"><strong>To check</strong> <span class="pl-issues-summary"></span></div>
-                        <ol class="pl-issues-list"></ol>
+                        <div class="pl-issues-list"></div>
                     </div>
                     <table class="pl-courier-table">
                         <thead><tr><th>#</th><th>Receiver</th><th>Address · Items</th><th>Service Code</th></tr></thead>
@@ -388,7 +389,7 @@
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
                                 <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
-                                {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="This address isn't in the address book. Open ✏️ to compare with saved addresses.">Check address</span>{% endif %}
+                                {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="Not in the address book yet: it's saved there when you generate. Open ✏️ to compare with saved addresses.">New address</span>{% endif %}
                                 {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                             </td>
