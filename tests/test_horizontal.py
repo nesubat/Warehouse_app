@@ -396,3 +396,30 @@ def test_preview_ranks_file_problems_and_has_one_open_excel_button(client, tmp_p
     assert '>Auto-Map</button>' in page
     floating = page[page.index('id="fx-open"'):page.index('</div>', page.index('id="fx-open"'))]
     assert 'form="pl-form" name="preview"' in floating and "Update Previews" in floating
+
+
+def test_every_row_above_the_stores_is_a_block_for_the_item_box(tmp_path):
+    """A row written in the label column (or with values under the items) that isn't one of the known ones becomes a
+    block of its own, a label written twice included; picked for the cell, its value prints on the label."""
+    import openpyxl
+    from fixtures import ADDRESS, JOB_ROW
+    from engine.packing_labels.packing_label_generator import generate_packing_labels
+    final = tmp_path / FINAL
+    build_final_file(final)
+    wb = openpyxl.load_workbook(final)
+    ws = wb["Spring Sale"]
+    items = [c for c in range(1, ws.max_column + 1) if re.match(r'J\d', str(ws.cell(row=JOB_ROW, column=c).value or ''))]
+    ws.cell(row=5, column=len(ADDRESS), value="Kinds")
+    ws.cell(row=2, column=len(ADDRESS), value="Description")  # written twice: row 3 says Description too
+    for c in items:
+        ws.cell(row=5, column=c, value="2x Kinds")
+        ws.cell(row=2, column=c, value="Second description")
+    wb.save(final)
+    groups, _, found, _ = read(final)
+    # The first Description is the Description block; the other one is a block of its own
+    assert [x['label'] for x in found['Extra rows']] == ["Description (row 3)", "Kinds (row 5)"]
+    item = next(i for g in groups.values() for i in g['items'] if not i.get('is_code'))
+    assert item['row_5'] == "2x Kinds" and item['desc'] == "Second description" and item['row_3'] == "A1 poster"
+    pdf = tmp_path / "labels.pdf"
+    generate_packing_labels(dict(list(groups.items())[:1]), str(pdf), ['row_5', 'job_no', 'qty'])
+    assert "2x Kinds" in fitz.open(pdf)[0].get_text()

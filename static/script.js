@@ -881,10 +881,10 @@ function cellPreview(getOrder) {
                     drawLines(ctx, lines, bx0, bx0 + boxW, y + 3 * textScale, true, size, '#000');
                 }
                 y += h + gap;
-            } else if (TEXT_STYLES[attr]) {
+            } else if (TEXT_STYLES[attr] || /^row_\d+$/.test(attr)) {  // a row of the file reads like a description
                 const val = item[attr];
                 if (!val) continue;
-                const [base, bold, colour] = TEXT_STYLES[attr];
+                const [base, bold, colour] = TEXT_STYLES[attr] || TEXT_STYLES.desc;
                 const size = base * textScale;
                 const lines = wrap(ctx, val, bold, size, innerW);
                 if (draw) drawLines(ctx, lines, x0, x1, y, bold, size, colour);
@@ -959,6 +959,7 @@ document.addEventListener('DOMContentLoaded', function () {
         row.querySelector('.pl-show-atl').hidden = !d.authority_to_leave;
         const country = (d.country || 'AU').toUpperCase();
         renderAddressParts(row.querySelector('.pl-show-address'), d);
+        row.dataset.missing = missingParts(d).join(',');
         row.dataset.state = (d.state || '').toUpperCase();
         row.dataset.country = country;
         document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
@@ -1243,6 +1244,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const template = document.getElementById('ab-edit-template');
     const PAGE = 50;
     let query = '', offset = 0, timer = null, controller = null, total = Number(page.dataset.total || 0);
+    const picked = new Set();  // ids ticked in select mode
 
     // The table header sticks just under the nav bar; follow the nav's real height if it changes
     const nav = document.querySelector('.sticky-nav');
@@ -1273,7 +1275,12 @@ document.addEventListener('DOMContentLoaded', function () {
         del.type = 'button'; del.className = 'ab-icon-btn'; del.textContent = '🗑️';
         del.title = 'Delete'; del.setAttribute('aria-label', `Delete ${entry.receiver}`);
         del.addEventListener('click', () => remove(tr, entry));
-        actions.append(edit, del);
+        const pick = document.createElement('input');
+        pick.type = 'checkbox'; pick.className = 'ab-pick'; pick.checked = picked.has(entry.id);
+        pick.setAttribute('aria-label', `Select ${entry.receiver}`);
+        pick.addEventListener('click', (e) => tick(tr, pick.checked, e.shiftKey));
+        tr.classList.toggle('ab-picked', pick.checked);
+        actions.append(pick, edit, del);
         const who = cell(entry.receiver);
         if (entry.verified_at) {
             const v = document.createElement('span');
@@ -1365,6 +1372,7 @@ document.addEventListener('DOMContentLoaded', function () {
             if (reset) body.replaceChildren();
             data.rows.forEach((entry) => body.append(rowFor(entry)));
             offset += data.rows.length;
+            if (page.classList.contains('ab-selecting')) showPicked();
             more.hidden = !data.has_more;
             const shown = body.querySelectorAll('.ab-row').length;
             summary.textContent = query
@@ -1433,6 +1441,75 @@ document.addEventListener('DOMContentLoaded', function () {
             say(`Saved ${r.entry.receiver}.`);
         }, () => editor.remove());
     }
+
+    // Select mode: tick addresses (shift-click ticks every one between), then delete them all at once. What's ticked
+    // stays ticked through a search or Load more, so several searches can make one selection.
+    const selectBtn = document.getElementById('ab-select');
+    const bar = document.getElementById('ab-select-bar');
+    const pickedCount = document.getElementById('ab-select-count');
+    const deleteBtn = document.getElementById('ab-select-delete');
+    const all = document.getElementById('ab-select-all');
+    let lastTicked = null;
+    function showPicked() {
+        pickedCount.textContent = `${picked.size} selected`;
+        deleteBtn.disabled = !picked.size;
+        deleteBtn.textContent = picked.size ? `🗑️ Delete ${picked.size} selected` : '🗑️ Delete selected';
+        const boxes = [...body.querySelectorAll('.ab-row .ab-pick')];
+        all.checked = boxes.length > 0 && boxes.every((b) => b.checked);
+        all.indeterminate = !all.checked && boxes.some((b) => b.checked);
+    }
+    function setPicked(tr, on) {
+        const id = Number(tr.dataset.id);
+        if (on) picked.add(id); else picked.delete(id);
+        tr.querySelector('.ab-pick').checked = on;
+        tr.classList.toggle('ab-picked', on);
+    }
+    function tick(tr, on, range) {
+        const rows = [...body.querySelectorAll('.ab-row')];
+        if (range && lastTicked && rows.includes(lastTicked)) {
+            const [a, b] = [rows.indexOf(lastTicked), rows.indexOf(tr)].sort((x, y) => x - y);
+            rows.slice(a, b + 1).forEach((r) => setPicked(r, on));
+        } else {
+            setPicked(tr, on);
+        }
+        lastTicked = tr;
+        showPicked();
+    }
+    function selecting(on) {
+        page.classList.toggle('ab-selecting', on);
+        selectBtn.setAttribute('aria-pressed', String(on));
+        bar.hidden = !on;
+        if (!on) {
+            picked.clear();
+            body.querySelectorAll('.ab-row').forEach((r) => setPicked(r, false));
+            lastTicked = null;
+        }
+        showPicked();
+    }
+    selectBtn.addEventListener('click', () => selecting(!page.classList.contains('ab-selecting')));
+    document.getElementById('ab-select-cancel').addEventListener('click', () => selecting(false));
+    all.addEventListener('change', () => {
+        body.querySelectorAll('.ab-row').forEach((r) => setPicked(r, all.checked));
+        showPicked();
+    });
+    deleteBtn.addEventListener('click', async () => {
+        const n = picked.size;
+        if (!n || !confirm(`Delete ${n} address${n === 1 ? '' : 'es'} from the address book? This can't be undone `
+            + '(Back up & move can save a copy first).')) return;
+        deleteBtn.disabled = true;
+        const r = await send('/api/addresses/delete', 'POST', { ids: [...picked] });
+        if (!r.ok) { say(r.error, true); showPicked(); return; }
+        body.querySelectorAll('.ab-row').forEach((tr) => {
+            if (!picked.has(Number(tr.dataset.id))) return;
+            const next = tr.nextElementSibling;
+            if (next && next.classList.contains('ab-edit-row')) next.remove();
+            tr.remove();
+        });
+        total -= r.entry.deleted;
+        say(`Deleted ${r.entry.deleted} address${r.entry.deleted === 1 ? '' : 'es'}.`);
+        selecting(false);
+        load(true);
+    });
 
     async function remove(tr, entry) {
         if (!confirm(`Delete ${entry.receiver}, ${entry.address} from the address book?`)) return;
@@ -2544,16 +2621,31 @@ document.addEventListener('DOMContentLoaded', function () {
 // =========================================
 // renderAddressParts: a consignment's address as one span per part (line1, line2, suburb, state, postcode, country), so
 // a mismatch with the official data underlines only the part that's wrong.
+// The parts the courier needs (suburb, postcode; state in Australia) missing from an address that has something in
+// it: ['suburb'] for 'Home Centre, Shop 5/752 Stafford Rd, Everton Park, QLD, 4053'. Same rules as the template's
+// missing_parts macro.
+function missingParts(d) {
+    const country = (d.country || 'AU').toUpperCase();
+    if (!['line1', 'line2', 'suburb', 'postcode'].some((k) => d[k])) return [];
+    return (country === 'AU' ? ['suburb', 'state', 'postcode'] : ['suburb', 'postcode']).filter((k) => !d[k]);
+}
 function renderAddressParts(el, d) {
     const country = (d.country || 'AU').toUpperCase();
-    const parts = ['line1', 'line2', 'suburb', 'state', 'postcode'].filter((k) => d[k]);
+    const missing = missingParts(d);
+    const parts = ['line1', 'line2', 'suburb', 'state', 'postcode'].filter((k) => d[k] || missing.includes(k));
     if (country !== 'AU') parts.push('country');
     el.replaceChildren();
     parts.forEach((k, i) => {
         const span = document.createElement('span');
         span.className = 'pl-af';
         span.dataset.f = k;
-        span.textContent = k === 'country' ? country : d[k];
+        if (k === 'country') span.textContent = country;
+        else if (d[k]) span.textContent = d[k];
+        else {  // missing: where it belongs, in red
+            span.classList.add('pl-af-missing');
+            span.title = `Missing: the courier needs the ${k}`;
+            span.textContent = `no ${k}`;
+        }
         el.append(span);
         if (i < parts.length - 1) el.append(', ');
     });
@@ -2591,7 +2683,10 @@ const PL_REF = (() => {
         const address = row.querySelector('.pl-show-address');
         const box = row.querySelector('.pl-ref');
         if (!address || !box) return;
-        address.querySelectorAll('.pl-af').forEach((span) => { span.className = 'pl-af'; span.removeAttribute('title'); });
+        address.querySelectorAll('.pl-af').forEach((span) => {
+            span.classList.remove('pl-af-bad', 'pl-af-soft', 'pl-af-note', 'pl-af-info');
+            if (!span.classList.contains('pl-af-missing')) span.removeAttribute('title');
+        });
         address.querySelectorAll('.pl-ref-ok').forEach((x) => x.remove());
         box.replaceChildren();
         box.className = 'pl-ref';
@@ -2669,6 +2764,8 @@ function attachFieldSuggest(container) {
 
     const close = () => { if (menu) menu.remove(); menu = null; items = []; active = -1; };
     const read = () => Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()]));
+    // Whose address it is: a whole saved address is only suggested in the suburb or postcode field when it's theirs
+    const receiverInput = container.querySelector('input[data-field="receiver"]');
     function apply(option) {
         applying = true;
         Object.entries(option.fields).forEach(([k, v]) => {
@@ -2720,7 +2817,7 @@ function attachFieldSuggest(container) {
             timer = setTimeout(async () => {
                 if (controller) controller.abort();
                 controller = new AbortController();
-                const params = new URLSearchParams({ field, value, ...read() });
+                const params = new URLSearchParams({ field, value, ...read(), receiver: receiverInput ? receiverInput.value.trim() : '' });
                 try {
                     const res = await fetch(`/api/address-data/complete?${params}`, { signal: controller.signal });
                     show(input, (await res.json()).options || []);
@@ -2870,7 +2967,7 @@ document.addEventListener('DOMContentLoaded', function () {
         row.classList.add('pl-flash');
     }
     // A consignment under a problem: "#12 Macpac Perth" and what's wrong with it; a click goes to its row
-    function entry(row, text) {
+    function entry(row, text, edit) {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'pl-issue-go';
@@ -2883,7 +2980,12 @@ document.addEventListener('DOMContentLoaded', function () {
             span.textContent = text;
             b.append(span);
         }
-        b.addEventListener('click', () => goTo(row));
+        b.addEventListener('click', () => {
+            goTo(row);
+            const pencil = row.querySelector('.pl-edit-btn');
+            if (edit && pencil && !row.classList.contains('pl-editing')) pencil.click();
+        });
+        b.title = edit ? 'Go to it and open it for editing' : 'Go to it';
         return b;
     }
     // One problem: the link to fix it (a packing spec's row), what's wrong and how many, why it matters, where in the
@@ -2928,7 +3030,7 @@ document.addEventListener('DOMContentLoaded', function () {
             box.className = 'pl-issue-entries';
             const all = expanded.has(g.key);
             entries.forEach(([row, text], i) => {
-                const b = entry(row, text);
+                const b = entry(row, text, g.edit);
                 b.hidden = !all && i >= SHOWN;
                 box.append(b);
             });
@@ -2963,14 +3065,20 @@ document.addEventListener('DOMContentLoaded', function () {
             detail: `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press 🔄 Update Previews.`,
             link: { href: sp.url, text: sp.unread ? '📐 Check the code in Packing Specs' : '📐 Add its size in Packing Specs' },
             entries: sp.consignments.map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
-        (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text }));
-        const rowGroup = (tier, key, title, detail, found) => { if (found.length) tiers[tier].push({ key, title, detail, entries: found }); };
+        (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text, edit: true,
+            entries: (w.numbers || []).map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
+        // edit: a click on one of its consignments also opens it for editing (the fix is typing, not a suggestion)
+        const rowGroup = (tier, key, title, detail, found, edit) => { if (found.length) tiers[tier].push({ key, title, detail, entries: found, edit }); };
         const withRef = (test) => rows.filter((r) => test(refOf(r))).map((r) => [r, refOf(r).message]);
         rowGroup('fix', 'missing', 'No address', "Left out of the courier CSV until it has one: pick a saved address or type one in with ✏️.",
-            rows.filter((r) => r.classList.contains('pl-no-address')).map((r) => [r, '']));
+            rows.filter((r) => r.classList.contains('pl-no-address')).map((r) => [r, '']), true);
+        rowGroup('fix', 'incomplete', 'Suburb, state or postcode missing',
+            "The courier needs all of them. Use the suggestion under the address, or fill them in here.",
+            rows.filter((r) => r.dataset.missing && !r.classList.contains('pl-no-address'))
+                .map((r) => [r, r.dataset.missing.split(',').map((k) => `no ${k}`).join(', ')]), true);
         rowGroup('fix', 'official', "Doesn't match the official data (G-NAF / LINZ)",
             "A suburb, state, postcode or country that isn't on record, or isn't where the address puts it. Use the suggestion under the address, or Keep as is if you know it's right.",
-            withRef((x) => x.level === 'mismatch' && !x.soft));
+            withRef((x) => x.level === 'mismatch' && !x.soft).filter(([r]) => !r.dataset.missing));
         rowGroup('fix', 'street', 'Street not on record',
             "The official data has no street of that name in the suburb or next to it. Check the street and suburb; Keep as is if it's a new street.",
             withRef((x) => x.level === 'note' && !x.soft));
@@ -3026,7 +3134,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 60); };
     // Every change to a row (a fix, Keep as is, a Save, an option used) updates the list
     new MutationObserver(soon).observe(document.querySelector('.pl-courier-table tbody'),
-        { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-ref-level', 'data-ref-soft'] });
+        { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-ref-level', 'data-ref-soft', 'data-missing'] });
     refresh();
 });
 

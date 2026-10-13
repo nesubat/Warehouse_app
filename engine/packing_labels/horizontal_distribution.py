@@ -303,10 +303,21 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         field = _row_field(label) if label else None
         if field and field not in attr_rows:
             attr_rows[field] = r
+    # Every other row above the stores with something under the items, as a block of its own for the label's item box,
+    # named by what's written in the label column ('Kinds', 'Item Number', a second 'Description') or by its number
+    # ('Row 6'): 'row_5' -> that row's value for the item. A label written twice gives a block per row.
+    used = set(attr_rows.values()) | {pack_row, header_row}
+    extra_rows = []
+    for r in range(1, header_row):
+        if r in used or not any(val(r, x) for x in item_cols):
+            continue
+        label = next((val(r, x) for x in range(first_col - 1, 0, -1) if x not in spec_cols.values() and val(r, x)), '')
+        extra_rows.append((r, label))
     images = _image_map(ws, excel_path)
     info, no_image = {}, []
     for x in item_cols:
         info[x] = {f: (val(attr_rows[f], x) if f in attr_rows else '') for f in ('job_no', 'desc', 'dimension', 'material', 'notes')}
+        info[x].update({f"row_{r}": val(r, x) for r, _ in extra_rows})
         info[x]['thumbnails'] = images.get((attr_rows['thumbnail'], x), []) if 'thumbnail' in attr_rows else []
         if 'thumbnail' in attr_rows and not info[x]['thumbnails']:
             no_image.append(L(x))
@@ -451,6 +462,8 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         'Install': bool(install_col),
         'Description': 'desc' in attr_rows, 'Dimensions': 'dimension' in attr_rows, 'Material': 'material' in attr_rows,
         'Notes': 'notes' in attr_rows, 'Thumbnail': 'thumbnail' in attr_rows,
+        # The other rows, each a block the page offers: [{'id': 'row_5', 'label': 'Kinds (row 5)'}]
+        'Extra rows': [{'id': f"row_{r}", 'label': f"{label} (row {r})" if label else f"Row {r}"} for r, label in extra_rows],
     })
     return {k: groups[k] for k in order}, last_row, found, warnings
 

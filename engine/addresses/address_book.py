@@ -524,6 +524,18 @@ class AddressBook:
         with db:
             return db.execute("DELETE FROM addresses WHERE id = ?", (address_id,)).rowcount > 0
 
+    def delete_many(self, ids):
+        """Deletes these entries (their learned spellings go with them) in one transaction: all or none. Returns how
+        many there were."""
+        ids = list(ids)
+        db = self._connect()
+        n = 0
+        with db:
+            for at in range(0, len(ids), 500):  # SQLite takes a limited number of ? at once
+                part = ids[at:at + 500]
+                n += db.execute(f"DELETE FROM addresses WHERE id IN ({','.join('?' * len(part))})", part).rowcount
+        return n
+
     def record_used(self, entries):
         """After a Generate: save or refresh each delivery address and remember the raw spellings that led to it.
 

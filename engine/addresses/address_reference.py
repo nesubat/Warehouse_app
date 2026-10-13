@@ -980,6 +980,34 @@ def _street_option(a, street, types=()):
     return {'label': line, 'fields': {field: line}}
 
 
+LINE_NAMES = {'line1': 'Address Line 1', 'line2': 'Address Line 2'}
+
+
+def _suburb_in_lines(db, a, candidates=None):
+    """(locality, line field, the line without it) for a suburb written at the end of an address line ('…, Everton
+    Park'), else None. The last part of Address Line 2, then Line 1, is tried as the last 3, 2, then 1 words, so
+    'Bondi Junction' wins over 'Junction'. candidates: only these localities count (the postcode's); None: any, those
+    in the address's state first."""
+    ids = {l['id'] for l in candidates} if candidates is not None else None
+    state = _key(a.get('state'))
+    for field in ('line2', 'line1'):
+        segments = (a.get(field) or '').split(',')
+        last = segments[-1].split()
+        for n in (3, 2, 1):
+            words = last[-n:] if len(last) >= n else []
+            key = _key(" ".join(words))
+            if not words or not key or any(ch.isdigit() for ch in key):
+                continue
+            found = [i for (i,) in db.execute("SELECT DISTINCT locality FROM locality_name WHERE key = ?", (key,))]
+            found = _localities(db, [i for i in found if ids is None or i in ids])
+            found.sort(key=lambda l: l['state'] != state)
+            if found:
+                rest = " ".join(last[:-n])
+                line = ",".join(segments[:-1] + ([" " + rest] if rest else [])).strip().strip(',').strip()
+                return found[0], field, line
+    return None
+
+
 def _street_in(db, localities, lines):
     """(street id, street name, place, closest names) of the street named in the lines, among these localities."""
     if not localities or not any(x.strip() for x in lines):
@@ -1108,6 +1136,27 @@ def _assess_in(country, db, a):
             fields['state'] = {'level': 'bad', 'text': f"{a['state']} isn't an Australian state"}
             options += [_option(l) for l in matched[:1]]
             message = message or fields['state']['text']
+
+    # A part the courier needs is missing: the suburb (and in Australia the state). The suburb is often written at the
+    # end of a street line instead ('Home Centre, Shop 5/752 Stafford Rd, Everton Park' and no suburb): the fix moves
+    # it out of the line into Suburb, with its state and postcode. It's what the user has to fix first.
+    if not suburb and any(x.strip() for x in lines):
+        moved = _suburb_in_lines(db, a, at_postcode if (country == 'AU' and postcode) else None)
+        if moved:
+            l, field, line = moved
+            o = _option(l, postcode if postcode in l['postcodes'] else None, country)
+            o['fields'][field] = line
+            o['label'] += f" (out of {LINE_NAMES[field]})"
+            options.insert(0, o)
+            matched = matched or [l]
+        else:
+            options += [_option(l, postcode, country) for l in at_postcode[:3]]
+        fields['suburb'] = {'level': 'bad', 'text': "No suburb" + (f": {moved[0]['name'].title()} is written in {LINE_NAMES[moved[1]]}" if moved else '')}
+        message = fields['suburb']['text']
+    if country == 'AU' and not state and matched and 'state' not in fields:
+        fields['state'] = {'level': 'bad', 'text': f"No state: {matched[0]['name']} is in {matched[0]['state']}"}
+        options.append(_option(matched[0], postcode if postcode in matched[0]['postcodes'] else None))
+        message = message or fields['state']['text']
 
     # The street: soft, the official data lags new streets and centres. A number not on record is only mentioned.
     street_found, place = False, (matched[0]['name'] if matched else '')

@@ -819,11 +819,12 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
                 _draw_lines(draw_page, lines, bx0, bx0 + box_w, y + 3 * text_scale, "hebo", size, (0, 0, 0))
             y += h + gap
 
-        elif attr in TEXT_STYLES:
+        elif attr in TEXT_STYLES or attr.startswith('row_'):
+            # A row of the file picked for the item box ('row_5', horizontal files) reads like a description
             val = _clean(item.get(attr))
             if not val:
                 continue
-            base, fontname, color = TEXT_STYLES[attr]
+            base, fontname, color = TEXT_STYLES.get(attr, TEXT_STYLES['desc'])
             size = base * text_scale
             lines = _wrap(val, fontname, size, inner_w)
             if draw_page:
@@ -1062,6 +1063,7 @@ def cell_preview(pack_groups, max_px=360):
         barcode = '' if item.get('is_code') else item.get('barcode') or _clean(item.get('job_no'))
         items.append({
             **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'desc', 'dimension', 'material', 'install', 'notes')},
+            **{k: _clean(v) for k, v in item.items() if k.startswith('row_')},  # rows of the file offered as blocks
             'barcode': barcode,
             'modules': code128_modules(barcode, compact=True) if barcode else None,
             'thumbnails': [_thumb_data_url(d, max_px) for d in item.get('thumbnails') or []],

@@ -427,6 +427,34 @@ def _close_with_retry(close, file_path, attempts=6):
     return 0
 
 
+def is_locked(file_path):
+    """True when the file exists and another program holds it open for writing (Excel, Acrobat …)."""
+    try:
+        with open(file_path, 'r+b'):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False  # not there, or not a file: nothing holds it
+
+
+# Names with two parts to their extension, kept whole when a number goes in ('… (2).labelmap.json')
+_MULTI_EXT = ('.labelmap.json',)
+
+
+def free_name(folder, name):
+    """The file name to write an output under: `name` itself when no file has it or the file there can be replaced,
+    else the first of 'name (2).ext', 'name (3).ext' … that's free. A file of that name open in Excel or a PDF viewer
+    is locked; rather than stop and wait for it to be closed, or close the user's copy, the new output goes next to it."""
+    ext = next((e for e in _MULTI_EXT if name.endswith(e)), os.path.splitext(name)[1])
+    stem = name[:len(name) - len(ext)] if ext else name
+    candidate, n = name, 1
+    while os.path.exists(os.path.join(folder, candidate)) and is_locked(os.path.join(folder, candidate)):
+        n += 1
+        candidate = f"{stem} ({n}){ext}"
+    return candidate
+
+
 def _wait_until_released(file_path, timeout=5.0):
     """Windows can hold Excel's lock for a moment after the workbook closes."""
     end = time.time() + timeout
