@@ -59,7 +59,7 @@
             <!-- Top Section: Clickable Header -->
             <div class="project-header accordion-header">
                 <div>
-                    <h3 class="project-title" style="margin: 0;">{{ project.display_name }} <span class="job-id">(Job: {{ project.job_id }})</span>
+                    <h3 class="project-title" style="margin: 0;">{% if project.job_id %}<span class="project-job">{{ project.job_id }}</span><span class="project-pipe">|</span>{% endif %}<span class="project-name">{{ project.display_name }}</span>
                         {% for k in project.kinds %}<span class="project-feature project-feature-{{ k }}">{{ {'import': '🚚 Courier Import', 'labels': '🏷️ Generate Labels', 'shuffler': '🖨️ Labels Shuffled', 'sheets': '📊 Packing Sheets'}[k] }}</span>{% endfor %}</h3>
                     <div class="project-meta" style="margin-top: 5px;">
                         <span>Created: {{ project.date }}</span>

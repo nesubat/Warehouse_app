@@ -17,7 +17,8 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 from engine.label_shuffler.pdf_engine import process_and_shuffle_pdf
 from engine.packing_sheets.matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes
+from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes, \
+    free_name
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
 from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      group_issues,
@@ -414,6 +415,29 @@ def numbered_name(folder, kind, *parts, ext=".pdf"):
     return " - ".join([f"{kind} {max(taken, default=0) + 1}"] + [p for p in parts if p]) + ext
 
 
+def _project_job(folder, files, project):
+    """A project's job number for the dashboard: the Packing Sheet's ('Packing Sheet_J477130-03.xlsx'), else the
+    Consignment Reference Generate Labels / Courier Import put in front of its files' names ('J477130 - Macpac -
+    Open360.csv', 'J477130 - Macpac.labelmap.json'), else the label map's own record of it. '' when there's none."""
+    for f in files:
+        if f.startswith("Packing Sheet_"):
+            return re.sub(r' \(\d+\)$', '', f[len("Packing Sheet_"):].rsplit(".", 1)[0])
+    for f in files:
+        for tail in (".labelmap.json", " - Open360.csv", " - OpenFreight.csv"):
+            if f.endswith(tail):
+                base = re.sub(r' \(\d+\)$', '', f[:-len(tail)])
+                if base.endswith(f" - {project}"):
+                    return base[:-len(f" - {project}")]
+    for f in files:
+        if f.endswith(".labelmap.json"):
+            try:
+                with open(os.path.join(folder, f), encoding='utf-8') as fh:
+                    return str(json.load(fh).get('consignment_reference') or '')
+            except (OSError, ValueError):
+                pass
+    return ''
+
+
 def newest_first(folder, names):
     return sorted(names, key=lambda f: os.path.getmtime(os.path.join(folder, f)), reverse=True)
 
@@ -546,8 +570,8 @@ def _finalise(folder, label_map, pdfs, add_unmatched=True):
     earlier ones. Returns (output name, result, earlier files that were open elsewhere and stayed)."""
     plan, session = _plan(folder, label_map, pdfs, add_unmatched)
     project_label = (label_map.get('project') or {}).get('name') or re.sub(r'_\d{6}_\d{4}$', '', os.path.basename(folder))
-    output_name = numbered_name(folder, "Complete Labels", label_map.get('consignment_reference'), project_label,
-                                datetime.now().strftime("%y%m%d_%H%M"))
+    output_name = free_name(folder, numbered_name(folder, "Complete Labels", label_map.get('consignment_reference'), project_label,
+                                                  datetime.now().strftime("%y%m%d_%H%M")))
     started = time.perf_counter()
     try:
         result = render_stitch(folder, label_map, pdfs, plan, os.path.join(folder, output_name), add_unmatched)
@@ -880,14 +904,11 @@ def dashboard():
                 timestamp = os.path.getctime(folder_path)
                 date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
-                # Extract the Job ID dynamically from File 2's name
-                job_id = "N/A"
-                for f in display_files:
-                    if f.startswith("Packing Sheet_"):
-                        job_id = f.replace("Packing Sheet_", "").rsplit(".", 1)[0]
-                        break
+                # The project name the user gave (the folder's name without the job and the time it was made), and
+                # its job number: shown as 'J477130 | Macpac'
+                display_name = re.sub(r'_\d{6}_\d{4}$', '', folder_name.split('_Job-')[0] if '_Job-' in folder_name else folder_name)
+                job_id = _project_job(folder_path, files, display_name)
                         
-                display_name = folder_name.split('_Job-')[0] if '_Job-' in folder_name else folder_name
                 has_label_map = any(f.endswith('.labelmap.json') for f in files)
                 courier_only = bool(csv_files) and not pdf_files and not has_label_map
 
@@ -1420,15 +1441,24 @@ def _receiver_groups(consignments):
     carrying c['group'] = {'id', 'first', 'size', 'receiver', 'similar', 'members'}; 'similar' says whether every
     address looks like the same place written differently (similar_addresses) or some really differ."""
     from difflib import SequenceMatcher
-    keys = []  # one per receiver name, in order of first appearance
+
+    def typo_apart(a, b):
+        # One character changed, added or dropped (two in a long name): 'Macpac Chadstone' / 'Macpac Chadston'. Not
+        # two different places that happen to look alike ('Macpac Perth' / 'Macpac Penrith' is two letters apart)
+        changed = sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in SequenceMatcher(None, a, b).get_opcodes() if op != 'equal')
+        return min(len(a), len(b)) > 5 and changed <= (2 if max(len(a), len(b)) >= 20 else 1)
+
+    keys = []  # one per receiver name, in order of first appearance: (name, state of its first address)
     group_of = {}
     for c in consignments:
         name = _norm(c['destination']['receiver'])
         if not name:
             continue
-        key = next((k for k in keys if k == name or (min(len(k), len(name)) > 5 and SequenceMatcher(None, k, name).ratio() >= 0.92)), None)
+        state = (c['destination'].get('state') or '').upper()
+        # A name spelt slightly differently is the same receiver only in the same state (or where one has no address)
+        key = next((k for k, st in keys if k == name or (typo_apart(k, name) and (not st or not state or st == state))), None)
         if key is None:
-            keys.append(name)
+            keys.append((name, state))
             key = name
         group_of[c['number']] = key
     sizes = {}
@@ -1483,13 +1513,13 @@ def _import_csvs(project_dir, reference, project, csv_formats, cartons, consignm
     refs = [(x['item_reference'], x['item_reference']) for x in cartons]
     csv_files = []
     if 'open360' in csv_formats:
-        name = f"{base_name} - Open360.csv"
+        name = free_name(project_dir, f"{base_name} - Open360.csv")
         with app_log.step(log, f"  Open360 CSV {name}"):
             write_open360_csv(os.path.join(project_dir, name), open360_items(cartons, consignments), reference, item_refs=refs)
         log.info("    %d row(s), Shipment Reference %s", len(refs), reference)
         csv_files.append(name)
     if 'openfreight' in csv_formats:
-        name = f"{base_name} - OpenFreight.csv"
+        name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
         with app_log.step(log, f"  OpenFreight CSV {name}"):
             export, _ = clean_export(_export_values(form))
             write_courier_csv(os.path.join(project_dir, name), cartons, consignments, reference, fixed, export=export)
@@ -1592,8 +1622,14 @@ def _review(previews, cartons, courier_warnings):
         # A code the size couldn't be read from goes to Check a code; any other spec to its own row
         s['url'] = (url_for('packing_specs_page', code=s['spec']) + '#ps-try' if s['unread']
                     else url_for('packing_specs_page', spec=s['spec']))
-    courier = [{'text': w, 'major': w.startswith(MAJOR_COURIER_WARNINGS)} for w in courier_warnings
-               if not w.startswith(SPEC_WARNINGS + ("No address for ",))]
+    # The consignments a check names ('#4 …', 'Consignment 5 …') come with it, so the list can go to them. An
+    # incomplete address is left to the rows' own 'missing' check (it follows edits)
+    courier = []
+    for w in courier_warnings:
+        if w.startswith(SPEC_WARNINGS + ("No address for ",)) or re.match(r"Consignment \d+ \(.*\): incomplete address", w):
+            continue
+        numbers = list(dict.fromkeys(int(n) for n in re.findall(r"#(\d+)", w) + re.findall(r"^Consignment (\d+)", w)))
+        courier.append({'text': w, 'major': w.startswith(MAJOR_COURIER_WARNINGS), 'numbers': numbers})
     return {'file': file, 'specs': list(specs.values()), 'courier': courier}
 
 
@@ -1720,8 +1756,10 @@ def _reference_for(dest, edit=None, here=None):
     except Exception as e:
         log_book.exception("Official address check failed for %s: %s", one_line(dest), e)
         return {'level': 'none', 'message': '', 'fields': {}, 'options': []}
+    # A suburb, state or postcode missing is never soft, saved in the book or not: the courier can't take it
+    missing = any(str(r['fields'].get(k, {}).get('text', '')).startswith('No ') for k in ('suburb', 'state', 'postcode'))
     return {'level': r['level'], 'message': r['message'], 'fields': r['fields'], 'options': r['options'],
-            'country': r.get('country', ''), 'soft': bool(here)}
+            'country': r.get('country', ''), 'soft': bool(here) and not missing}
 
 
 def _check_against_book(consignments, edits, book_options=None):
@@ -2129,9 +2167,13 @@ def api_address_data_assess():
 @app.route('/api/address-data/complete')
 def api_address_data_complete():
     """Suggestions for one address field as it's typed: saved addresses the courier verified first, then other saved
-    addresses (both as whole addresses), then the official data for that field."""
+    addresses (both as whole addresses), then places from the saved addresses, then the official data for that field.
+    In the suburb and postcode fields a whole address is offered only when it's this receiver's own (receiver= the
+    name in the form): anyone else's would put their street in; places fill just the suburb, state and postcode."""
+    from engine.addresses.address_match import name_score
     field = request.args.get('field', '')
     value = request.args.get('value', '').strip()
+    receiver = request.args.get('receiver', '').strip()
     ctx = {k: request.args.get(k, '') for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}
     out = []
     if field in ('line1', 'line2', 'suburb', 'postcode') and len(value) >= 2:
@@ -2141,6 +2183,8 @@ def api_address_data_complete():
             rows = []
         typed = _norm(value)
         rows = [r for r in rows if typed in _norm(r.get(field)) or _norm(r.get(field)).startswith(typed)]
+        if field in ('suburb', 'postcode'):
+            rows = [r for r in rows if receiver and name_score(receiver, r['receiver']) >= 0.85]
         seen = set()
         for verified in (True, False):
             n = 0
@@ -2151,7 +2195,8 @@ def api_address_data_complete():
                 seen.add(key)
                 n += 1
                 out.append({'source': 'verified' if verified else 'saved', 'label': r['address'] + (f", {r['country']}" if r['country'] != 'AU' else ''),
-                            'detail': r['receiver'], 'fields': {k: r[k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}})
+                            'detail': f"saved for {r['receiver']}" if r['receiver'] else 'saved address',
+                            'fields': {k: r[k] for k in ('line1', 'line2', 'suburb', 'state', 'postcode', 'country')}})
     # Places from the saved addresses (verified first): a suburb with its state, postcode and country, or the suburbs
     # of a postcode. They come before the official data, and are the only source for NZ postcodes and regions.
     try:
@@ -2224,6 +2269,20 @@ def api_address_update(address_id):
     except AddressBookError as e:
         log_book.warning("Address #%s not updated: %s", address_id, e)
         return {'error': str(e)}, 400
+
+
+@app.route('/api/addresses/delete', methods=['POST'])
+def api_addresses_delete():
+    """Deletes the addresses picked on the Address Book page ({ids: [...]}), all in one go."""
+    try:
+        ids = sorted({int(i) for i in (request.get_json(silent=True) or {}).get('ids') or []})
+    except (TypeError, ValueError):
+        return {'error': 'Those addresses could not be read. Refresh the page and try again.'}, 400
+    if not ids:
+        return {'error': 'Pick the addresses to delete first.'}, 400
+    n = ADDRESS_BOOK.delete_many(ids)
+    log_book.info("Deleted %d address(es) at once: %s", n, ", ".join(f"#{i}" for i in ids[:50]) + (" …" if len(ids) > 50 else ''))
+    return {'deleted': n}
 
 
 @app.route('/api/addresses/<int:address_id>', methods=['DELETE'])
@@ -2615,7 +2674,7 @@ def _distribution_page(mode):
             else:
                 # 5. Generate the PDF with Custom Layout
                 # 'Packing Labels Only 1 - J477161 - Lux Test 30 - 261005_1732.pdf' (stitched: 'Complete Labels 1 - ...')
-                output_pdf_name = numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp)
+                output_pdf_name = free_name(project_dir, numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp))
                 output_pdf = os.path.join(project_dir, output_pdf_name)
                 # Each label shows who and where its consignment goes (after address-book fills and ✏️ edits),
                 # exactly as in the preview, not the raw Excel text. Every pack gets its label, sent or not.
@@ -2652,7 +2711,7 @@ def _distribution_page(mode):
                 # match courier labels back to packing label pages. Both files carry the same Item References
                 # ('01T1QWXK Store': serial + the row's own code), so courier labels booked from either stitch by code.
                 base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
-                map_name = f"{base_name}.labelmap.json"
+                map_name = free_name(project_dir, f"{base_name}.labelmap.json")
                 items = open360_items(cartons, consignments, tab_of, serials)
                 if horizontal_mode:  # '03T1P2 Chadstone': the serial is the code Stitch Labels matches
                     open360_refs = [(f"{serials[x['pack_key']]} {x['store']}", serials[x['pack_key']]) for x in cartons]
@@ -2661,13 +2720,13 @@ def _distribution_page(mode):
                 ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
                 csv_files = []
                 if 'open360' in csv_formats:
-                    open360_name = f"{base_name} - Open360.csv"
+                    open360_name = free_name(project_dir, f"{base_name} - Open360.csv")
                     with app_log.step(log, f"  Open360 CSV {open360_name}"):
                         write_open360_csv(os.path.join(project_dir, open360_name), items, shipment_reference, item_refs=open360_refs)
                     csv_files.append(open360_name)
                     log.info("    %d row(s), Shipment Reference %s", len(open360_refs), shipment_reference)
                 if 'openfreight' in csv_formats:
-                    openfreight_name = f"{base_name} - OpenFreight.csv"
+                    openfreight_name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
                     with app_log.step(log, f"  OpenFreight CSV {openfreight_name}"):
                         export, export_problems = clean_export(_export_values(request.form))
                         write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,

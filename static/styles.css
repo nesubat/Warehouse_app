@@ -176,6 +176,9 @@ h2 {
   font-size: 18px;
   color: #2c3e50;
 }
+/* Dashboard titles: 'J477130 | Macpac' - the job number first, then the project name */
+.project-title .project-job { font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.project-title .project-pipe { color: #bdc3c7; font-weight: 400; margin: 0 .45em; }
 .job-id {
   color: #7f8c8d;
   font-size: 16px;
@@ -1285,6 +1288,19 @@ button:hover {
 .ab-table td { padding: 8px 10px; border-top: 1px solid #ecf0f1; vertical-align: top; }
 .ab-table .ab-num { text-align: right; font-variant-numeric: tabular-nums; }
 .ab-actions { white-space: nowrap; width: 1%; }
+/* Select mode (Address Book): a tick box per row, a bar with what to do with the ticked ones */
+.ab-pick { display: none; width: 16px; height: 16px; margin: 0 6px 0 2px; vertical-align: middle; cursor: pointer; }
+.ab-selecting .ab-pick { display: inline-block; }
+.ab-selecting .ab-row .ab-icon-btn { display: none; }
+.ab-row.ab-picked > td { background: #fdedec; }
+.ab-btn[aria-pressed="true"] { background: #2c3e50; color: #fff; }
+.ab-select-bar { position: sticky; top: var(--nav-height, 56px); z-index: 6; display: flex; align-items: center; gap: 12px;
+                 flex-wrap: wrap; margin: 10px 0 0; padding: 8px 12px; background: #fff; border: 1px solid #f1948a;
+                 border-left: 4px solid #c0392b; border-radius: 6px; font-size: 14px; box-shadow: 0 2px 6px rgba(0, 0, 0, .06); }
+.ab-select-bar #ab-select-count { font-weight: 700; color: #922b21; }
+.ab-select-hint { color: #7f8c8d; font-size: 13px; flex: 1; }
+.ab-btn.ab-btn-danger { background: #c0392b; border-color: #c0392b; color: #fff; }
+.ab-btn.ab-btn-danger:disabled { opacity: .45; cursor: default; }
 .ab-icon-btn { border: 1px solid transparent; background: none; cursor: pointer; padding: 2px 4px; border-radius: 4px; font-size: 14px; line-height: 1; }
 .ab-icon-btn:hover, .ab-icon-btn:focus-visible { border-color: #bdc3c7; background: #f4f6f7; }
 .ab-detail { color: #7f8c8d; font-size: 12px; margin-top: 2px; }
@@ -1797,6 +1813,9 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-af-soft { text-decoration: underline dotted #b2babb; text-underline-offset: 4px; cursor: help; }
 .pl-page .pl-af-note { text-decoration: underline dotted #aab7b8; text-underline-offset: 4px; cursor: help; }
 .pl-page .pl-af-info { cursor: help; }
+/* A part the courier needs that's missing, where it belongs: 'no suburb' */
+.pl-page .pl-af-missing { display: inline-block; font-size: .82em; font-weight: 700; color: #c0392b; background: #fdedec;
+                          border: 1px dashed #e74c3c; border-radius: 4px; padding: 0 6px; line-height: 1.45; cursor: help; }
 .pl-page .pl-ref-ok { color: #27ae60; font-size: 13px; cursor: help; }
 .pl-page .pl-ref { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; }
 .pl-page .pl-ref:empty { display: none; }
@@ -1932,3 +1951,7 @@ a.ab-btn { display: inline-block; text-decoration: none; }
                            white-space: nowrap; cursor: pointer; background: #f39c12; color: #fff; margin-left: 2px; }
 .fx-open .fx-preview-btn:hover { background: #d68910; }
 @media (prefers-reduced-motion: reduce) { .fx-open { transition: none; } }
+
+/* The receiver column: wide enough to read a store name on one line, and its ✏️ fields at a usable width */
+.pl-page .pl-courier-table .pl-who-cell { width: 200px; min-width: 180px; }
+.pl-page .pl-con-row.pl-editing .pl-who-cell { width: 220px; }

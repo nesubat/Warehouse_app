@@ -83,7 +83,10 @@
 </div>
 {% endif %}
 {% endmacro %}
-{% macro address_parts(d) %}{% set parts = [] %}{% for f in ['line1', 'line2', 'suburb', 'state', 'postcode'] %}{% if d[f] %}{% set _ = parts.append(f) %}{% endif %}{% endfor %}{% if d.country and d.country != 'AU' %}{% set _ = parts.append('country') %}{% endif %}{% for f in parts %}<span class="pl-af" data-f="{{ f }}">{{ d[f] }}</span>{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
+{# The address as one span per part. A part the courier needs (suburb, postcode; state in Australia) that's missing
+   from an address shows where it belongs, in red: 'no suburb'. Same rules as missingParts() in script.js #}
+{% macro missing_parts(d) %}{% set au = not d.country or d.country|upper == 'AU' %}{% for f in (['suburb', 'state', 'postcode'] if au else ['suburb', 'postcode']) %}{% if not d[f] and (d.line1 or d.line2 or d.postcode or d.suburb) %}{{ f }},{% endif %}{% endfor %}{% endmacro %}
+{% macro address_parts(d) %}{% set missing = missing_parts(d).split(',') %}{% set parts = [] %}{% for f in ['line1', 'line2', 'suburb', 'state', 'postcode'] %}{% if d[f] or f in missing %}{% set _ = parts.append(f) %}{% endif %}{% endfor %}{% if d.country and d.country != 'AU' %}{% set _ = parts.append('country') %}{% endif %}{% for f in parts %}{% if d[f] or f == 'country' %}<span class="pl-af" data-f="{{ f }}">{{ d[f] }}</span>{% else %}<span class="pl-af pl-af-missing" data-f="{{ f }}" title="Missing: the courier needs the {{ f }}">no {{ f }}</span>{% endif %}{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -379,7 +382,7 @@
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-missing="{{ missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -515,6 +518,13 @@
                                 <div class="cell-only-styling pl-cell-text">Notes</div>
                             </div>
                             {% endif %}
+
+                            {# Every other row of the file written above the stores (horizontal files): a block each #}
+                            {% for x in previews[0].found_headers.get('Extra rows') or [] %}
+                            <div class="sortable-item" draggable="true" data-id="{{ x.id }}" title="What row {{ x.id[4:] }} of the file says for each item"><span class="badge-text">{{ x.label }}</span>
+                                <div class="cell-only-styling pl-cell-text">{{ x.label }}</div>
+                            </div>
+                            {% endfor %}
                             
                         </div>
                     </div>
