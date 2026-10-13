@@ -383,7 +383,8 @@
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
-                            <td>
+                            <td class="pl-who-cell">
+                                <div class="pl-fold"><div class="pl-fold-inner">
                                 <span class="pl-show-receiver">{{ d.receiver }}</span>
                                 <div class="issue-detail pl-show-contact">{% if d.contact %}Attn {{ d.contact }}{% endif %}</div>
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
@@ -392,14 +393,60 @@
                                 {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="Not in the address book yet: it's saved there when you generate. Open ✏️ to compare with saved addresses.">New address</span>{% endif %}
                                 {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
+                                </div></div>
+                                {# ✏️: the receiver and Attn open into fields where they're shown #}
+                                <div class="pl-unfold" inert><div class="pl-fold-inner pl-edit-who">
+                                    {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact (Attn)')] %}
+                                    <div class="input-field">
+                                        <label for="edit-{{ c.number }}-{{ field }}">{{ label }}</label>
+                                        <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}">
+                                    </div>
+                                    {% endfor %}
+                                    <label class="pl-edit-atl" for="edit-{{ c.number }}-atl">
+                                        <input type="checkbox" id="edit-{{ c.number }}-atl" data-field="authority_to_leave"{% if d.authority_to_leave %} checked{% endif %}> Authority to leave
+                                    </label>
+                                </div></div>
                             </td>
                             <td class="pl-address-cell">
+                                <div class="pl-fold"><div class="pl-fold-inner">
                                 <div class="pl-show-address">{% if c.address %}{{ address_parts(d) }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
-                                <div class="pl-ref" aria-live="polite"></div>
-                                {# The address book's options: after the problems above; one click puts the address in #}
+                                </div></div>
+                                <div class="pl-unfold pl-editor" inert><div class="pl-fold-inner">
+                                    <div class="pl-edit-address">
+                                        {% for field, label in [('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode'), ('country', 'Country')] %}
+                                        <div class="input-field pl-edit-{{ field }}">
+                                            <label for="edit-{{ c.number }}-{{ field }}">{{ label }}</label>
+                                            <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}"{% if field == 'country' %} list="pl-countries" placeholder="AU" title="AU, NZ or another country: decides whether the export details go in the OpenFreight CSV"{% endif %}>
+                                        </div>
+                                        {% endfor %}
+                                    </div>
+                                    {# Closest saved addresses: re-ranked live as any field is typed in #}
+                                    <div class="pl-closest" data-status="{{ c.book }}">
+                                        <div class="pl-closest-title"{% if not c.suggestions %} hidden{% endif %}>Closest saved addresses <span class="issue-detail">— most likely first, updated as you type. Click one to fill the fields.</span></div>
+                                        <ul class="pl-closest-list">
+                                            {% for s in c.suggestions %}
+                                            <li><button type="button" class="pl-closest-item" data-entry="{{ s.json }}">
+                                                <span class="pl-closest-why">{{ s.why }}</span>
+                                                <strong>{{ s.receiver }}{% if s.contact %} · Attn {{ s.contact }}{% endif %}</strong>
+                                                <span class="pl-closest-address">{{ s.address }}{% if s.verified_at %} · ✓ Verified{% endif %}</span>
+                                            </button></li>
+                                            {% endfor %}
+                                        </ul>
+                                        <p class="pl-closest-none"{% if c.suggestions or c.book not in ('unverified', 'missing') %} hidden{% endif %}>{% if c.book == 'missing' %}⚠ No saved address for this receiver in the address book. Type the address in above; it will be saved to the address book when you generate.{% else %}⚠ No similar address in the address book. Check this address against the job before generating — it will be saved to the address book as it is.{% endif %}</p>
+                                    </div>
+                                    <div class="issue-detail">From Excel: {{ c.source_text }}</div>
+                                    <div class="pl-edit-actions">
+                                        <button type="button" class="pl-btn-small pl-edit-save">Save</button>
+                                        <button type="button" class="pl-btn-small pl-btn-plain pl-edit-cancel">Cancel</button>
+                                        <button type="button" class="pl-btn-small pl-btn-plain pl-edit-reset">Reset to Excel</button>
+                                        <button type="button" class="pl-btn-small pl-btn-plain pl-edit-clear" title="Empty the address fields (receiver and contact stay)">Clear address</button>
+                                    </div>
+                                </div></div>
+                                {# Suggestions, best first: the address book's saved address (verified first), then what the saved
+                                   addresses say about the suburb (one field at a time), then the official data's verdict and fixes #}
                                 <div class="pl-book-opts" data-options="{{ (c.book_options or [])|tojson|forceescape }}"></div>
-                                {# What the saved addresses say about this suburb: one field at a time #}
                                 <div class="pl-book-hints" data-hints="{{ (c.locality_hints or [])|tojson|forceescape }}"></div>
+                                <div class="pl-ref" aria-live="polite"></div>
                                 <div class="pl-items-label">Items <span class="pl-items-count">{{ c.cartons|length }}</span></div>
                                 <div class="pl-items">{% for x in c.cartons %}
                                 <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
@@ -421,51 +468,6 @@
                                     <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
                                     {% endfor %}
                                 </select>
-                            </td>
-                        </tr>
-                        <tr class="pl-edit-row" data-id="{{ c.id }}" hidden>
-                            <td colspan="4">
-                                <div class="pl-edit-grid">
-                                    {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact Name'), ('line1', 'Address Line 1'), ('line2', 'Address Line 2'), ('suburb', 'Suburb'), ('state', 'State'), ('postcode', 'Postcode'), ('country', 'Country')] %}
-                                    <div class="input-field">
-                                        <label for="edit-{{ c.number }}-{{ field }}">{{ label }}</label>
-                                        <input type="text" id="edit-{{ c.number }}-{{ field }}" data-field="{{ field }}" value="{{ d[field] }}"{% if field == 'country' %} list="pl-countries" placeholder="AU" title="AU, NZ or another country: decides whether the export details go in the OpenFreight CSV"{% endif %}>
-                                    </div>
-                                    {% endfor %}
-                                    <div class="input-field">
-                                        <label for="edit-{{ c.number }}-service">Service Code</label>
-                                        <select id="edit-{{ c.number }}-service" class="pl-edit-service">
-                                            <option value="">Same as main{% if courier.fixed.service_code %} ({{ courier.fixed.service_code }}){% endif %}</option>
-                                            {% for o in courier.service_options %}
-                                            <option value="{{ o.code }}" title="{{ o.description }}"{% if o.code == c.service_code %} selected{% endif %}>{{ o.code }} · {{ o.description }}</option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
-                                    <label class="pl-edit-atl" for="edit-{{ c.number }}-atl">
-                                        <input type="checkbox" id="edit-{{ c.number }}-atl" data-field="authority_to_leave"{% if d.authority_to_leave %} checked{% endif %}> Authority to leave
-                                    </label>
-                                </div>
-                                {# Closest saved addresses: rendered for every row, re-ranked live as any field is typed in #}
-                                <div class="pl-closest" data-status="{{ c.book }}">
-                                    <div class="pl-closest-title"{% if not c.suggestions %} hidden{% endif %}>Closest saved addresses <span class="issue-detail">— most likely first, updated as you type. Click one to fill the form.</span></div>
-                                    <ul class="pl-closest-list">
-                                        {% for s in c.suggestions %}
-                                        <li><button type="button" class="pl-closest-item" data-entry="{{ s.json }}">
-                                            <span class="pl-closest-why">{{ s.why }}</span>
-                                            <strong>{{ s.receiver }}{% if s.contact %} · Attn {{ s.contact }}{% endif %}</strong>
-                                            <span class="pl-closest-address">{{ s.address }}{% if s.verified_at %} · ✓ Verified{% endif %}</span>
-                                        </button></li>
-                                        {% endfor %}
-                                    </ul>
-                                    <p class="pl-closest-none"{% if c.suggestions or c.book not in ('unverified', 'missing') %} hidden{% endif %}>{% if c.book == 'missing' %}⚠ No saved address for this receiver in the address book. Type the address in above; it will be saved to the address book when you generate.{% else %}⚠ No similar address in the address book. Check this address against the job before generating — it will be saved to the address book as it is.{% endif %}</p>
-                                </div>
-                                <div class="issue-detail">From Excel: {{ c.source_text }}</div>
-                                <div class="pl-edit-actions">
-                                    <button type="button" class="pl-btn-small pl-edit-save">Save</button>
-                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-cancel">Cancel</button>
-                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-reset">Reset to Excel</button>
-                                    <button type="button" class="pl-btn-small pl-btn-plain pl-edit-clear" title="Empty the address fields (receiver and contact stay)">Clear address</button>
-                                </div>
                             </td>
                         </tr>
                         {% endfor %}

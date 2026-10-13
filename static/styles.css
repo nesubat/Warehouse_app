@@ -1216,11 +1216,26 @@ button:hover {
 .pl-page .pl-edit-btn:hover, .pl-page .pl-edit-btn:focus-visible { border-color: #bdc3c7; background: #f4f6f7; }
 .pl-page .pl-service-input { width: 90px; padding: 5px 8px; font-size: 13px; border: 1px solid #bdc3c7; border-radius: 4px; }
 .pl-page .pl-tag-edited { border-color: #e67e22; color: #d35400; margin-left: 4px; }
-.pl-page .pl-edit-row td { background: #f8f9fa; padding: 14px 16px; }
-.pl-page .pl-edit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 12px; align-items: end; margin-bottom: 8px; }
-.pl-page .pl-edit-grid .input-field { width: auto; margin: 0; }
-.pl-page .pl-edit-atl { display: flex; align-items: center; gap: 6px; font-size: 13px; padding-bottom: 8px; }
-.pl-page .pl-edit-actions { display: flex; gap: 8px; margin-top: 10px; }
+/* ✏️ opens a row in place (script.js section 11): what's shown folds away and its fields unfold in the same spot.
+   Height eases from 0 to its own size (grid rows 0fr -> 1fr), so nothing jumps */
+.pl-page .pl-fold, .pl-page .pl-unfold { display: grid; transition: grid-template-rows .22s ease, opacity .18s ease; }
+.pl-page .pl-fold { grid-template-rows: 1fr; opacity: 1; }
+.pl-page .pl-unfold { grid-template-rows: 0fr; opacity: 0; }
+.pl-page .pl-fold-inner { overflow: hidden; min-height: 0; }
+.pl-page .pl-con-row.pl-editing .pl-fold { grid-template-rows: 0fr; opacity: 0; }
+.pl-page .pl-con-row.pl-editing .pl-unfold { grid-template-rows: 1fr; opacity: 1; }
+.pl-page .pl-con-row.pl-editing > td { background: #f8f9fa; }
+.pl-page .pl-con-row.pl-editing .pl-edit-btn { border-color: #bdc3c7; background: #fff; }
+@media (prefers-reduced-motion: reduce) { .pl-page .pl-fold, .pl-page .pl-unfold { transition: none; } }
+.pl-page .pl-edit-who { display: flex; flex-direction: column; gap: 8px; padding: 2px 2px 4px; }
+.pl-page .pl-edit-who .input-field, .pl-page .pl-edit-address .input-field { width: auto; margin: 0; }
+.pl-page .pl-edit-who input, .pl-page .pl-edit-address input { width: 100%; min-width: 0; box-sizing: border-box; }
+/* The address's fields in the order it reads: street lines, then suburb, state, postcode, country */
+.pl-page .pl-edit-address { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px 10px; padding: 2px 2px 8px; }
+.pl-page .pl-edit-line1, .pl-page .pl-edit-line2, .pl-page .pl-edit-suburb { grid-column: span 3; }
+@media (max-width: 900px) { .pl-page .pl-edit-line1, .pl-page .pl-edit-line2 { grid-column: span 6; } }
+.pl-page .pl-edit-atl { display: flex; align-items: center; gap: 6px; font-size: 13px; padding-bottom: 4px; }
+.pl-page .pl-edit-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
 
 /* The hidden attribute must win over display rules such as .pl-courier-tag's inline-block */
 .pl-page [hidden] { display: none !important; }

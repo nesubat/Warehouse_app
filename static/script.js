@@ -963,15 +963,16 @@ document.addEventListener('DOMContentLoaded', function () {
         row.dataset.country = country;
         document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
     }
-    function fill(editRow, d) {
-        editRow.querySelectorAll('[data-field]').forEach((input) => {
+    // The fields of a row's ✏️ editor (in the row itself: the receiver's cell and the address cell)
+    function fill(row, d) {
+        row.querySelectorAll('input[data-field]').forEach((input) => {
             if (input.type === 'checkbox') input.checked = !!d[input.dataset.field];
             else input.value = d[input.dataset.field] || '';
         });
     }
-    function read(editRow) {
+    function read(row) {
         const d = {};
-        editRow.querySelectorAll('[data-field]').forEach((input) => {
+        row.querySelectorAll('input[data-field]').forEach((input) => {
             d[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.value.trim();
         });
         d.state = (d.state || '').toUpperCase();
@@ -982,33 +983,32 @@ document.addEventListener('DOMContentLoaded', function () {
 
     rows.forEach((row) => {
         const id = row.dataset.id;
-        const editRow = row.nextElementSibling;
         const original = JSON.parse(row.dataset.original);
         const current = () => {
             const d = { ...original };
             ADDRESS.concat('authority_to_leave').forEach((k) => { if (edits[id] && k in edits[id]) d[k] = edits[id][k]; });
             return d;
         };
-        const close = () => { editRow.hidden = true; };
+        // ✏️ opens the row in place: the receiver and the address fold away and their fields unfold where they were
+        // shown (styles.css .pl-fold / .pl-unfold). What's folded is inert: no tabbing into hidden fields.
+        const folds = [...row.querySelectorAll('.pl-fold')], unfolds = [...row.querySelectorAll('.pl-unfold')];
+        const editing = () => row.classList.contains('pl-editing');
+        function setEditing(on) {
+            row.classList.toggle('pl-editing', on);
+            folds.forEach((x) => { x.inert = on; });
+            unfolds.forEach((x) => { x.inert = !on; });
+        }
+        const close = () => setEditing(false);
 
-        // The form's Service Code list mirrors the row's: filled from it when the form opens, copied back on Save
-        const editService = editRow.querySelector('.pl-edit-service');
         row.querySelector('.pl-edit-btn').addEventListener('click', () => {
-            editRow.hidden = !editRow.hidden;
-            if (!editRow.hidden) {
-                fill(editRow, current());
-                if (editService) editService.value = row.querySelector('.pl-service-input').value;
-                editRow.querySelector('input').focus();
-            }
+            if (editing()) { close(); return; }
+            fill(row, current());
+            setEditing(true);
+            row.querySelector('input[data-field="line1"]').focus({ preventScroll: true });
         });
 
-        editRow.querySelector('.pl-edit-save').addEventListener('click', () => {
-            const rowService = row.querySelector('.pl-service-input');
-            if (editService && rowService.value !== editService.value) {
-                rowService.value = editService.value;
-                rowService.dispatchEvent(new Event('change'));  // the row's own handler keeps it in the edits
-            }
-            const d = read(editRow);
+        row.querySelector('.pl-edit-save').addEventListener('click', () => {
+            const d = read(row);
             const changed = ADDRESS.some((k) => (d[k] || '') !== (original[k] || '')) ||
                             d.authority_to_leave !== !!original.authority_to_leave;
             const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
@@ -1026,7 +1026,7 @@ document.addEventListener('DOMContentLoaded', function () {
             applyFilters();
             PL_REF.recheck(row, changed ? d : original, edits[id] && edits[id].ref_keep);
         });
-        editRow.querySelector('.pl-edit-cancel').addEventListener('click', close);
+        row.querySelector('.pl-edit-cancel').addEventListener('click', close);
 
         // A suggestion from the official address data applied in one click: an edit like ✏️ Save, counted as checked
         row.addEventListener('pl-ref-use', (e) => {
@@ -1041,6 +1041,7 @@ document.addEventListener('DOMContentLoaded', function () {
             row.querySelector('.pl-tag-edited').hidden = fromBook;
             row.querySelector('.pl-tag-book').hidden = !fromBook;
             if (fromBook) row.querySelector('.pl-book-opts').replaceChildren();
+            if (editing()) fill(row, d);  // the open editor shows what was just applied
             markChecked(row);
             if (d.postcode) markAddressed(row);
             applyFilters();
@@ -1061,30 +1062,30 @@ document.addEventListener('DOMContentLoaded', function () {
             PL_REF.render(row, { level: 'kept', message: 'Kept as is', fields: {}, options: [] });
         });
         // Clear: the address fields only; receiver and contact stay
-        editRow.querySelector('.pl-edit-clear').addEventListener('click', () => {
+        row.querySelector('.pl-edit-clear').addEventListener('click', () => {
             ['line1', 'line2', 'suburb', 'state', 'postcode', 'country'].forEach((k) => {
-                const input = editRow.querySelector(`[data-field="${k}"]`);
+                const input = row.querySelector(`input[data-field="${k}"]`);
                 if (input) input.value = '';
             });
-            const first = editRow.querySelector('[data-field="line1"]');
+            const first = row.querySelector('input[data-field="line1"]');
             first.focus();
             first.dispatchEvent(new Event('input', { bubbles: true }));
         });
         // Suggestions while typing: verified saved addresses, then other saved ones, then the official data
-        attachFieldSuggest(editRow);
+        attachFieldSuggest(row);
 
-        // Closest saved addresses: clicking one fills the form; typing in any field re-ranks the list
-        const closest = attachClosest(editRow, (entry) => fill(editRow, entry), () => read(editRow));
-        editRow.querySelector('.pl-edit-reset').addEventListener('click', () => {
-            fill(editRow, original);
+        // Closest saved addresses: clicking one fills the fields; typing in any field re-ranks the list
+        const closest = attachClosest(row, (entry) => fill(row, entry), () => read(row));
+        row.querySelector('.pl-edit-reset').addEventListener('click', () => {
+            fill(row, original);
             closest.refresh();  // the Excel address's closest matches, the address-book fill among them
         });
 
-        // Enter inside the edit form saves the row instead of submitting the whole page
-        editRow.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); editRow.querySelector('.pl-edit-save').click(); }
+        // Enter in the editor's fields saves the row instead of submitting the whole page; Esc closes it
+        unfolds.forEach((box) => box.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.target.matches('input')) { e.preventDefault(); row.querySelector('.pl-edit-save').click(); }
             if (e.key === 'Escape') close();
-        });
+        }));
 
         const service = row.querySelector('.pl-service-input');
         service.addEventListener('change', () => {
@@ -1146,7 +1147,6 @@ document.addEventListener('DOMContentLoaded', function () {
             const visible = (!state || row.dataset.state === state) &&
                             (!text || row.textContent.toLowerCase().includes(text));
             row.hidden = !visible;
-            if (!visible) row.nextElementSibling.hidden = true;
             if (visible) shown += 1;
         });
         // A group's heading goes with its rows
@@ -2829,7 +2829,7 @@ document.addEventListener('DOMContentLoaded', function () {
             hints.forEach((h) => {
                 const line = document.createElement('div');
                 line.className = 'pl-book-hint';
-                line.dataset.field = h.field;
+                line.dataset.hintField = h.field;
                 const what = document.createElement('span');
                 const strong = document.createElement('strong');
                 strong.textContent = h.label;
@@ -2842,7 +2842,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // A fix applied (an option, a hint, an official suggestion): hints about the fields it changed are done with
         row.addEventListener('pl-ref-use', (e) => {
             const changed = Object.keys(e.detail.fields || {});
-            if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => { if (changed.includes(l.dataset.field) || e.detail.source === 'book') l.remove(); });
+            if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => { if (changed.includes(l.dataset.hintField) || e.detail.source === 'book') l.remove(); });
         });
     });
 

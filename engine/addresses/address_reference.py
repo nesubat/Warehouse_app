@@ -700,12 +700,28 @@ def _find_street(db, locality_ids, lines, number=None):
             "SELECT 1 FROM number WHERE street = ? AND first <= ? AND last >= ? LIMIT 1", (f[0], num, num)).fetchone()), found[0])
         place = db.execute("SELECT name FROM locality WHERE id = ?", (pick[2],)).fetchone()[0]
         return pick[0], pick[1], place, []
-    # Not found as written: the closest street names of this locality, for a typo
-    text = " ".join(" ".join(_street_key(db, l)) for l in lines if l)
-    words = [w for w in re.findall(r'[A-Z]+', text) if len(w) > 2]
-    names = {key.split()[0]: name for _, name, key, _ in streets if key}  # 'RICKETTS' -> 'RICKETTS ROAD'
-    close = [names[m] for w in words for m in difflib.get_close_matches(w, list(names), n=2, cutoff=0.8)]
-    return None, None, None, list(dict.fromkeys(close))[:5]
+    # Not found as written: the closest street names of this locality, for a typo. A street type ending a part of the
+    # line is its type, not its name ('1 Nowhere Lane' mustn't come out as LADNER COURT); elsewhere it can be a name
+    # ('250 Centre Dander' -> CENTRE DANDENONG ROAD)
+    types, words = _types(db), []
+    for line in lines:
+        for segment in re.split(r'[,;/]', line or ''):
+            found = [w for w in re.findall(r'[A-Z]+', _key(segment)) if len(w) > 2]
+            words += [w for i, w in enumerate(found) if not (i == len(found) - 1 and w in types)]
+    # Every street by its first word ('RICKETTS' -> RICKETTS ROAD), and by its name without the type as one word
+    # ('GLENHUNTLY' -> GLEN HUNTLY ROAD, for 'Glenhuntley')
+    names = {}
+    for _, name, key, _ in streets:
+        if key:
+            parts = key.split()
+            names.setdefault(parts[0], []).append(name)
+            if len(parts) > 2:
+                names.setdefault("".join(parts[:-1]), []).append(name)
+    close = {n for w in words for m in difflib.get_close_matches(w, list(names), n=2, cutoff=0.8) for n in names[m]}
+    # Likeliest first: the whole name closest to what's written
+    typed = " ".join(words)
+    ranked = sorted(close, key=lambda n: -difflib.SequenceMatcher(None, typed, " ".join(_street_key(db, n))).ratio())
+    return None, None, None, ranked[:5]
 
 
 def check_address(address):
@@ -919,6 +935,51 @@ def _option(l, postcode=None, country='AU'):
     return {'label': f"{l['name']} {l['state']} {pc}".strip(), 'fields': {'suburb': l['name'], 'state': l['state'], 'postcode': pc}}
 
 
+# G-NAF's street suffixes ('HIGH STREET S'), written out for a line that goes on a label
+STREET_SUFFIXES = {'N': 'North', 'S': 'South', 'E': 'East', 'W': 'West', 'NE': 'North East', 'NW': 'North West',
+                   'SE': 'South East', 'SW': 'South West', 'CN': 'Central', 'EX': 'Extension', 'UP': 'Upper', 'LR': 'Lower'}
+
+
+def _street_title(street):
+    """'HIGH STREET S' -> 'High Street South', 'CENTRE DANDENONG ROAD' -> 'Centre Dandenong Road'."""
+    words = street.split()
+    if len(words) > 2 and words[-1].upper() in STREET_SUFFIXES:
+        words[-1] = STREET_SUFFIXES[words[-1].upper()]
+    return " ".join(w if w in STREET_SUFFIXES.values() else w.title() for w in words)
+
+
+def _street_option(a, street, types=()):
+    """A one-click fix for a street spelt wrong: the line with its street words swapped for the official name, the
+    number and anything before it kept ('Shop 2, 250 Centre Dander' with CENTRE DANDENONG ROAD -> 'Shop 2, 250 Centre
+    Dandenong Road'). The street starts at a word like the official name's first word (not a street type ending the
+    part: types, e.g. _types(db)) and runs to the end of its part of the line (up to the next comma). Where several
+    words could be it, the one with a street number in front wins ('Westfield Doncaster' / '619 Doncastr Rd'), then
+    the closest spelling. None when no word is close enough."""
+    parts = _key(street).split()
+    # Its first word, or its name without the type as one word ('Glenhuntley' for GLEN HUNTLY ROAD)
+    targets = [parts[0]] + (["".join(parts[:-1])] if len(parts) > 2 else [])
+    best = None
+    for field in ('line1', 'line2'):
+        segments = (a.get(field) or '').split(',')
+        for i, seg in enumerate(segments):
+            words = seg.split()
+            for j, w in enumerate(words):
+                k = _key(w)
+                if not k.isalpha() or len(k) < 3 or (k in types and j == len(words) - 1):
+                    continue
+                score = max(difflib.SequenceMatcher(None, k, t).ratio() for t in targets)
+                numbered = any(re.search(r'\d', x) for x in words[:j])
+                if score >= 0.8 and (best is None or (numbered, score) > best[0]):
+                    best = ((numbered, score), field, segments, i, seg, words, j)
+    if not best:
+        return None
+    _, field, segments, i, seg, words, j = best
+    segments = list(segments)
+    segments[i] = seg[:len(seg) - len(seg.lstrip())] + " ".join(words[:j] + [_street_title(street)])
+    line = ",".join(segments).strip()
+    return {'label': line, 'fields': {field: line}}
+
+
 def _street_in(db, localities, lines):
     """(street id, street name, place, closest names) of the street named in the lines, among these localities."""
     if not localities or not any(x.strip() for x in lines):
@@ -1067,6 +1128,8 @@ def _assess_in(country, db, a):
     elif matched and any(x.strip() for x in lines):
         fields['line1'] = {'level': 'note', 'text': f"Street not on record in {matched[0]['name']}"
                            + (f" (closest: {', '.join(n.title() for n in close_streets[:3])})" if close_streets else '')}
+        # Each close street as a fix: the line with the street's official name, the number kept
+        options += [o for o in (_street_option(a, n, _types(db)) for n in close_streets[:3]) if o]
 
     levels = {f['level'] for f in fields.values()}
     level = 'mismatch' if 'bad' in levels else ('note' if 'note' in levels else 'ok')
