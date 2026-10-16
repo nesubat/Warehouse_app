@@ -1955,3 +1955,10 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 /* The receiver column: wide enough to read a store name on one line, and its ✏️ fields at a usable width */
 .pl-page .pl-courier-table .pl-who-cell { width: 200px; min-width: 180px; }
 .pl-page .pl-con-row.pl-editing .pl-who-cell { width: 220px; }
+
+/* Horizontal files: each pack's Packing Specs on the tab's card */
+.pl-page .pl-specs-by-pack { margin: 6px 0 10px; font-size: 13px; }
+.pl-page .pl-specs-by-pack-title { font-weight: 700; color: #2c3e50; margin-bottom: 4px; }
+.pl-page .pl-spec-pack { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 0; }
+.pl-page .pl-spec-pack + .pl-spec-pack { border-top: 1px solid #f2f4f4; }
+.pl-page .pl-spec-pack-name { min-width: 120px; font-weight: 600; color: #34495e; }

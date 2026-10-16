@@ -21,7 +21,7 @@ from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save
     free_name
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
 from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
-                                     group_issues,
+                                     group_issues, issue_where, _row_ranges,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from engine.addresses.address_book import AddressBook, AddressBookError
@@ -471,7 +471,7 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
          'items': [f"#{c['number']} {receiver(c)} - {one_line(c['destination'])}" for c in new_addresses]},
         {'title': "Courier checks", 'level': 'warn', 'items': [w for w in courier_warnings if not w.startswith(own)]},
         {'title': "Spreadsheet checks", 'level': 'info',
-         'items': [", ".join(p for p in (f"Row {w['rows']}" if w.get('rows') else '', f"col {w['col']}" if w.get('col') else '') if p)
+         'items': [", ".join(p for p in (issue_where(w), f"col {w['col']}" if w.get('col') else '') if p)
                    + (": " if w.get('rows') or w.get('col') else '') + w.get('text', '')
                    + (f" - {w['detail']}" if w.get('detail') else '') for w in sheet_warnings]},
         {'title': f"Going to installers - {len(installers)} pack{'s' if len(installers) != 1 else ''} labelled for the installer",
@@ -1603,6 +1603,38 @@ SPEC_WARNINGS = ("No size saved for packing spec", "Couldn't read the size from"
 MAJOR_COURIER_WARNINGS = ("No store / receiver name and no address", "No receiver name for", "Consignment ")
 
 
+def _unfixed_preview_problems(consignments, refs):
+    """The consignment preview's problems still there at Generate, as file problems for the PACK AUDIT pages:
+    [(pack key, issue)], one per pack of the consignment, on that pack's Excel rows and store. The ones the preview
+    ranks first: no address, a suburb / state / postcode missing, no receiver name, the official data disagreeing or
+    a street not on record (not for an address saved in the book). refs: {consignment number: _reference_for(...)}."""
+    out = []
+    for c in consignments:
+        d = c['destination']
+        problems = []
+        if c.get('no_address'):
+            problems.append("No address: left out of the courier CSV")
+        else:
+            au = (d.get('country') or 'AU').upper() == 'AU'
+            missing = [k for k in (('suburb', 'state', 'postcode') if au else ('suburb', 'postcode')) if not d.get(k)]
+            if missing:
+                problems.append("Address incomplete: " + ", ".join(f"no {k}" for k in missing))
+            r = refs.get(c['number']) or {}
+            if (r.get('level') == 'mismatch' or (r.get('level') == 'note' and not r.get('soft'))) \
+                    and not (missing and str(r.get('message', '')).startswith('No ')):  # said already, just above
+                problems.append(f"Official address data: {r.get('message', '')}")
+        if not d.get('receiver'):
+            problems.append("No receiver name: the courier needs one")
+        for text in problems:
+            for x in c['cartons']:
+                rows = sorted(int(r) for r in x.get('excel_rows') or [] if str(r).isdigit())
+                out.append((x['pack_key'], {
+                    'rows': _row_ranges(rows) if rows else '', 'col': f"Consignment #{c['number']}",
+                    'text': f"{text} (not fixed in the preview)", 'detail': '', 'major': True,
+                    'stores': [[r, x['store']] for r in rows] if x.get('store') else []}))
+    return out
+
+
 def _review(previews, cartons, courier_warnings):
     """What the To check list shows besides the rows' own problems (script.js section 25 adds those):
       file     each tab's problems, grouped (group_issues), with the tab's name
@@ -2546,6 +2578,9 @@ def _distribution_page(mode):
                 'export': _export_values(request.form),
                 'international': sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU'),
                 'service_options': options,
+                # Horizontal labels: grouped by allocation or not, dividers or not, as chosen (kept through a preview)
+                'label_grouping': 'store' if request.form.get('label_grouping') == 'store' else 'code',
+                'code_dividers': request.form.get('code_dividers', '1') == '1',
             }
 
         preview_cells = None
@@ -2598,6 +2633,7 @@ def _distribution_page(mode):
         started = time.perf_counter()
         tab_of = {}  # pack key -> its tab's number among the selected tabs, for the Item Reference ('01T2QWXK Store')
         pack_notes = {}  # horizontal: (tab number, pack number) -> the warnings about that pack, for its audit page
+        tab_notes = {}   # vertical: tab number -> its warnings, for the tab's audit page
         try:
             # 1. Parse Data
             sheet_warnings = []
@@ -2612,6 +2648,7 @@ def _distribution_page(mode):
                                                     if f"pack {g['pack_name']}".lower() in f"{w.get('col', '')} {w.get('text', '')}".lower()])
                 if courier_mode:
                     _import_refs(pack_groups, selected_tabs.index(tab) + 1)
+                tab_notes[selected_tabs.index(tab) + 1] = list(tab_warnings)
                 sheet_warnings += [{**w, 'col': f"{tab} {w.get('col', '')}".strip() if len(selected_tabs) > 1 else w.get('col', '')}
                                    for w in tab_warnings]
                 for key, val in pack_groups.items():
@@ -2687,24 +2724,37 @@ def _distribution_page(mode):
                                                       'sent': not c.get('no_address')}
                 shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
                 ref_issues = []
+                edits_now = _consignment_edits(request.form)
+                refs = {c['number']: _reference_for(c['destination'], edits_now.get(c['id'], {}))
+                        for c in all_consignments if not c.get('no_address')}
                 for c in consignments:
-                    r = _reference_for(c['destination'], _consignment_edits(request.form).get(c['id'], {}))
+                    r = refs[c['number']]
                     # A street not on record counts too (unless the address is saved in the book): the preview
                     # ranks it with the major problems
                     if r['level'] == 'mismatch' or (r['level'] == 'note' and not r.get('soft')):
                         ref_issues.append(f"#{c['number']} {c['destination']['receiver']} - {one_line(c['destination'])}: {r['message']}")
+                # The consignment preview's problems not fixed before Generate go on the audit pages too: each pack's
+                # (horizontal) or each tab's (vertical), with the rows and stores they're on
+                for key, issue in _unfixed_preview_problems(all_consignments, refs):
+                    if horizontal_mode:
+                        g = combined_pack_groups[key]
+                        pack_notes.setdefault((g['tab_no'], g['pack_no']), []).append(issue)
+                    elif key in tab_of:
+                        tab_notes.setdefault(tab_of[key], []).append(issue)
                 report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
                                             ref_issues)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
                     if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
                         page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
-                                                               report, serials, add_dividers='code_dividers' in request.form,
+                                                               report, serials, add_dividers=request.form.get('code_dividers') == '1',
+                                                               group_by_code=request.form.get('label_grouping', 'code') != 'store',
                                                                divider_barcodes=(signature_used or {}).get('barcodes'),
                                                                notes=pack_notes)
                     else:
                         page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
-                                                            serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()})
+                                                            serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()},
+                                                            tab_notes=tab_notes)
                 log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
 
                 # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to

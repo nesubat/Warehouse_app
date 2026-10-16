@@ -23,7 +23,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
 from engine.packing_labels.packing_label_generator import (_header_field, _issue, _row_ranges, _norm, _address_key, PackCheckError,
-                                     ADDRESS_FIELDS)
+                                     ADDRESS_FIELDS, with_stores)
 from engine.courier.courier_export import job_series, attn_text
 
 # The columns the Column mapping can set by hand: (field, label, required). The pack columns are added per file
@@ -205,12 +205,14 @@ def read_allocation(excel_path, header_row, sheet_name=None, columns=None):
 
         pack_groups = {}
         no_packs, no_receiver, no_address, numbers_only = [], [], [], {}
+        store_at = {}  # row -> its store, for the checks below ('Row 11 Macpac Adelaide')
         seen = {}  # (store, address) -> first row: a store listed twice
         twice = []
         last_row, blank_run = header_row, 0
         for row in range(header_row + 1, ws.max_row + 1):
             receiver = value(row, cols['receiver_name']) if 'receiver_name' in cols else ''
             store = (value(row, cols['store_name']) if 'store_name' in cols else '') or receiver  # else the receiver's
+            store_at[row] = store
             parts = {k: value(row, cols[k]) for k in address_keys}
             cells = {n: value(row, c) for n, c in packs.items()}
             if not store and not any(parts.values()) and not any(v.lower() not in NO_PACK for v in cells.values()):
@@ -267,6 +269,7 @@ def read_allocation(excel_path, header_row, sheet_name=None, columns=None):
     for name, first, row in twice:
         warnings.append(_issue(f"{first}, {row}", store_ref, f"{name} listed twice at the same address",
                                "Their packs go in one consignment."))
+    with_stores(warnings, store_at.get)  # 'Row 11 Macpac Adelaide', not only 'Row 11'
     return pack_groups, last_row, {'packs': {n: get_column_letter(c) for n, c in packs.items()}}, warnings
 
 

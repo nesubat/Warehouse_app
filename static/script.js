@@ -910,10 +910,17 @@ function cellPreview(getOrder) {
         ctx.stroke();
     }
 
+    // Labels not grouped by allocation (horizontal files: Label order -> Don't group) carry no code boxes
+    const grouping = () => (document.querySelector('input[name="label_grouping"]:checked') || {}).value;
+    document.querySelectorAll('input[name="label_grouping"]').forEach((r) => r.addEventListener('change', schedule));
+
     function render() {
         const order = getOrder();
         const dpr = window.devicePixelRatio || 1;
+        const noCodes = grouping() === 'store';
         canvases.forEach((canvas, i) => {
+            canvas.hidden = noCodes && !!data.items[i].is_code;
+            if (canvas.hidden) return;
             const cssW = canvas.clientWidth || 160;
             const pxW = Math.round(cssW * dpr), pxH = Math.round(cssW * CH / CW * dpr);
             if (canvas.width !== pxW || canvas.height !== pxH) { canvas.width = pxW; canvas.height = pxH; }
@@ -3138,6 +3145,25 @@ document.addEventListener('DOMContentLoaded', function () {
     refresh();
 });
 
+
+// =========================================
+// 27. LABEL ORDER (horizontal labels): group by allocation or not
+// =========================================
+// Grouped by allocation (code A, B, C …), the divider choice follows; not grouped, there are no codes and so no
+// dividers to choose, and the hint says what the PDF will hold.
+document.addEventListener('DOMContentLoaded', function () {
+    const box = document.getElementById('pl-grouping');
+    if (!box) return;
+    const dividers = box.querySelector('.pl-divider-options');
+    const hint = box.querySelector('.pl-csv-hint');
+    const update = () => {
+        const grouped = box.querySelector('input[name="label_grouping"]:checked').value !== 'store';
+        dividers.hidden = !grouped;
+        hint.textContent = grouped ? hint.dataset.code : hint.dataset.store;
+    };
+    box.querySelectorAll('input[name="label_grouping"]').forEach((r) => r.addEventListener('change', update));
+    update();
+});
 
 // =========================================
 // 26. THE FLOATING "OPEN EXCEL" BUTTON (_open_excel.html)

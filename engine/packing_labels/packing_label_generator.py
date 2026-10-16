@@ -1,4 +1,5 @@
 import re
+import functools
 from collections import Counter
 import openpyxl
 import io
@@ -298,7 +299,9 @@ def group_issues(issues):
                                                                  'major': bool(i.get('major')), 'count': 0, 'cols': {}})
         g['count'] += 1
         rows = g['cols'].setdefault(i.get('col') or '', [])
-        if i.get('rows'):
+        if i.get('stores'):  # each row with its store: '11 (Macpac Adelaide)'
+            rows += [f"{r} ({name})" for r, name in i['stores']]
+        elif i.get('rows'):
             rows.append(str(i['rows']))
     out = []
     for g in groups.values():
@@ -310,8 +313,53 @@ def group_issues(issues):
     return sorted(out, key=lambda g: not g['major'])
 
 
+def _rows_in(text):
+    """'5-7, 10' -> [5, 6, 7, 10]: the rows an issue names (the other way from _row_ranges)."""
+    rows = []
+    for part in re.split(r'[,;]', str(text or '')):
+        m = re.fullmatch(r'\s*(\d+)\s*(?:-\s*(\d+))?\s*', part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+            if 0 <= b - a <= 2000:
+                rows += range(a, b + 1)
+    return rows
+
+
+def with_stores(issues, store_of):
+    """Puts the store of each row an issue names with it, so a problem reads 'Row 11 Macpac Adelaide', not only
+    'Row 11': issue['stores'] = [[row, store], ...]. store_of(row) -> the store's name in the file ('' when none)."""
+    for i in issues:
+        found = []
+        for r in _rows_in(i.get('rows')):
+            try:
+                name = " ".join(str(store_of(r) or '').split())
+            except Exception:
+                name = ''
+            if name:
+                found.append([r, name])
+        if found:
+            i['stores'] = found
+    return issues
+
+
+def issue_where(i, limit=6):
+    """Where a problem is, with its stores: 'Row 11 Macpac Adelaide', 'Rows 11-13: Macpac Adelaide, Macpac Belconnen,
+    Macpac Bondi', or 'Row 11' when the file names no store there. '' when it names no rows."""
+    rows, stores = str(i.get('rows') or ''), i.get('stores') or []
+    if not rows:
+        return ''
+    several = ',' in rows or '-' in rows
+    if not stores:
+        return f"Row{'s' if several else ''} {rows}"
+    if not several:
+        return f"Row {rows} {stores[0][1]}"
+    names = list(dict.fromkeys(name for _, name in stores))
+    more = f" and {len(names) - limit} more" if len(names) > limit else ''
+    return f"Rows {rows}: {', '.join(names[:limit])}{more}"
+
+
 def _issue_line(i):
-    return " · ".join(x for x in (f"Row {i['rows']}" if i['rows'] else '', i['col'], i['text']) if x)
+    return " · ".join(x for x in (issue_where(i), i['col'], i['text']) if x)
 
 
 def _span(rows):
@@ -675,6 +723,8 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
     pack_errors, pack_warnings = _check_pack_consistency(pack_groups, pack_rows, bool(address_keys), col_ref)
     errors += pack_errors
     warnings += pack_warnings
+    if 'store_name' in cols or 'receiver_name' in cols:  # 'Row 11 Macpac Adelaide', not only 'Row 11'
+        with_stores(errors + warnings, lambda r: get_cell_info(r, cols.get('store_name') or cols['receiver_name'])[0])
 
     if errors:
         raise PackCheckError(errors, warnings)
@@ -696,14 +746,26 @@ def _clean(val):
     return '' if val.lower() == 'none' else val
 
 
+@functools.lru_cache(maxsize=200_000)
+def _text_len(text, fontname, size):
+    """fitz.get_text_length, remembered: the same job numbers, descriptions and words are measured thousands of times
+    in a big job (a 214-label file measured 177,000 strings)."""
+    return fitz.get_text_length(text, fontname=fontname, fontsize=size)
+
+
 def _wrap(text, fontname, size, width):
+    return list(_wrap_cached(text, fontname, size, width))
+
+
+@functools.lru_cache(maxsize=50_000)
+def _wrap_cached(text, fontname, size, width):
     lines = []
     for paragraph in text.splitlines() or ['']:
         line = ''
         for word in paragraph.split():
-            while fitz.get_text_length(word, fontname=fontname, fontsize=size) > width:
+            while _text_len(word, fontname, size) > width:
                 cut = len(word)
-                while cut > 1 and fitz.get_text_length(word[:cut], fontname=fontname, fontsize=size) > width:
+                while cut > 1 and _text_len(word[:cut], fontname, size) > width:
                     cut -= 1
                 if line:
                     lines.append(line)
@@ -711,30 +773,51 @@ def _wrap(text, fontname, size, width):
                 lines.append(word[:cut])
                 word = word[cut:]
             candidate = f"{line} {word}".strip()
-            if line and fitz.get_text_length(candidate, fontname=fontname, fontsize=size) > width:
+            if line and _text_len(candidate, fontname, size) > width:
                 lines.append(line)
                 line = word
             else:
                 line = candidate
         if line:
             lines.append(line)
-    return lines
+    return tuple(lines)
 
 
 def _draw_lines(page, lines, x0, x1, y, fontname, size, color):
     for line in lines:
-        w = fitz.get_text_length(line, fontname=fontname, fontsize=size)
+        w = _text_len(line, fontname, size)
         page.insert_text((x0 + (x1 - x0 - w) / 2, y + size * 0.92), line,
                          fontname=fontname, fontsize=size, color=color)
         y += size * LINE
     return y
 
 
-def _fit_rect(slot, data):
-    """The largest rect with the image's own proportions that fits inside slot, centred in it."""
-    pix = fitz.Pixmap(data.getvalue())
-    scale = min(slot.width / pix.width, slot.height / pix.height)
-    w, h = pix.width * scale, pix.height * scale
+# Artwork used on many labels (one file: 53 images on 1,760 item boxes) goes into the PDF once, exactly as it is in the
+# Excel file (same pixels, same quality), and every other box points at that same image. Embedding it again for each
+# box made a 340 MB PDF that took minutes to write; its size is read once too.
+def _art(doc, data):
+    """This artwork as this PDF uses it: {'stream', 'size' (px), 'xref' (0 until embedded)}. Kept on the document, so
+    two Generates at once never share one."""
+    from PIL import Image
+    store = getattr(doc, '_wh_art', None)
+    if store is None:
+        store = doc._wh_art = {}
+    art = store.get(id(data))
+    if art is None:
+        raw = data.getvalue()
+        try:
+            size = Image.open(io.BytesIO(raw)).size  # the header only: nothing decoded or changed
+        except Exception:
+            pix = fitz.Pixmap(raw)  # a format only PyMuPDF reads
+            size = (pix.width, pix.height)
+        art = store[id(data)] = {'data': data, 'stream': raw, 'size': size, 'xref': 0}  # 'data' keeps its id its own
+    return art
+
+
+def _fit_rect(slot, size):
+    """The largest rect with the image's own proportions (size: width, height) that fits inside slot, centred in it."""
+    scale = min(slot.width / size[0], slot.height / size[1])
+    w, h = size[0] * scale, size[1] * scale
     x0, y0 = slot.x0 + (slot.width - w) / 2, slot.y0 + (slot.height - h) / 2
     return fitz.Rect(x0, y0, x0 + w, y0 + h)
 
@@ -767,7 +850,12 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
                     sy = y + (i // per_row) * (slot_h + 2)
                     rect = fitz.Rect(sx, sy, sx + slot_w, sy + slot_h)
                     try:
-                        draw_page.insert_image(_fit_rect(rect, data), stream=data.getvalue())
+                        art = _art(draw_page.parent, data)
+                        where = _fit_rect(rect, art['size'])
+                        if art['xref']:
+                            draw_page.insert_image(where, xref=art['xref'])
+                        else:
+                            art['xref'] = draw_page.insert_image(where, stream=art['stream'])
                     except Exception:
                         draw_page.insert_textbox(rect, "Image Error", fontsize=8, align=1)
             y += h + gap
@@ -809,7 +897,7 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
             size = 20 * text_scale
             border = 2.5 * text_scale
             lines = _wrap(val, "hebo", size, inner_w - 2 * border - 8)
-            widest = max(fitz.get_text_length(l, fontname="hebo", fontsize=size) for l in lines)
+            widest = max(_text_len(l, "hebo", size) for l in lines)
             box_w = min(inner_w, max(70 * text_scale, widest + 16 * text_scale))
             h = len(lines) * size * LINE + 6 * text_scale
             if draw_page:
@@ -918,6 +1006,79 @@ def assign_label_numbers(pack_groups):
         key = _norm(g['store_name'])
         seen[key] += 1
         g['label_no'], g['label_total'] = seen[key], totals[key]
+
+
+# ---------- the PACK AUDIT page: before each pack's labels (horizontal files) or each tab's (vertical files) ----------
+
+AUDIT_GREEN, AUDIT_AMBER = (0.18, 0.63, 0.36), (0.85, 0.55, 0.0)
+AUDIT_INK, AUDIT_MUTED, AUDIT_RULE = (0.2, 0.2, 0.2), (0.45, 0.45, 0.45), (0.82, 0.82, 0.82)
+
+
+def audit_text(page, x, y, text, size=10, bold=False, color=AUDIT_INK, right=None):
+    font = 'hebo' if bold else 'helv'
+    text = _latin(text)
+    if right is not None:
+        x = right - _text_len(text, font, size)
+    page.insert_text((x, y), text, fontname=font, fontsize=size, color=color)
+
+
+def audit_fit(text, size, width, bold=False):
+    """The text cut to the width, ending in '...' when it had to be cut."""
+    font = 'hebo' if bold else 'helv'
+    text = _latin(text)
+    if _text_len(text, font, size) <= width:
+        return text
+    while text and _text_len(text + '...', font, size) > width:
+        text = text[:-1]
+    return text + '...' if text else ''
+
+
+def spec_summary(specs):
+    """'Packing Specs: OB1070170170: 30 labels · 2 x CS450320150: 1 label' from a Counter of Packing Specs, most first."""
+    return "Packing Specs: " + " · ".join(f"{spec or '(none)'}: {n} label{'s' if n != 1 else ''}" for spec, n in specs.most_common())
+
+
+def draw_audit_page(doc, title, figures, notes, issues, all_good):
+    """A PACK AUDIT page: 'PACK AUDIT' over the title ('Tab 1 - Pack 1', 'Tab 1: VIC'), the figures to check against
+    the packing sheet ([(label, value)]), grey notes (lines), then what needs a look, each with its row and store
+    ('Row 11 Macpac Adelaide · Pack 1: ...'), as many as fit and then how many more. Green when nothing needs a look
+    (all_good says so), amber when something should be checked."""
+    m = 12 * MM2PT
+    colour = AUDIT_AMBER if issues else AUDIT_GREEN
+    page = doc.new_page(width=A4_W, height=A4_H)
+    page.draw_rect(fitz.Rect(0, 0, A4_W, 54), color=colour, fill=colour)
+    audit_text(page, m, 24, "PACK AUDIT", 9, True, (1, 1, 1))
+    audit_text(page, m, 44, audit_fit(title, 18, A4_W - 2 * m - 190, bold=True), 18, True, (1, 1, 1))
+    audit_text(page, 0, 44, "Check before packing" if issues else "All checks passed", 12, True, (1, 1, 1), right=A4_W - m)
+    x = m
+    for label, value in figures:
+        value = str(value)
+        w = max(70, _text_len(value, 'hebo', 15) + 22)
+        page.draw_rect(fitz.Rect(x, 68, x + w - 8, 112), color=AUDIT_RULE, fill=(0.97, 0.97, 0.97), radius=0.15, width=0.6)
+        audit_text(page, x + 8, 84, label.upper(), 7.5, True, AUDIT_MUTED)
+        audit_text(page, x + 8, 104, value, 15, True)
+        x += w
+    y = 134
+    for line in notes:
+        audit_text(page, m, y, audit_fit(line, 9, A4_W - 2 * m), 9, False, AUDIT_MUTED)
+        y += 14
+    y += 14
+    if not issues:
+        audit_text(page, m, y, all_good, 9.5, False, AUDIT_GREEN)
+        return page
+    audit_text(page, m, y, "Needs a look", 11, True, AUDIT_AMBER)
+    room = int((A4_H - m - 16 - y) // 15)  # the lines that fit, keeping one for 'and N more'
+    for n, i in enumerate(issues):
+        if n >= room and len(issues) > room + 1:
+            y += 15
+            audit_text(page, m, y, f"... and {len(issues) - n} more: see the preview's To check list and the job report",
+                       9.5, True, AUDIT_AMBER)
+            break
+        y += 15
+        where = " · ".join(p for p in (issue_where(i), i.get('col', '')) if p)  # 'Row 11 Macpac Adelaide · Pack 1'
+        audit_text(page, m, y, audit_fit(f"- {where}: {i.get('text', '')}" if where else f"- {i.get('text', '')}",
+                                         9.5, A4_W - 2 * m), 9.5)
+    return page
 
 
 REPORT_COLOURS = {'bad': (0.75, 0.15, 0.13), 'warn': (0.85, 0.55, 0.0), 'info': (0.16, 0.44, 0.64)}
@@ -1065,6 +1226,7 @@ def cell_preview(pack_groups, max_px=360):
             **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'desc', 'dimension', 'material', 'install', 'notes')},
             **{k: _clean(v) for k, v in item.items() if k.startswith('row_')},  # rows of the file offered as blocks
             'barcode': barcode,
+            'is_code': bool(item.get('is_code')),  # a code box: left out when the labels aren't grouped by allocation
             'modules': code128_modules(barcode, compact=True) if barcode else None,
             'thumbnails': [_thumb_data_url(d, max_px) for d in item.get('thumbnails') or []],
         })
@@ -1081,7 +1243,7 @@ def cell_preview(pack_groups, max_px=360):
 
 
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
-                            report=None, serials=None, tabs=None):
+                            report=None, serials=None, tabs=None, tab_notes=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
 
     addresses: {pack_key: {'address', 'receiver', 'contact', 'sent'}} as finalised in the consignment preview
@@ -1096,7 +1258,8 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     pages: {pack_key: [[pages of box 1], [pages of box 2], ...]}.
     serials: {pack_key: '01T1'}, the label's serial in its tab, written before the store name ('01T1. Blue Star
     Moorabbin') on every page of the pack. tabs: {pack_key: (tab number, tab name)}; a divider page goes between
-    the labels of one tab and the next (none before the first tab)."""
+    the labels of one tab and the next (none before the first tab). tab_notes: {tab number: [issues]} (vertical files):
+    a PACK AUDIT page goes before each tab's labels instead (tab_audit), the tab's problems on it."""
     from engine.courier.packing_specs import split_count
     addresses = addresses or {}
     doc = fitz.open()
@@ -1130,6 +1293,26 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
 
     previous_tab = None
 
+    def tab_audit(tab_no, tab_name):
+        """Vertical files: the tab's PACK AUDIT page before its labels ('PACK AUDIT' over 'Tab 1: VIC'), the figures
+        to check against the packing sheet, its Packing Specs and what needs a look, row and store."""
+        keys = [k for k in pack_groups if tabs.get(k, (None,))[0] == tab_no]
+        boxes = sum(split_count(pack_groups[k].get('pack_spec_name', ''))[0] for k in keys)
+        units = 0.0
+        for k in keys:
+            for i in pack_groups[k]['items']:
+                try:
+                    units += float(i.get('qty') or 0)
+                except (TypeError, ValueError):
+                    pass
+        specs = Counter(pack_groups[k].get('pack_spec_name', '') for k in keys)
+        first, last = serials.get(keys[0], ''), serials.get(keys[-1], '')
+        draw_audit_page(doc, f"Tab {tab_no}: {tab_name}" if tab_name else f"Tab {tab_no}",
+                        [("Labels", len(keys)), ("Boxes", boxes), ("Stores", len({_norm(pack_groups[k]['store_name']) for k in keys})),
+                         ("Units", f"{units:g}")],
+                        [spec_summary(specs), f"Order: as in the file, store by store{f' (labels {first} - {last})' if first else ''}."],
+                        tab_notes.get(tab_no, []), "Every pack in this tab has its label.")
+
     def watermark(page, area, box, boxes, spec):
         """'BOX 1 OF 2' written diagonally across the item grid, see-through, so the cells stay readable."""
         angle = math.degrees(math.atan2(area.height, area.width))
@@ -1145,7 +1328,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
 
     for pack_key, group_data in pack_groups.items():
         tab_no, tab_name = tabs.get(pack_key, (None, ''))
-        if tab_no is not None and previous_tab is not None and tab_no != previous_tab:
+        if tab_notes is not None and tab_no is not None and tab_no != previous_tab:
+            tab_audit(tab_no, tab_name)
+        elif tab_no is not None and previous_tab is not None and tab_no != previous_tab:
             divider(tab_no, tab_name)
         previous_tab = tab_no if tab_no is not None else previous_tab
         # Horizontal files: the packing-sheet code boxes go first. Drawn only, so they never count as items,
@@ -1259,7 +1444,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     if report_pages:
         page_map = {k: [p + report_pages for p in v] for k, v in page_map.items()}
         copies = {k: [[p + report_pages for p in box] for box in v] for k, v in copies.items()}
-    doc.save(output_pdf_path)
+    doc.save(output_pdf_path, garbage=1, deflate=True)  # artwork is shared already: no duplicate search needed
     doc.close()
     return {
         'pages': page_map,

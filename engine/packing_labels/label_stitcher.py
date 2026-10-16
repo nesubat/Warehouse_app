@@ -18,22 +18,23 @@ Two steps: plan_stitch() reads the text of every courier label at once and works
 a second, nothing drawn); render_stitch() draws the Complete Labels PDF for that plan, once. A pack of several boxes
 ('2 x OB170170170') is one place per box (packing_slots()), filled in turn by the courier labels with its code.
 """
-import io
 import math
 import os
 import re
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import pymupdf as fitz
-from PIL import Image, ImageOps
 
-from engine.core import app_log
+from engine.core import app_log, paths
 from engine.packing_labels.packing_label_generator import _norm, draw_report_pages
+# Rendering the courier labels lives in label_render (light enough for worker processes); render_label is used by
+# the matching page too
+from engine.packing_labels.label_render import DPI, render_label, text_angle, turn_for, compress_label, render_many  # noqa: F401
 
 log = app_log.get('stitch')
-DPI = 600
 MM = 72 / 25.4
-PAD_MM = 1.0            # white kept around the cropped label
 # 'Item Ref:' or 'Item Reference:' (the longer word is matched whole, so its 'erence' isn't taken as the value)
 _REF = re.compile(r'\bitem\s*ref(?:erence)?\b\s*[:.\-]?', re.I)
 _STOP = re.compile(r'item\s*desc|description|powered by', re.I)
@@ -118,47 +119,39 @@ def label_targets(label_map):
     return by_code, by_ref
 
 
-def text_angle(page):
-    """Which way the label's text runs as the page is shown: 0 (upright), 90, 180 or 270 degrees clockwise.
-    Decided by the text itself (most characters win), plus the page's own rotation flag."""
-    votes = Counter()
-    for block in page.get_text('dict')['blocks']:
-        for line in block.get('lines', []):
-            dx, dy = line['dir']
-            angle = round(math.degrees(math.atan2(dy, dx)) / 90) % 4 * 90  # y points down, so this is clockwise
-            votes[angle] += sum(len(s['text'].strip()) for s in line['spans'])
-    return ((votes.most_common(1)[0][0] if votes else 0) + page.rotation) % 360
+def fit_target(region, width, height):
+    """(target rect, scale): a picture of width x height px fitted into region (a fitz.Rect on the packing label
+    page), aspect kept, centred across and top-aligned."""
+    scale = min(region.width / width, region.height / height)
+    w, h = width * scale, height * scale
+    return fitz.Rect(region.x0 + (region.width - w) / 2, region.y0, region.x0 + (region.width + w) / 2, region.y0 + h), scale
 
 
-def render_label(page, dpi=DPI):
-    """The courier label as a cropped, lossless grayscale PIL image, turned so its text reads upright
-    (a 4x6 label printed sideways on a landscape page comes back the right way up)."""
-    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
-    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-    angle = text_angle(page)
-    if angle:
-        img = img.rotate(angle, expand=True, fillcolor=255)  # PIL turns anti-clockwise: undoes the clockwise angle
-    box = ImageOps.invert(img).point(lambda v: 255 if v > 24 else 0).getbbox()  # ignore near-white noise
-    if box:
-        pad = round(PAD_MM / 25.4 * dpi)
-        box = (max(0, box[0] - pad), max(0, box[1] - pad), min(img.width, box[2] + pad), min(img.height, box[3] + pad))
-        img = img.crop(box)
-    return img
+def fit_label(region, img):
+    """(img, target rect, scale): img (upright) turned for region (turn_for) and fitted into it (fit_target)."""
+    img = turn_for(region.width, region.height, img)
+    target, scale = fit_target(region, img.width, img.height)
+    return img, target, scale
+
+
+def put_label(page, region, target, size, flate):
+    """Covers the region's placeholder and puts the compressed label there: the pixels exactly as rendered, embedded as
+    they are, so the PDF has nothing left to compress when it's saved. Writing a PNG first (optimize=True), for the
+    PDF to unpack and compress again on save, took most of a stitch's time."""
+    page.draw_rect(region, color=None, fill=(1, 1, 1), overlay=True)  # hide the dashed placeholder and its text
+    doc = page.parent
+    xref = doc.get_new_xref()
+    doc.update_object(xref, f"<</Type/XObject/Subtype/Image/Width {size[0]}/Height {size[1]}"
+                            f"/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+    doc.update_stream(xref, flate, compress=False)
+    doc.xref_set_key(xref, "Filter", "/FlateDecode")  # update_stream drops it: say the bytes are Flate
+    page.insert_image(target, xref=xref, keep_proportion=False)
 
 
 def place_label(page, region, img):
-    """Fits img (upright) into region (a fitz.Rect on the packing label page), aspect kept, centred across and
-    top-aligned, covering the region's placeholder. A landscape label is turned a quarter (reading bottom to top) to
-    suit the portrait region, so it stays near full size instead of shrinking to the region's width."""
-    if (img.width > img.height) != (region.width > region.height):
-        img = img.rotate(-90, expand=True, fillcolor=255)
-    scale = min(region.width / img.width, region.height / img.height)
-    w, h = img.width * scale, img.height * scale
-    target = fitz.Rect(region.x0 + (region.width - w) / 2, region.y0, region.x0 + (region.width + w) / 2, region.y0 + h)
-    page.draw_rect(region, color=None, fill=(1, 1, 1), overlay=True)  # hide the dashed placeholder and its text
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    page.insert_image(target, stream=buf.getvalue(), keep_proportion=False)
+    """Fits img into region and puts it there (fit_label, put_label). Returns (target rect, scale)."""
+    img, target, scale = fit_label(region, img)
+    put_label(page, region, target, img.size, compress_label(img))
     return target, scale
 
 
@@ -597,6 +590,29 @@ def match_session(label_map, plan):
             'expected': sum(1 for sl in plan['slots'] if not sl['not_in_csv'])}
 
 
+def _rendered(placed, courier_pdfs, sources, region):
+    """[(width, height, flate)] of each placed courier label, in order: in worker processes when there are enough of
+    them (label_render.render_many), else here, each label's compression running in a background thread while the
+    next one renders (rendering holds Python, zlib doesn't). The same pixels either way."""
+    jobs = [(p['file'], p['page']) for p in placed]
+    started = time.perf_counter()
+    try:
+        done = render_many(courier_pdfs, jobs, (region.width, region.height), paths.BASE_DIR)
+        if done is not None:
+            log.info("  %d courier label(s) rendered in worker processes in %.1fs", len(done), time.perf_counter() - started)
+            return done
+    except Exception as e:
+        log.warning("  rendering in worker processes failed (%s): rendering here instead", e)
+    with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 2) - 1))) as pool:
+        pending = []
+        for name, page in jobs:
+            img = turn_for(region.width, region.height, render_label(sources[name][page - 1]))
+            pending.append((img.width, img.height, pool.submit(compress_label, img)))
+        done = [(w, h, f.result()) for w, h, f in pending]
+    log.info("  %d courier label(s) rendered here in %.1fs", len(done), time.perf_counter() - started)
+    return done
+
+
 def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched=True):
     """Draws the Complete Labels PDF for a plan (plan_stitch), in this order:
       1. the job report (stitching results, then what Generate found), replacing Generate's report page
@@ -619,8 +635,9 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     placed = [dict(p) for p in plan['placed']]
     unmatched = [dict(u) for u in plan['unmatched']]
     duplicates, without_label = plan['duplicates'], plan['without_label']
-    for p in placed:
-        _, scale = place_label(out[p['packing_page'] - 1], region, render_label(sources[p['file']][p['page'] - 1]))
+    for p, (width, height, flate) in zip(placed, _rendered(placed, courier_pdfs, sources, region)):
+        target, scale = fit_target(region, width, height)
+        put_label(out[p['packing_page'] - 1], region, target, (width, height), flate)
         p['scale_pct'] = round(scale * DPI / 72 * 100, 1)
     leftovers = [(u, render_label(sources[u['file']][u['page'] - 1]) if add_unmatched else None)
                  for u in unmatched if u.get('page') and u['file'] in sources]
@@ -703,7 +720,9 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     report_pages = draw_report_pages(out, report, at=0)
     for p in placed:
         p['packing_page'] = new_index[p['packing_page'] - 1] + 1 + report_pages
-    out.save(output_path, garbage=3, deflate=True)
+    # garbage=1 drops what select() left out; each courier label is its own image, so there's nothing to merge and the
+    # duplicate search (garbage=3) only spent time comparing every label image with every other
+    out.save(output_path, garbage=1, deflate=True)
     out.close()
     for u in unmatched:
         u.pop('text', None)
