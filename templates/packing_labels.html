@@ -283,6 +283,15 @@
                         {% endif %}
                         {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
                     </div>
+                    {# Horizontal files: each pack's Packing Specs, and how many labels each #}
+                    {% if horizontal_mode and bp.found_headers.specs_by_pack %}
+                    <div class="pl-specs-by-pack">
+                        <div class="pl-specs-by-pack-title">Packing Specs by pack</div>
+                        {% for p in bp.found_headers.specs_by_pack %}
+                        <div class="pl-spec-pack"><span class="pl-spec-pack-name">{{ p.pack }}</span>{% for s, n in p.specs %}<span class="metric-badge">{{ s }} × {{ n }}</span>{% else %}<span class="issue-detail">no labels</span>{% endfor %}</div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                     {{ colmap_panel(bp.sheet_name, bp.mapping) }}
                     {% if bp.warnings %}
                     {{ warning_heading(bp.warnings) }}
@@ -601,13 +610,25 @@
 
                 <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
                 {% if horizontal_mode %}
-                <fieldset class="pl-csv-choice pl-divider-choice">
+                {# Group each pack's labels by allocation (the packing-sheet code A, B, C …), with or without a divider before
+                   each code; or keep them in the sheet's store order with no code on them. Kept through Update Previews #}
+                {% set grouping = courier.label_grouping if courier else 'code' %}
+                {% set dividers = courier.code_dividers if courier else true %}
+                <fieldset class="pl-csv-choice pl-divider-choice" id="pl-grouping">
                     <legend>Label order</legend>
                     <div class="pl-csv-options">
-                        <label class="pl-csv-option"><input type="checkbox" name="code_dividers" value="1" checked>
-                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet, with installer barcodes</small></span></label>
+                        <label class="pl-csv-option"><input type="radio" name="label_grouping" value="code"{% if grouping != 'store' %} checked{% endif %}>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Group by allocation</strong><small>stores with the same allocation together: code A, B, C … on the label</small></span></label>
+                        <label class="pl-csv-option"><input type="radio" name="label_grouping" value="store"{% if grouping == 'store' %} checked{% endif %}>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Don't group</strong><small>each pack's labels in the sheet's store order, no code on them</small></span></label>
                     </div>
-                    <span class="pl-csv-hint issue-detail">Labels follow the packing sheets: an audit page per pack, then code A, B, C …, stores in sheet order.</span>
+                    <div class="pl-csv-options pl-divider-options"{% if grouping == 'store' %} hidden{% endif %}>
+                        <label class="pl-csv-option"><input type="radio" name="code_dividers" value="1"{% if dividers %} checked{% endif %}>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet, with installer barcodes</small></span></label>
+                        <label class="pl-csv-option"><input type="radio" name="code_dividers" value="0"{% if not dividers %} checked{% endif %}>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>No dividers</strong><small>the codes follow each other</small></span></label>
+                    </div>
+                    <span class="pl-csv-hint issue-detail" data-code="An audit page per pack, then code A, B, C …, stores in sheet order within each code." data-store="An audit page per pack, then its labels in the sheet's store order. No code on the labels, no dividers.">{% if grouping == 'store' %}An audit page per pack, then its labels in the sheet's store order. No code on the labels, no dividers.{% else %}An audit page per pack, then code A, B, C …, stores in sheet order within each code.{% endif %}</span>
                 </fieldset>
                 {% endif %}
                 <fieldset class="pl-csv-choice" id="pl-csv-choice">

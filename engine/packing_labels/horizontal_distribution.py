@@ -31,6 +31,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
 from engine.packing_labels.packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
+                                                            with_stores,
                                      is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field)
 from engine.courier.courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
                             NO_PACK, TOTAL_ROW)
@@ -444,6 +445,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         sheet_total = sum(totals)
         if abs(sheet_total - grid_units) > 1e-9:
             warnings.append(_issue(str(totals_row), 'TOTAL', f"TOTAL row says {sheet_total:g}, the stores add up to {grid_units:g}", major=True))
+    with_stores(errors + warnings, lambda r: val(r, store_col))  # 'Row 11 Macpac Adelaide', not only 'Row 11'
     if errors:
         raise PackCheckError(errors, warnings)
 
@@ -453,7 +455,12 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     found = {'packs': {f"{p['order']}. {p['name']}": f"{L(p['cols'][0])}-{L(p['cols'][-1])}" for p in packs},
              'codes': sorted({re.sub(r"'Code for .*?' column \(column [A-Z]+\)", "code columns", p['code_source']) for p in packs}),
              'rows': {'job': job_row, 'pack': pack_row, 'stores': f"{first_row}-{last_row}"},
-             'plugin': bool(plugin), 'stores': n_stores}
+             'plugin': bool(plugin), 'stores': n_stores,
+             # Each pack's Packing Specs and how many labels each, for the tab's card: [{'pack', 'specs': [[spec, n]]}]
+             'specs_by_pack': [{'pack': f"Pack {p['order']}" + ('' if str(p['name']).strip() in ('', str(p['order'])) else f" ({p['name']})"),
+                                'specs': [[s, n] for s, n in Counter(groups[k]['pack_spec_name'] for k in order
+                                                                     if groups[k]['pack_no'] == p['order']).most_common()]}
+                               for p in packs]}
     # The cell layout's blocks by the names parse_packing_data() gives them: the page offers a block only when
     # its details were found (job numbers and quantities always are; the rest come from the labelled rows above)
     found.update({

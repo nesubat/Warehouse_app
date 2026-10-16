@@ -1676,6 +1676,73 @@ labels PDF, both courier CSVs and the label map (`… (2).labelmap.json`: the tw
 Labels still finds it), Courier Import's CSVs and Stitch Labels' Complete Labels. Packing Sheets, Sub-Group and the
 Label Shuffler keep their own handling.
 
+### 10.23 Label order: grouped by allocation or not (horizontal files)
+
+Under the consignment preview, **Label order** (`label_grouping`, kept through a preview in `courier`):
+- **Group by allocation** (default): each pack's labels code by code (A, B, C …: stores with the same allocation
+  together), the code in the Packing Spec panel ('PACK 1 · CODE A') and in the code boxes each label opens with; then
+  **Divider before each code** or **No dividers** (`code_dividers` 1 / 0).
+- **Don't group**: `generate_horizontal_labels(..., group_by_code=False)` puts each pack's labels in the sheet's store
+  order, the Packing Spec panel says only 'PACK 1', no code boxes, no dividers; the audit page per pack stays and says
+  so. Only the PDF changes: Item References (01T1P2 Store), the CSVs and the label map are the same either way. The live
+  preview leaves the code box out too (`is_code` in `cell_preview`).
+
+### 10.22 Why a big labels PDF is quick to write
+
+- **Each artwork goes in once** (`_art()` in packing_label_generator.py, kept per PDF): exactly as it is in the Excel
+  file, and every item box using it points at the same embedded image (`insert_image(xref=…)`). Its size comes from the
+  image's header, not a decode. A 214-label file places 53 artworks 1,760 times: embedded each time it was a 340 MB PDF
+  that took two to four minutes; now ~11 MB, same pixels.
+- **Text is measured once per string** (`_text_len`, `_wrap_cached`: lru_cache): job numbers, descriptions and words
+  repeat across hundreds of labels.
+- **Horizontal files** (`generate_horizontal_labels`): the label pages go into the final PDF with one copy and are put in
+  packing-sheet order with `select()`, between the audit pages and dividers; copying them a page at a time copied
+  every image again for each page. Saved with `garbage=1` (drop what's unused) and compression; no duplicate search
+  is needed now that images are shared.
+- Checked by `test_each_artwork_is_embedded_once_at_full_quality`, and against the old output: same text and the same
+  rendered pixels on every page compared.
+
+### 10.24 Why Stitch Labels is quick (`label_render.py`)
+
+A stitch renders every courier label at 600 dpi (sharp barcodes): about a fifth of a second each in PyMuPDF, which
+holds Python while it works. 214 labels took 2-3 minutes; now about 16 s, with the same pixels.
+
+- **Worker processes** (`label_render.render_many`): with 24 labels or more, the labels are split over a few
+  `python -m engine.packing_labels.label_render JOBFILE` processes (one per 16 labels, up to the cores less one, at most
+  8), each rendering its share and handing back the pictures in order. `label_render.py` loads only PyMuPDF and Pillow,
+  so a worker doesn't load the app, its log or its data. From the .exe, for a handful of labels, or when a worker
+  fails, the stitcher renders them itself (`_rendered`), and the log says which way it went.
+- **No double compression**: each label's grayscale pixels are Flate-compressed once (`compress_label`, zlib,
+  lossless) and embedded as they are (`put_label`: an image object with `/Filter /FlateDecode`). Before, each label
+  was written as a PNG (optimize=True) for the PDF to unpack and compress again on save.
+- **Save** with `garbage=1` (drop what `select()` left out): every label image is different, so the duplicate search
+  only cost time.
+- Checked by `test_courier_labels_rendered_in_workers_match_rendering_here`, and against the old output on a real
+  214-label job: the same courier label pixels on every page.
+
+### 10.25 PACK AUDIT pages and store names on every problem
+
+- **One page for both kinds of file** (`draw_audit_page` in packing_label_generator.py): 'PACK AUDIT' over the title,
+  the figures to check against the packing sheet, grey notes, then **Needs a look**, each line with its row and store
+  (as many as fit, then '... and N more'). Green when nothing needs a look, amber otherwise.
+  - Horizontal files: one before each pack's labels, 'Tab 1 - Pack 1' (a pack with its own name: 'Tab 1 - Pack 2:
+    Window kit'); labels, boxes, codes, units, the pack's Packing Specs, where the codes came from, the label order.
+  - Vertical files: one before each tab's labels instead of the plain tab divider, 'Tab 1: VIC'
+    (`generate_packing_labels(..., tab_notes={tab: [issues]})`, from the tab's warnings); labels, boxes, stores,
+    units, the tab's Packing Specs, the label order. The label map points at labels only, never at an audit page.
+- **Store names**: every reader (vertical, horizontal, Courier Import) calls `with_stores(issues, store_of)`, which puts
+  the store of each row a problem names on it (`issue['stores'] = [[row, store]]`, from the store column; merged cells
+  read as one). `issue_where()` writes it out: 'Row 11 Macpac Adelaide', 'Rows 11-13: Macpac Adelaide, Macpac Bondi …'.
+  The audit pages, the job report's Spreadsheet checks, the tab cards and To check (`group_issues`: 'Pack 1: row 11
+  (Macpac Adelaide)') all show it.
+- **The consignment preview's problems not fixed before Generate** go on the audit pages too
+  (`_unfixed_preview_problems` in app.py): no address, a suburb / state / postcode missing, no receiver name, the
+  official data disagreeing or a street not on record (not for an address saved in the book). Each is put on the
+  page of every pack (horizontal) or tab (vertical) the consignment has labels in, with that label's row and store:
+  'Row 3 Macpac Everton Park · Consignment #2: Address incomplete: no suburb (not fixed in the preview)'.
+- **Packing Specs by pack** (horizontal tab cards): `found['specs_by_pack']`, each pack's specs and how many labels
+  each.
+
 ### 10.19 Back up & move data (`data_transfer.py`, `/data-transfer`)
 
 The `data` folder is git-ignored, so a fresh clone starts empty. `export_zip(data_dir, book, chosen)` writes the chosen items (`ITEMS`: address_book, packing_specs, export_details, service_usage, address_data_settings) and a `manifest.json` into one zip; the book through SQLite's backup, so it's consistent while in use. `/data-transfer/import` takes an upload, lists it (`describe_zip`; kept as `data/transfer_uploads/<token>.zip` for a day) and then `import_zip(data, {item: mode})`: the book is opened through `AddressBook` first (an older book's schema is brought up to date), then **merged** (entries matched on address + receiver + Attn keys: missing ones added, verified marks and Keep-as-is carried over, learned spellings added) or **replaced** (rows deleted and re-inserted, so the app's open connections stay valid and the search index follows through its triggers); packing specs merged by name or replaced; settings replaced. `_backup` copies what's about to change to `data/backups/before-import-<time>/` first. The official address data isn't exported.

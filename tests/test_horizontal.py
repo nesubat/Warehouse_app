@@ -168,7 +168,7 @@ def client(tmp_path, monkeypatch):
     return app_module.app.test_client(), app_module, tmp_path / "projects"
 
 
-def run_page(client, final, sig, dividers=True):
+def run_page(client, final, sig, dividers=True, extra=None):
     c, app_module, projects = client
     with open(final, "rb") as f, open(sig, "rb") as s:
         r = c.post("/packing-labels/horizontal", data={"file": (f, final.name), "signature_file": (s, sig.name)},
@@ -190,6 +190,7 @@ def run_page(client, final, sig, dividers=True):
            "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty"}
     if dividers:
         gen["code_dividers"] = "1"
+    gen.update(extra or {})
     r = c.post("/packing-labels/horizontal", data=gen, follow_redirects=True)
     assert r.status_code == 200 and "Labels Successfully Generated" in r.data.decode(), r.data.decode()[:1500]
     folder = next(p for p in projects.iterdir() if p.is_dir())
@@ -209,7 +210,8 @@ def test_page_generates_labels_csv_and_label_map(client, files):
     doc = fitz.open(folder / pdf)
     texts = [p.get_text() for p in doc]
     # report, then per pack: audit page, divider per code, labels
-    assert "PACK AUDIT - TAB 1 - PACK 1" in texts[labelmap.get("report_pages", 1)]
+    audit = texts[labelmap.get("report_pages", 1)]
+    assert "PACK AUDIT" in audit and "Tab 1 - Pack 1" in audit  # the header: PACK AUDIT over Tab 1 - Pack 1
     codes = {pk["open360_code"] for packs in labelmap["stores"].values() for pk in packs}
     assert "03T1P2" in codes
     for packs in labelmap["stores"].values():  # every label-map page really is that pack's packing label
@@ -290,7 +292,7 @@ def test_labels_carry_code_boxes_and_audit_page_is_short(client, files):
     assert words.count("C") >= 2  # the pack code and the sub-group code, each in its quantity box
     assert all(not str(j).startswith("Code for") for packs in labelmap["stores"].values() for pk in packs
                for j in pk.get("job_numbers", []))
-    audit = next(p.get_text() for p in doc if "PACK AUDIT - TAB 1 - PACK 2" in p.get_text())
+    audit = next(p.get_text() for p in doc if "PACK AUDIT" in p.get_text() and "Tab 1 - Pack 2" in p.get_text())
     assert "J476699-05" not in audit and "Spring Sale" not in audit and "LABELS" in audit
 
 
@@ -423,3 +425,147 @@ def test_every_row_above_the_stores_is_a_block_for_the_item_box(tmp_path):
     pdf = tmp_path / "labels.pdf"
     generate_packing_labels(dict(list(groups.items())[:1]), str(pdf), ['row_5', 'job_no', 'qty'])
     assert "2x Kinds" in fitz.open(pdf)[0].get_text()
+
+
+def test_each_artwork_is_embedded_once_at_full_quality(files, tmp_path):
+    """An artwork used on many labels goes into the PDF once, unchanged, and every box points at it: embedding it
+    again for each box made a 340 MB PDF that took minutes to write."""
+    from engine.packing_labels.packing_label_generator import generate_packing_labels
+    from PIL import Image
+    import io as _io
+    final, sig, _ = files
+    groups, _, _, _ = read(final, sig=sig)
+    distinct = {id(d): d for g in groups.values() for i in g['items'] for d in i.get('thumbnails') or []}
+    placed = sum(len(i.get('thumbnails') or []) for g in groups.values() for i in g['items'])
+    assert placed > len(distinct)  # the sample repeats its artwork across stores
+    pdf = tmp_path / "labels.pdf"
+    generate_packing_labels(groups, str(pdf), ['thumbnail', 'job_no', 'qty'])
+    doc = fitz.open(pdf)
+    xrefs = {img[0] for page in doc for img in page.get_images()}
+    assert len(xrefs) == len(distinct)
+    sizes = {Image.open(_io.BytesIO(d.getvalue())).size for d in distinct.values()}
+    assert {(doc.extract_image(x)['width'], doc.extract_image(x)['height']) for x in xrefs} == sizes  # full size kept
+
+
+def test_page_without_grouping_keeps_sheet_order_and_no_codes(client, files):
+    """'Don't group': each pack's labels in the sheet's store order, no code in the Packing Spec panel, no code boxes,
+    no dividers; the Item References (and so the CSVs and Stitch Labels) are the same as grouped."""
+    final, sig, _ = files
+    folder = run_page(client, final, sig, extra={"label_grouping": "store", "code_dividers": "1"})  # dividers ignored
+    names = os.listdir(folder)
+    doc = fitz.open(folder / next(n for n in names if n.startswith("Packing Labels Only")))
+    labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
+    labels = [p.get_text() for p in doc if "PACKING SPEC" in p.get_text()]
+    assert labels and not any(" CODE " in t or "Code for Pack" in t for t in labels)
+    packs = [pk for store in labelmap["stores"].values() for pk in store]
+    label_pages = {p for pk in packs for p in pk["pdf_pages"]}
+    blocks = {pk["open360_code"][2:] for pk in packs}  # 'T1P2': one audit page per tab and pack
+    assert len(doc) == labelmap.get("report_pages", 1) + len(blocks) + len(label_pages)  # nothing else: no dividers
+    for block in blocks:  # within a pack, stores in sheet order (the serial's store number)
+        firsts = sorted((pk["pdf_pages"][0], int(pk["open360_code"][:2])) for pk in packs if pk["open360_code"][2:] == block)
+        assert [n for _, n in firsts] == sorted(n for _, n in firsts)
+    rows = open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8").read()
+    assert "03T1P2 Chadstone" in rows and "01T2P1 Corio Village" in rows
+
+
+def test_courier_labels_rendered_in_workers_match_rendering_here(tmp_path, monkeypatch):
+    """Stitch Labels renders big jobs in worker processes: the pictures must be exactly the ones rendered here."""
+    from engine.packing_labels import label_render
+    doc = fitz.open()
+    for n in range(6):
+        page = doc.new_page(width=288, height=432)  # a 4x6 courier label
+        page.insert_text((20, 60), f"Item Ref: {n + 1:02d}T1P1 Store {n}", fontsize=14)
+        page.draw_rect(fitz.Rect(20, 100, 268, 160), color=(0, 0, 0), fill=(0, 0, 0))
+    data = doc.tobytes()
+    jobs = [("labels.pdf", n + 1) for n in range(6)]
+    monkeypatch.setattr(label_render, "WORKER_MIN_LABELS", 1)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    in_workers = label_render.render_many([("labels.pdf", data)], jobs, (200, 300), root)
+    path = tmp_path / "labels.pdf"
+    path.write_bytes(data)
+    assert in_workers == label_render._render_pages({"labels.pdf": str(path)}, jobs, (200, 300))
+
+
+def test_problems_name_the_store_on_their_row(tmp_path, monkeypatch):
+    """'Row 13 Carindale', not only 'Row 13': on the problem itself, the pack's audit page and the preview's grouped
+    line."""
+    from engine.packing_labels.packing_label_generator import issue_where, group_issues
+    from engine.packing_labels.horizontal_labels import generate_horizontal_labels
+    final, sig = _spec_without_quantities(tmp_path, monkeypatch)
+    groups, _, _, warnings = read(final, sig=sig)
+    found = {w['rows']: w for w in warnings if w['text'].startswith("Packing Spec but no quantities")}
+    assert found['13']['stores'] == [[13, "Carindale"]] and issue_where(found['13']) == "Row 13 Carindale"
+    assert issue_where({'rows': '13-15', 'stores': [[13, "Carindale"], [15, "Garden City"]]}) == "Rows 13-15: Carindale, Garden City"
+    assert "Pack 2: row 13 (Carindale)" in group_issues(warnings)[0]['where']
+    pdf = tmp_path / "labels.pdf"
+    notes = {(1, 2): [found['13']], (1, 1): [found['15']]}
+    generate_horizontal_labels(groups, str(pdf), ['job_no', 'qty'], serials={k: g['serial'] for k, g in groups.items()},
+                               add_dividers=False, notes=notes)
+    audits = [p.get_text() for p in fitz.open(pdf) if "PACK AUDIT" in p.get_text()]
+    assert any("Row 13 Carindale" in t for t in audits) and any("Row 15 Garden City" in t for t in audits)
+
+
+def test_vertical_labels_get_a_pack_audit_page_per_tab(tmp_path):
+    """Vertical files: 'PACK AUDIT' over 'Tab 1: VIC' before each tab's labels (instead of the plain divider), with
+    the tab's figures, its Packing Specs and what needs a look by row and store."""
+    import openpyxl
+    from engine.packing_labels.packing_label_generator import parse_packing_data, generate_packing_labels
+    path = tmp_path / "vertical.xlsx"
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for tab, rows in (("VIC", [("Corio Village", "5 Bacchus Marsh Rd", "Corio", "VIC", "3214", "OB170170170"),
+                               ("Highpoint", "", "", "", "", "OB170170170"),
+                               ("Chadstone", "1341 Dandenong Rd", "Chadstone", "VIC", "3148", "2 x CS450320150")]),
+                      ("NSW", [("Parramatta", "159 Church St", "Parramatta", "NSW", "2150", "OB170170170")])):
+        ws = wb.create_sheet(tab)
+        ws.append(["Packing Spec", "Store Name", "Address Line 1", "Suburb", "State", "Postcode", "Job Number", "Qty", "Install"])
+        for i, (store, line1, suburb, state, pc, spec) in enumerate(rows, 1):
+            ws.append([spec, store, line1, suburb, state, pc, f"J900200-{i:02d}", 3, "N"])
+    wb.save(path)
+    groups, notes, tabs = {}, {}, {}
+    for n, tab in enumerate(("VIC", "NSW"), 1):
+        g, _, _, warnings = parse_packing_data(str(path), 1, tab)
+        notes[n] = warnings
+        for k, v in g.items():
+            groups[f"{tab} - {k}"] = v
+            tabs[f"{tab} - {k}"] = (n, tab)
+    assert any(w.get('stores') == [[3, "Highpoint"]] for w in notes[1])  # 'Row 3 Highpoint': No address
+    pdf = tmp_path / "labels.pdf"
+    info = generate_packing_labels(groups, str(pdf), ['job_no', 'qty'], tabs=tabs, tab_notes=notes)
+    texts = [p.get_text() for p in fitz.open(pdf)]
+    audits = [i for i, t in enumerate(texts) if "PACK AUDIT" in t]
+    assert len(audits) == 2 and audits[0] == 0  # one per tab, the first before any label
+    assert "Tab 1: VIC" in texts[0] and "Tab 2: NSW" in texts[audits[1]]
+    assert "OB170170170: 2 labels" in texts[0] and "2 x CS450320150: 1 label" in texts[0]
+    assert "Row 3 Highpoint" in texts[0] and not any("DIVIDER - NOT A LABEL" in t for t in texts)
+    label_pages = sorted(p for v in info['pages'].values() for p in v)
+    assert not set(label_pages) & set(audits)  # the label map points at labels, never at an audit page
+
+
+def test_tab_card_lists_each_packs_packing_specs(files):
+    final, sig, _ = files
+    _, _, found, _ = read(final, sig=sig)
+    by_pack = {p['pack']: dict(p['specs']) for p in found['specs_by_pack']}
+    assert by_pack["Pack 1"] == {"OB600100100": 7}
+    assert by_pack["Pack 2"] == {"CS450320150": 6, "2 x CS450320150": 1}
+
+
+def test_preview_problems_not_fixed_go_on_the_audit_pages(client, tmp_path, monkeypatch):
+    """A consignment problem still there at Generate (here: no suburb) is on the audit page of each pack it has
+    labels in, with its row and store."""
+    import fixtures
+    tabs = copy.deepcopy(fixtures.TABS)
+    stores = tabs["Spring Sale"]["stores"]
+    for i, st in enumerate(stores):
+        if st[0] == "Highpoint":
+            stores[i] = st[:3] + ("",) + st[4:]  # no suburb
+    monkeypatch.setattr(fixtures, "TABS", tabs)
+    codes = build_final_file(tmp_path / FINAL)
+    build_signature_links(tmp_path / SIG, codes)
+    folder = run_page(client, tmp_path / FINAL, tmp_path / SIG)
+    doc = fitz.open(folder / next(n for n in os.listdir(folder) if n.startswith("Packing Labels Only")))
+    audits = [p.get_text() for p in doc if "PACK AUDIT" in p.get_text() and "Spring" not in p.get_text()]
+    hits = [t for t in audits if "Address incomplete: no suburb (not fixed in the preview)" in t]
+    assert len(hits) == 2  # Highpoint has a label in pack 1 and in pack 2 of the first tab
+    assert all("Row 10 Highpoint" in t and "Consignment #" in t for t in hits)
+    assert all("Check before packing" in t for t in hits)
