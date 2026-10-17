@@ -9,6 +9,8 @@ takes the parts chosen there:
   packing_specs          data/packing_specs.json      Merge (adds the named specs missing here) or Replace
   export_details         data/export_details.json     Replace
   service_usage          data/service_code_usage.json Replace
+  courier_services       data/courier_services.json + data/courier_logos/*.png (each group's logo)
+                         Merge (adds the services, groups and logos missing here) or Replace
   address_data_settings  data/address_reference.json  (the LINZ API key) Replace
 
 The official address data (G-NAF, LINZ) isn't included: it's large and the Address Data page loads it again. Before an
@@ -29,6 +31,8 @@ ITEMS = {  # key: (label, what it holds, file in data/, import modes)
                      'spellings learned for them', 'address_book.db', ('merge', 'replace')),
     'packing_specs': ('Packing specs', 'Sizes, weights and item types for each Packing Spec', 'packing_specs.json', ('merge', 'replace')),
     'export_details': ('Export details', 'Defaults for deliveries outside Australia in the OpenFreight CSV', 'export_details.json', ('replace',)),
+    'courier_services': ('Courier services', 'The courier service codes, their groups and each group logo (PNG)',
+                         'courier_services.json', ('merge', 'replace')),
     'service_usage': ('Service code order', 'How often each courier service was used (the order of the service list)',
                       'service_code_usage.json', ('replace',)),
     'address_data_settings': ('Address data settings', 'Your LINZ API key and when the address data was last checked '
@@ -58,6 +62,12 @@ def _write_json(path, data):
 def _summary(key, path=None, book=None, data=None):
     """One line about what an item holds ('32 addresses, 30 verified')."""
     try:
+        if key == 'courier_services':
+            data = data if data is not None else _read_json(path, {})
+            groups = data.get('groups') or []
+            n = sum(len(g.get('services') or []) for g in groups)
+            logos = sum(1 for g in groups if g.get('logo'))
+            return f"{n} services in {len(groups)} groups, {logos} logo{'s' if logos != 1 else ''}"
         if key == 'address_book':
             db = book._connect() if book is not None else sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             n = db.execute("SELECT COUNT(*) FROM addresses").fetchone()[0]
@@ -82,18 +92,23 @@ def _summary(key, path=None, book=None, data=None):
     return ''
 
 
-def what_is_here(data_dir, book):
+def what_is_here(data_dir, book, services=None):
     """The items this copy of the app has, for the Export list: [{key, label, about, summary, modes, present}]."""
     out = []
     for key, (label, about, name, modes) in ITEMS.items():
         path = os.path.join(data_dir, name)
         present = book.count() > 0 if key == 'address_book' else os.path.exists(path)
-        out.append({'key': key, 'label': label, 'about': about, 'modes': modes, 'present': present,
-                    'summary': _summary(key, path, book if key == 'address_book' else None) if present else 'nothing saved yet'})
+        if key == 'courier_services' and services is not None:
+            path = services.path
+            present = os.path.exists(path)
+        summary = _summary(key, path, book if key == 'address_book' else None) if present else 'nothing saved yet'
+        if key == 'courier_services' and services is not None:
+            present, summary = True, services.summary()  # the list the app starts with counts, with its logos
+        out.append({'key': key, 'label': label, 'about': about, 'modes': modes, 'present': present, 'summary': summary})
     return out
 
 
-def export_zip(data_dir, book, chosen):
+def export_zip(data_dir, book, chosen, services=None):
     """The chosen items as one zip (bytes), with a manifest describing them."""
     chosen = [k for k in ITEMS if k in set(chosen or [])]
     if not chosen:
@@ -113,11 +128,15 @@ def export_zip(data_dir, book, chosen):
                     book._connect().backup(dest)
                     dest.close()
                     z.write(copy, name)
+            elif key == 'courier_services' and services is not None:
+                for arc, raw in services.export_files().items():  # the list and every group's logo
+                    z.writestr(arc, raw)
             elif os.path.exists(path):
                 z.write(path, name)
             else:
                 continue
-            manifest['items'][key] = {'label': label, 'file': name, 'summary': _summary(key, path, book if key == 'address_book' else None)}
+            summary = services.summary() if key == 'courier_services' and services is not None else                 _summary(key, path, book if key == 'address_book' else None)
+            manifest['items'][key] = {'label': label, 'file': name, 'summary': summary}
         z.writestr('manifest.json', json.dumps(manifest, indent=2, ensure_ascii=False))
     if not manifest['items']:
         raise TransferError("Nothing to export: none of the chosen things is saved yet.")
@@ -137,6 +156,9 @@ def read_zip(data):
     for key, info in (manifest.get('items') or {}).items():
         if key in ITEMS and ITEMS[key][2] in z.namelist():
             files[key] = z.read(ITEMS[key][2])
+            if key == 'courier_services':  # the list with its logos, as ServiceStore.import_files takes them
+                files[key] = {n: z.read(n) for n in z.namelist() if n == ITEMS[key][2] or
+                              (n.startswith('courier_logos/') and n.lower().endswith('.png'))}
     return manifest, files
 
 
@@ -153,7 +175,7 @@ def describe_zip(data):
     return manifest, out
 
 
-def _backup(data_dir, book, keys):
+def _backup(data_dir, book, keys, services=None):
     """Copies of everything an import is about to change, in data/backups/before-import-<time>/."""
     folder = os.path.join(data_dir, 'backups', f"before-import-{datetime.now():%Y%m%d-%H%M%S}")
     os.makedirs(folder, exist_ok=True)
@@ -163,6 +185,11 @@ def _backup(data_dir, book, keys):
             dest = sqlite3.connect(os.path.join(folder, name))
             book._connect().backup(dest)
             dest.close()
+        elif key == 'courier_services' and services is not None:
+            if os.path.exists(services.path):
+                shutil.copy2(services.path, os.path.join(folder, name))
+            if os.path.isdir(services.logo_dir):
+                shutil.copytree(services.logo_dir, os.path.join(folder, 'courier_logos'))
         elif os.path.exists(os.path.join(data_dir, name)):
             shutil.copy2(os.path.join(data_dir, name), os.path.join(folder, name))
     return folder
@@ -230,14 +257,18 @@ def _import_specs(spec_store, raw, mode):
     return f"{len(new)} named spec{'s' if len(new) != 1 else ''} added (the ones here kept as they are)"
 
 
-def import_zip(data, choices, data_dir, book, spec_store):
+def import_zip(data, choices, data_dir, book, spec_store, services=None):
     """Takes the chosen parts of an exported zip. choices: {key: 'merge' | 'replace'}. Returns
     {'backup': folder, 'done': [(label, what happened)]}."""
     manifest, files = read_zip(data)
     chosen = {k: m for k, m in (choices or {}).items() if k in files and m in ITEMS[k][3]}
     if not chosen:
         raise TransferError("Choose at least one thing to import.")
-    backup = _backup(data_dir, book, chosen)
+    if 'courier_services' in chosen and services is None:
+        chosen.pop('courier_services')
+    if not chosen:
+        raise TransferError("Choose at least one thing to import.")
+    backup = _backup(data_dir, book, chosen, services)
     done = []
     for key, mode in chosen.items():
         label, _, name, _ = ITEMS[key]
@@ -246,6 +277,8 @@ def import_zip(data, choices, data_dir, book, spec_store):
             done.append((label, _import_book(book, raw, mode)))
         elif key == 'packing_specs':
             done.append((label, _import_specs(spec_store, raw, mode)))
+        elif key == 'courier_services':
+            done.append((label, services.import_files(raw, mode)))
         else:
             data_ = json.loads(raw.decode('utf-8'))
             _write_json(os.path.join(data_dir, name), data_)

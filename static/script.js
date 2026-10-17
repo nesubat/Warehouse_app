@@ -88,6 +88,19 @@ document.addEventListener("DOMContentLoaded", function() {
         window.scrollTo(0, parseInt(savedScroll));
         sessionStorage.removeItem('dashboardScroll');
     }
+    // Back from 'Create … CSV' (?open=<project>&new=<file>): that project open, at its courier CSVs, the new file marked
+    const params = new URLSearchParams(location.search);
+    if (params.get('open')) {
+        const content = document.getElementById('content-' + params.get('open'));
+        if (content) {
+            content.style.display = 'block';
+            const icon = content.previousElementSibling.querySelector('.accordion-icon');
+            if (icon) { icon.innerHTML = '▲'; icon.style.color = '#3498db'; }
+            const target = content.querySelector('.file-row-new') || document.getElementById('csv-' + params.get('open')) || content;
+            requestAnimationFrame(() => target.scrollIntoView({ block: 'center', behavior: 'instant' }));
+        }
+        history.replaceState(null, '', location.pathname + '#dashboard-section');  // a refresh doesn't jump again
+    }
     const openProject = sessionStorage.getItem('openProject');
     if (openProject) {
         const content = document.getElementById('content-' + openProject);
@@ -611,6 +624,8 @@ document.addEventListener("DOMContentLoaded", function() {
 
         const overlay = document.getElementById('loading-overlay');
         if (overlay) {
+            const text = document.getElementById('loading-text');
+            if (text && e.target.action && e.target.action.includes('/courier-csv')) text.textContent = 'Making the courier CSV…';
             overlay.style.display = 'flex';
         }
     });
@@ -804,106 +819,137 @@ function cellPreview(getOrder) {
     }
 
     // _layout_cell: stacks the blocks top-down and returns the height used; draws only when draw is true
-    function layout(ctx, item, imgs, order, textScale, thumbScale, draw) {
+    // One block of an item box at y; returns the y after it (and its gap). Draws only when draw is true
+    function block(ctx, item, imgs, attr, textScale, thumbScale, draw, y) {
         const pad = 4, x0 = pad, x1 = CW - pad, innerW = x1 - x0, gap = 3 * textScale;
+        if (attr === 'thumbnail') {
+            if (!imgs.length) return y;
+            const h = CH * 0.35 * thumbScale;
+            if (draw) {
+                // One image: centred, 70% of the box width. Several: share the full width, up to 3 a row
+                const n = imgs.length, perRow = Math.min(n, 3), rows = Math.ceil(n / perRow);
+                const areaW = n === 1 ? CW * 0.7 : innerW;
+                const ax = (CW - areaW) / 2;
+                const slotW = (areaW - (perRow - 1) * 2) / perRow;
+                const slotH = (h - (rows - 1) * 2) / rows;
+                imgs.forEach((img, i) => {
+                    const sx = ax + (i % perRow) * (slotW + 2);
+                    const sy = y + Math.floor(i / perRow) * (slotH + 2);
+                    if (img.failed) {
+                        setFont(ctx, false, 8);
+                        ctx.fillStyle = '#000';
+                        const tw = ctx.measureText('Image Error').width;
+                        ctx.fillText('Image Error', sx + (slotW - tw) / 2, sy + 8);
+                    } else if (img.el && img.el.complete && img.el.naturalWidth) {
+                        const s = Math.min(slotW / img.el.naturalWidth, slotH / img.el.naturalHeight);
+                        const w = img.el.naturalWidth * s, ih = img.el.naturalHeight * s;
+                        ctx.drawImage(img.el, sx + (slotW - w) / 2, sy + (slotH - ih) / 2, w, ih);
+                    }
+                });
+            }
+            y += h + gap;
+        } else if (attr === 'job_no') {
+            if (!item.job_no) return y;
+            const size = 14 * textScale;
+            const lines = wrap(ctx, item.job_no, true, size, innerW - 4);
+            const h = lines.length * size * LINE + 6 * textScale;
+            if (draw) {
+                roundRect(ctx, 3, y, CW - 3, y + h, 3);
+                ctx.fillStyle = '#000';
+                ctx.fill();
+                drawLines(ctx, lines, x0, x1, y + 3 * textScale, true, size, '#fff');
+            }
+            y += h + gap;
+        } else if (attr === 'barcode') {
+            const modules = item.modules;
+            if (!modules) return y;
+            // Code 128 needs blank modules either side; the bars get as wide as the box allows
+            const moduleW = Math.min(data.barcode_max_module, innerW / (modules.length + 2 * data.barcode_quiet));
+            const barH = 22 * textScale, size = 6.5 * textScale;
+            const h = barH + 2 + size * LINE;
+            if (draw) {
+                const bx = (CW - modules.length * moduleW) / 2;
+                ctx.fillStyle = '#000';
+                let runStart = -1;
+                for (let i = 0; i <= modules.length; i++) {
+                    const bar = i < modules.length && modules[i] === '1';
+                    if (bar && runStart < 0) runStart = i;
+                    else if (!bar && runStart >= 0) { ctx.fillRect(bx + runStart * moduleW, y, (i - runStart) * moduleW, barH); runStart = -1; }
+                }
+                drawLines(ctx, [item.barcode], x0, x1, y + barH + 2, false, size, '#000');
+            }
+            y += h + gap;
+        } else if (attr === 'qty') {
+            if (!item.qty) return y;
+            const size = 20 * textScale, border = 2.5 * textScale;
+            const lines = wrap(ctx, item.qty, true, size, innerW - 2 * border - 8);
+            setFont(ctx, true, size);
+            const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
+            const boxW = Math.min(innerW, Math.max(70 * textScale, widest + 16 * textScale));
+            const h = lines.length * size * LINE + 6 * textScale;
+            if (draw) {
+                const bx0 = (CW - boxW) / 2, half = border / 2;
+                ctx.lineWidth = border;
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(bx0 + half, y + half, boxW - border, h - border);
+                drawLines(ctx, lines, bx0, bx0 + boxW, y + 3 * textScale, true, size, '#000');
+            }
+            y += h + gap;
+        } else if (TEXT_STYLES[attr] || /^row_\d+$/.test(attr)) {  // a row of the file reads like a description
+            const val = item[attr];
+            if (!val) return y;
+            const [base, bold, colour] = TEXT_STYLES[attr] || TEXT_STYLES.desc;
+            const size = base * textScale;
+            const lines = wrap(ctx, val, bold, size, innerW);
+            if (draw) drawLines(ctx, lines, x0, x1, y, bold, size, colour);
+            y += lines.length * size * LINE + gap;
+        }
+        return y;
+    }
+    // slots ({block: height}, planCells): each block takes the same height in every box, empty or not (plan_cells);
+    // heights: filled with what each block of this item needs
+    function layout(ctx, item, imgs, order, textScale, thumbScale, draw, slots, heights) {
+        const pad = 4, gap = 3 * textScale;
         let y = pad;
         for (const attr of order) {
-            if (attr === 'thumbnail') {
-                if (!imgs.length) continue;
-                const h = CH * 0.35 * thumbScale;
-                if (draw) {
-                    // One image: centred, 70% of the box width. Several: share the full width, up to 3 a row
-                    const n = imgs.length, perRow = Math.min(n, 3), rows = Math.ceil(n / perRow);
-                    const areaW = n === 1 ? CW * 0.7 : innerW;
-                    const ax = (CW - areaW) / 2;
-                    const slotW = (areaW - (perRow - 1) * 2) / perRow;
-                    const slotH = (h - (rows - 1) * 2) / rows;
-                    imgs.forEach((img, i) => {
-                        const sx = ax + (i % perRow) * (slotW + 2);
-                        const sy = y + Math.floor(i / perRow) * (slotH + 2);
-                        if (img.failed) {
-                            setFont(ctx, false, 8);
-                            ctx.fillStyle = '#000';
-                            const tw = ctx.measureText('Image Error').width;
-                            ctx.fillText('Image Error', sx + (slotW - tw) / 2, sy + 8);
-                        } else if (img.el && img.el.complete && img.el.naturalWidth) {
-                            const s = Math.min(slotW / img.el.naturalWidth, slotH / img.el.naturalHeight);
-                            const w = img.el.naturalWidth * s, ih = img.el.naturalHeight * s;
-                            ctx.drawImage(img.el, sx + (slotW - w) / 2, sy + (slotH - ih) / 2, w, ih);
-                        }
-                    });
-                }
-                y += h + gap;
-            } else if (attr === 'job_no') {
-                if (!item.job_no) continue;
-                const size = 14 * textScale;
-                const lines = wrap(ctx, item.job_no, true, size, innerW - 4);
-                const h = lines.length * size * LINE + 6 * textScale;
-                if (draw) {
-                    roundRect(ctx, 3, y, CW - 3, y + h, 3);
-                    ctx.fillStyle = '#000';
-                    ctx.fill();
-                    drawLines(ctx, lines, x0, x1, y + 3 * textScale, true, size, '#fff');
-                }
-                y += h + gap;
-            } else if (attr === 'barcode') {
-                const modules = item.modules;
-                if (!modules) continue;
-                // Code 128 needs blank modules either side; the bars get as wide as the box allows
-                const moduleW = Math.min(data.barcode_max_module, innerW / (modules.length + 2 * data.barcode_quiet));
-                const barH = 22 * textScale, size = 6.5 * textScale;
-                const h = barH + 2 + size * LINE;
-                if (draw) {
-                    const bx = (CW - modules.length * moduleW) / 2;
-                    ctx.fillStyle = '#000';
-                    let runStart = -1;
-                    for (let i = 0; i <= modules.length; i++) {
-                        const bar = i < modules.length && modules[i] === '1';
-                        if (bar && runStart < 0) runStart = i;
-                        else if (!bar && runStart >= 0) { ctx.fillRect(bx + runStart * moduleW, y, (i - runStart) * moduleW, barH); runStart = -1; }
-                    }
-                    drawLines(ctx, [item.barcode], x0, x1, y + barH + 2, false, size, '#000');
-                }
-                y += h + gap;
-            } else if (attr === 'qty') {
-                if (!item.qty) continue;
-                const size = 20 * textScale, border = 2.5 * textScale;
-                const lines = wrap(ctx, item.qty, true, size, innerW - 2 * border - 8);
-                setFont(ctx, true, size);
-                const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
-                const boxW = Math.min(innerW, Math.max(70 * textScale, widest + 16 * textScale));
-                const h = lines.length * size * LINE + 6 * textScale;
-                if (draw) {
-                    const bx0 = (CW - boxW) / 2, half = border / 2;
-                    ctx.lineWidth = border;
-                    ctx.strokeStyle = '#000';
-                    ctx.strokeRect(bx0 + half, y + half, boxW - border, h - border);
-                    drawLines(ctx, lines, bx0, bx0 + boxW, y + 3 * textScale, true, size, '#000');
-                }
-                y += h + gap;
-            } else if (TEXT_STYLES[attr] || /^row_\d+$/.test(attr)) {  // a row of the file reads like a description
-                const val = item[attr];
-                if (!val) continue;
-                const [base, bold, colour] = TEXT_STYLES[attr] || TEXT_STYLES.desc;
-                const size = base * textScale;
-                const lines = wrap(ctx, val, bold, size, innerW);
-                if (draw) drawLines(ctx, lines, x0, x1, y, bold, size, colour);
-                y += lines.length * size * LINE + gap;
+            if (slots) {
+                if (!slots[attr]) continue;  // no box has this block
+                block(ctx, item, imgs, attr, textScale, thumbScale, draw, y);
+                y += slots[attr] + gap;
+                continue;
             }
+            const next = block(ctx, item, imgs, attr, textScale, thumbScale, draw, y);
+            if (heights && next > y) heights[attr] = next - y - gap;
+            y = next;
         }
         return y - gap + pad;
     }
 
     // _draw_cell: shrink the text first (down to 65%), then the images, until the whole stack fits the box
-    function drawCell(ctx, item, imgs, order) {
-        let textScale = 1, thumbScale = 1;
-        for (let step = 0; step <= 70; step++) {
-            const s = 1 - step * 0.01;
-            textScale = Math.max(s, 0.65);
-            thumbScale = s >= 0.65 ? 1 : s / 0.65;
-            if (layout(ctx, item, imgs, order, textScale, thumbScale, false) <= CH) break;
-        }
-        layout(ctx, item, imgs, order, textScale, thumbScale, true);
+    // plan_cells: one layout for every box shown (each block as tall as the tallest item needs it), at the largest
+    // scales the stack fits; an item without a value for a block leaves its space, so the blocks line up
+    function scales(step) {
+        const s = 1 - step * 0.01;
+        return [Math.max(s, 0.65), s >= 0.65 ? 1 : s / 0.65];
+    }
+    function planCells(ctx, shown, order) {
+        const at = (step) => {
+            const [ts, th] = scales(step), slots = {};
+            shown.forEach(([item, imgs]) => {
+                const used = {};
+                layout(ctx, item, imgs, order, ts, th, false, null, used);
+                Object.entries(used).forEach(([k, h]) => { slots[k] = Math.max(slots[k] || 0, h); });
+            });
+            const gap = 3 * ts, hs = Object.values(slots);
+            return { ts, th, slots, total: 8 + hs.reduce((sum, h) => sum + h + gap, 0) - (hs.length ? gap : 0) };
+        };
+        let lo = 0, hi = 70;
+        if (at(0).total <= CH) hi = 0;
+        else while (lo < hi) { const mid = (lo + hi) >> 1; if (at(mid).total <= CH) hi = mid; else lo = mid + 1; }
+        return at(hi);
+    }
+    function drawCell(ctx, item, imgs, order, plan) {
+        layout(ctx, item, imgs, order, plan.ts, plan.th, true, plan.slots);
         roundRect(ctx, 0.375, 0.375, CW - 0.375, CH - 0.375, data.radius_pt);
         ctx.lineWidth = 0.75;
         ctx.strokeStyle = '#000';
@@ -918,6 +964,8 @@ function cellPreview(getOrder) {
         const order = getOrder();
         const dpr = window.devicePixelRatio || 1;
         const noCodes = grouping() === 'store';
+        const shown = data.items.map((item, i) => [item, images[i]]).filter(([item]) => !(noCodes && item.is_code));
+        const plan = planCells(canvases[0].getContext('2d'), shown, order);
         canvases.forEach((canvas, i) => {
             canvas.hidden = noCodes && !!data.items[i].is_code;
             if (canvas.hidden) return;
@@ -928,7 +976,7 @@ function cellPreview(getOrder) {
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, pxW, pxH);
             ctx.setTransform(pxW / CW, 0, 0, pxW / CW, 0, 0);  // draw in PDF points
-            drawCell(ctx, data.items[i], images[i], order);
+            drawCell(ctx, data.items[i], images[i], order, plan);
         });
     }
 
@@ -2185,7 +2233,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // The finished file: Download and Open file, nothing else to do on this page
     function showResult(data) {
         const link = root.dataset.downloadUrl.replace('__FILE__', encodeURIComponent(data.output));
-        status.replaceChildren(el('span', null, `✅ ${data.output}: ${plural(data.placed, 'courier label')} placed`
+        status.replaceChildren(el('span', null, `${(data.without || []).length ? '⚠️' : '✅'} ${data.output}: ${plural(data.placed, 'courier label')} placed`
             + (data.unmatched ? `, ${data.unmatched} unmatched${data.added_unmatched ? ' (4-up at the end)' : ' (left out)'}. ` : '. ')));
         const a = el('a', 'ab-btn', '⬇ Download'); a.href = link;
         const open = el('a', 'ab-btn ab-btn-plain btn-file open', '📂 Open file');
@@ -2193,6 +2241,18 @@ document.addEventListener('DOMContentLoaded', function () {
         status.append(a, ' ', open);
         if ((data.locked || []).length) status.append(el('div', 'ps-hint', `Still open in another program, so not removed: ${data.locked.join(', ')}.`));
         status.classList.remove('sm-status-bad');
+        // Packing labels that got no courier label: each with its page in the new file, so they can be found and booked
+        const without = data.without || [];
+        if (without.length) {
+            const box = el('div', 'sm-missing');
+            box.append(el('strong', null, `⚠ ${plural(without.length, 'packing label')} without a courier label in this file:`));
+            const ul = el('ul');
+            without.forEach((m) => ul.append(el('li', null, `${m.slot}${m.page ? ` · page ${m.page}` : ''}`)));
+            box.append(ul, el('p', 'ps-hint', 'Book them on the courier portal, then use ➕ Add courier label PDFs and Finalise again.'));
+            status.append(box);
+        }
+        const notInCsv = data.not_in_csv || [];
+        if (notInCsv.length) status.append(el('div', 'ps-hint', `Not in the courier CSV (no complete address), so no courier label: ${notInCsv.map((m) => `${m.slot}${m.page ? ` (page ${m.page})` : ''}`).join(' · ')}.`));
         Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; });
         session.unmatched = []; session.waiting = []; finished = true;
         render();
@@ -2261,7 +2321,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const button = document.getElementById('st-submit');
     const error = document.getElementById('st-form-error');
     form.addEventListener('submit', (e) => {
-        const files = form.querySelector('.dropzone-input');
+        const files = form.querySelector('input[name="labels"]');
         const ticked = form.querySelectorAll('input[name="existing"]:checked').length;
         if (form.dataset.sent === '1' || (!(files && files.files.length) && !ticked)) {
             e.preventDefault();
@@ -2400,6 +2460,21 @@ document.addEventListener('DOMContentLoaded', function () {
             form.requestSubmit(preview);
         });
     });
+    // Or they're different places with the same name: each stays at its own address and the heading goes
+    document.querySelectorAll('.pl-group-separate').forEach((button) => {
+        button.addEventListener('click', () => {
+            if (!editsField || !preview) return;
+            let edits = {};
+            try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
+            JSON.parse(button.dataset.group).forEach((member) => member.sources.forEach((id) => {
+                edits[id] = { ...(edits[id] || {}), separate: true };
+            }));
+            editsField.value = JSON.stringify(edits);
+            button.disabled = true;
+            button.textContent = 'Keeping separate…';
+            form.requestSubmit(preview);
+        });
+    });
 });
 
 // =========================================
@@ -2461,10 +2536,27 @@ document.addEventListener('DOMContentLoaded', function () {
     const fields = [...panel.querySelectorAll('[data-export]')];
     const status = document.getElementById('pl-export-status');
     const count = document.getElementById('pl-export-count');
+    const stores = document.getElementById('pl-export-stores');
     const show = () => {
-        const n = [...document.querySelectorAll('.pl-con-row')].filter((r) => (r.dataset.country || 'AU') !== 'AU').length;
+        const abroad = [...document.querySelectorAll('.pl-con-row')].filter((r) => (r.dataset.country || 'AU') !== 'AU');
+        const n = abroad.length;
         panel.hidden = !(openfreight && openfreight.checked && n > 0);
         if (count) count.textContent = `${n} consignment${n === 1 ? '' : 's'}`;
+        // Which ones: each store with its number and country, a click goes to its row
+        if (stores) {
+            stores.replaceChildren();
+            abroad.forEach((r, i) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'pl-export-store';
+                const num = (r.querySelector('.pl-courier-num') || {}).textContent || '';
+                const name = (r.querySelector('.pl-show-receiver') || {}).textContent || '';
+                b.textContent = `#${num.replace(/\D/g, '')} ${name.trim()} (${r.dataset.country})`;
+                b.title = 'Go to this consignment';
+                b.addEventListener('click', () => { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); r.classList.remove('pl-flash'); void r.offsetWidth; r.classList.add('pl-flash'); });
+                stores.append(i ? ', ' : ': ', b);
+            });
+        }
     };
     if (openfreight) openfreight.addEventListener('change', show);
     document.addEventListener('pl-countries-changed', show);
@@ -2640,7 +2732,7 @@ function renderAddressParts(el, d) {
     const country = (d.country || 'AU').toUpperCase();
     const missing = missingParts(d);
     const parts = ['line1', 'line2', 'suburb', 'state', 'postcode'].filter((k) => d[k] || missing.includes(k));
-    if (country !== 'AU') parts.push('country');
+    parts.push('country');  // always shown, AU too, as the courier CSV carries it
     el.replaceChildren();
     parts.forEach((k, i) => {
         const span = document.createElement('span');
@@ -2666,6 +2758,36 @@ function renderAddressParts(el, d) {
 //             streets as fixes and Keep as is (a new street or centre the official data hasn't caught up with); only a
 //             grey line when the address is saved in the address book
 //   ok        a small ✓ after the address; a number not on record only shows when hovering the street
+// One instance of each change: when the address book, the saved addresses and the official data suggest the same
+// change, or one's change is part of another's (a suburb hint inside "Use EVERTON PARK QLD 4053"), only the fuller one
+// is shown, with its own buttons, and says who else suggests it. Run after each part of a row's suggestions is drawn.
+function dedupeSuggestions(row) {
+    const norm = (v) => String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toUpperCase();
+    const covers = (big, small) => Object.keys(small).length > 0 && Object.entries(small).every(([k, v]) => norm(big[k]) === norm(v));
+    const items = [];
+    row.querySelectorAll('.pl-book-opt').forEach((el) => { if (el._fields) items.push({ el, fields: el._fields, source: 'Address book', rank: 0 }); });
+    row.querySelectorAll('.pl-book-hint').forEach((el) => { if (el._fields) items.push({ el, fields: el._fields, source: 'Saved addresses', rank: 1 }); });
+    row.querySelectorAll('.pl-ref .pl-ref-use').forEach((el) => { if (el._fields) items.push({ el, fields: el._fields, source: 'Official data', rank: 2 }); });
+    items.forEach((it) => { it.el.hidden = false; it.also = []; });
+    row.querySelectorAll('.pl-also').forEach((x) => x.remove());
+    const size = (it) => Object.keys(it.fields).length;
+    items.forEach((a) => {
+        const b = items.find((x) => x !== a && !x.el.hidden && covers(x.fields, a.fields) &&
+            (size(x) > size(a) || (size(x) === size(a) && x.rank < a.rank)));
+        if (!b) return;
+        a.el.hidden = true;
+        if (!b.also.includes(a.source) && a.source !== b.source) b.also.push(a.source);
+    });
+    items.filter((it) => it.also.length).forEach((it) => {
+        const tag = document.createElement('span');
+        tag.className = 'pl-also';
+        tag.textContent = ` · also from ${it.also.join(' and ')}`;
+        tag.title = 'The same change is suggested there too: shown once';
+        if (it.el.classList.contains('pl-ref-use')) it.el.after(tag);
+        else (it.el.querySelector('.pl-book-opt-text, span') || it.el).append(tag);
+    });
+}
+
 const PL_REF = (() => {
     const refNote = () => document.getElementById('courier-ref-note');
     function count() {
@@ -2724,8 +2846,12 @@ const PL_REF = (() => {
             text.className = 'pl-ref-text';
             text.textContent = (flag === 'bad' ? '⚠ ' : 'Official data: ') + ref.message;
             box.append(text);
-            (ref.options || []).forEach((o) => box.append(button(`Use ${o.label}`, '', 'Apply this to the address (like ✏️ Save)',
-                () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: o.fields } })))));
+            (ref.options || []).forEach((o) => {
+                const use = button(`Use ${o.label}`, 'pl-ref-use', 'Apply this to the address (like ✏️ Save)',
+                    () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: o.fields } })));
+                use._fields = o.fields || {};
+                box.append(use);
+            });
             box.append(button('Keep as is', 'pl-btn-plain', 'This address is right: stop flagging it',
                 () => row.dispatchEvent(new CustomEvent('pl-ref-keep'))));
         } else if (ref.level === 'note') {
@@ -2736,6 +2862,7 @@ const PL_REF = (() => {
             box.textContent = 'Kept as is (official data differs)';
         }
         count();
+        dedupeSuggestions(row);
     }
     let timers = new WeakMap();
     function recheck(row, d, keep) {
@@ -2917,6 +3044,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
                 what.append(strong, `${name}${o.contact ? ` · Attn ${o.contact}` : ''} · ${o.why}${o.verified ? ' · ✓ Verified' : ''}`);
                 line.title = o.changed && o.changed.length ? `Differs from the address shown in: ${o.changed.join(', ')}` : '';
+                line._fields = o.fields || {};
                 line.append(what,
                     button('Use', '', 'Put this saved address in, instead of the one shown',
                         () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: o.fields, source: 'book' } }))),
@@ -2934,6 +3062,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const line = document.createElement('div');
                 line.className = 'pl-book-hint';
                 line.dataset.hintField = h.field;
+                line._fields = { [h.field]: h.value };
                 const what = document.createElement('span');
                 const strong = document.createElement('strong');
                 strong.textContent = h.label;
@@ -2947,10 +3076,60 @@ document.addEventListener('DOMContentLoaded', function () {
         row.addEventListener('pl-ref-use', (e) => {
             const changed = Object.keys(e.detail.fields || {});
             if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => { if (changed.includes(l.dataset.hintField) || e.detail.source === 'book') l.remove(); });
+            dedupeSuggestions(row);
         });
+        dedupeSuggestions(row);
     });
 
     if (!panel) return;
+    // The consignment table folds away behind a green bar when everything checks out (the first time the list is
+    // worked out); with something to check it starts open. Its button opens or closes it any time.
+    const table = document.getElementById('pl-con-table');
+    const bar = document.getElementById('pl-con-bar');
+    const toggle = document.getElementById('pl-con-toggle');
+    const stateText = document.getElementById('pl-con-state');
+    let decided = false;
+    let progress = { left: 0, total: 0 };
+    let syncFloating = () => {};
+    function showTable(open) {
+        if (!table) return;
+        table.hidden = !open;
+        toggle.textContent = open ? '▲ Hide consignments' : '▼ Show consignments';
+        toggle.setAttribute('aria-expanded', String(open));
+        syncFloating();
+    }
+    if (toggle) toggle.addEventListener('click', () => showTable(table.hidden));
+    // The same Hide on the floating Open Excel buttons (section 26), while the table is open and its own button has
+    // scrolled out of sight: one click folds the table and brings its bar back into view
+    const fx = document.getElementById('fx-open');
+    if (fx && table && toggle) {
+        const hide = document.createElement('button');
+        hide.type = 'button';
+        hide.className = 'fx-hide-btn';
+        hide.textContent = '▲ Hide consignments';
+        hide.title = 'Fold the consignment table away';
+        hide.hidden = true;
+        hide.addEventListener('click', () => { showTable(false); bar.scrollIntoView({ block: 'center' }); });
+        fx.append(hide);
+        syncFloating = () => {
+            const past = toggle.getBoundingClientRect().bottom < 0;
+            const show = !table.hidden && past && table.getBoundingClientRect().bottom > 80;
+            if (hide.hidden === show) {
+                hide.hidden = !show;
+                window.dispatchEvent(new Event('resize'));  // the floating box re-checks what it might cover
+            }
+        };
+        window.addEventListener('scroll', syncFloating, { passive: true });
+    }
+    function tableState(clear) {
+        if (!bar) return;
+        const n = rows.length, s = n === 1 ? '' : 's';
+        bar.classList.toggle('pl-con-clear', clear || (progress.total > 0 && !progress.left));
+        stateText.textContent = clear ? `✓ All ${n} consignment${s} check out` + (progress.total ? ` (${progress.total} fixed)` : '')
+            : progress.left ? `${n} consignment${s}: ${progress.left} of ${progress.total} still to check (see To check above)`
+            : `✓ All ${n} consignment${s} check out · the file still has something in To check above`;
+        if (!decided) { decided = true; showTable(!clear); }
+    }
     const list = panel.querySelector('.pl-issues-list');
     const summary = panel.querySelector('.pl-issues-summary');
     let review = {};
@@ -2959,10 +3138,21 @@ document.addEventListener('DOMContentLoaded', function () {
     const nameOf = (row) => row.querySelector('.pl-show-receiver').textContent;
     const refOf = (row) => ({ level: row.dataset.refLevel, soft: row.dataset.refSoft === 'true', message: row.dataset.refMessage || '' });
     const SHOWN = 6;  // consignments listed under a problem before "Show all"
+    // Progress: every consignment that has had something to fix or check since the page opened, and the one just
+    // acted on (Use, Keep as is, Save): once its problems are gone the page moves on to the next one still to check
+    const ever = new Set();
+    let acted = null, actedAt = 0;
+    const markActed = (e) => {
+        const row = e.target.closest && e.target.closest('.pl-con-row');
+        if (row) { acted = row; actedAt = Date.now(); }
+    };
+    ['pl-ref-use', 'pl-ref-keep', 'pl-book-keep'].forEach((t) => document.addEventListener(t, markActed, true));
+    document.addEventListener('click', (e) => { if (e.target.closest('.pl-edit-save')) markActed(e); }, true);
     const expanded = new Set();  // problems whose consignments are all shown, kept when the list is rebuilt after a fix
     let infoOpen = false;
 
     function goTo(row) {
+        showTable(true);
         if (row.hidden) {  // hidden by the state or text filter: show everything again
             const state = document.getElementById('courier-state-filter'), text = document.getElementById('courier-text-filter');
             if (state) { state.value = ''; state.dispatchEvent(new Event('change')); }
@@ -3129,13 +3319,33 @@ document.addEventListener('DOMContentLoaded', function () {
         // The rows with a problem that needs attention first are marked red in the table too (only when that changes,
         // so the table watcher below isn't set off again)
         const urgent = new Set(tiers.fix.flatMap((g) => (g.entries || []).map(([r]) => r)));
+        const toCheck = new Set([...tiers.fix, ...tiers.check].flatMap((g) => (g.entries || []).map(([r]) => r)));
+        toCheck.forEach((r) => ever.add(r));
         rows.forEach((r) => { if (r.classList.contains('pl-row-major') !== urgent.has(r)) r.classList.toggle('pl-row-major', urgent.has(r)); });
         const newToBook = tiers.info.length ? tiers.info[0].entries.length : 0;
         summary.textContent = [[tiers.fix.length, tiers.fix.length === 1 ? 'problem needs attention first' : 'problems need attention first'],
                                [tiers.check.length, 'to check'], [newToBook, 'new to the address book']]
             .filter(([n]) => n).map(([n, w]) => `${n} ${w}`).join(' · ');
+        if (ever.size) {  // how far along: consignments still to check out of all that needed it
+            const done = document.createElement('span');
+            done.className = 'pl-issues-progress';
+            done.textContent = toCheck.size ? `${toCheck.size} of ${ever.size} consignment${ever.size === 1 ? '' : 's'} still to check`
+                : `✓ all ${ever.size} consignment${ever.size === 1 ? '' : 's'} checked`;
+            summary.append(' · ', done);
+        }
+        progress = { left: toCheck.size, total: ever.size };
+        // The consignment just fixed has nothing left: on to the next one still to check (after it, else the first),
+        // or to the table's bar when it was the last. Not while something is being typed in a row.
+        if (acted && !toCheck.has(acted) && Date.now() - actedAt < 6000 && !document.querySelector('.pl-con-row.pl-editing')) {
+            const order = rows.filter((r) => toCheck.has(r) && !r.hidden);
+            const next = order.find((r) => acted.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING) || order[0];
+            acted = null;
+            if (next) goTo(next);
+            else if (bar) bar.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
         panel.classList.toggle('pl-issues-urgent', tiers.fix.length > 0);
         panel.hidden = !list.children.length;
+        tableState(!tiers.fix.length && !tiers.check.length);  // 'not in the address book yet' isn't a problem
     }
     let timer = null;
     const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 60); };
@@ -3256,5 +3466,241 @@ document.addEventListener('DOMContentLoaded', function () {
         home = null;
         try { localStorage.removeItem(KEY); } catch (err) { /* nothing kept */ }
         place();
+    });
+});
+
+// =========================================
+// 28. COURIER SERVICES (Address Book page) and "+ Add service" (consignment preview)
+// =========================================
+// The service list lives in data/courier_services.json. Every change goes to /api/courier-services… and the page is
+// redrawn from the list the server sends back, so it always shows what is saved. Built with textContent only.
+const CourierServices = {
+    post: async (url, body, isForm) => {
+        const r = await fetch(url, isForm ? { method: 'POST', body } :
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+        const data = await r.json().catch(() => ({ error: 'The app did not answer. Is it still running?' }));
+        if (!r.ok || data.error) throw new Error(data.error || 'Not saved.');
+        return data;
+    },
+    el: (tag, cls, text) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    },
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('courier-services');
+    if (!section) return;
+    const box = document.getElementById('cs-groups');
+    const status = document.getElementById('cs-status');
+    const { el, post } = CourierServices;
+    let groups = [];
+    const say = (text, bad) => { status.textContent = text; status.classList.toggle('cs-bad', !!bad); };
+    const run = async (fn, done) => {
+        try {
+            const data = await fn();
+            groups = data.groups;
+            draw();
+            if (done) say(done);
+            return true;
+        } catch (e) { say(e.message, true); return false; }
+    };
+
+    // The groups a service can be in; 'On its own' takes it out of its group (it then has no logo until one is dropped)
+    function groupSelect(current) {
+        const s = el('select', 'cs-input');
+        groups.forEach((g) => { const o = el('option', null, g.name); o.value = g.id; o.selected = g.id === current; s.append(o); });
+        const own = el('option', null, 'On its own (a group of one)');
+        own.value = '__own__';
+        s.append(own);
+        return s;
+    }
+
+    function serviceRow(g, s) {
+        const tr = el('tr', 'cs-row');
+        tr.append(el('td', 'cs-code', s.code), el('td', null, s.name));
+        const act = el('td', 'cs-actions');
+        const edit = el('button', 'ab-icon-btn', '✏️'); edit.type = 'button'; edit.title = `Edit ${s.code}`;
+        const del = el('button', 'ab-icon-btn', '🗑️'); del.type = 'button'; del.title = `Delete ${s.code}`;
+        del.addEventListener('click', () => {
+            if (!confirm(`Delete ${s.code} · ${s.name}? It won't be offered in the preview any more.`)) return;
+            run(() => post(`/api/courier-services/${encodeURIComponent(s.code)}/delete`), `${s.code} deleted.`);
+        });
+        edit.addEventListener('click', () => {
+            const form = el('tr', 'cs-edit');
+            const td = el('td'); td.colSpan = 3;
+            const code = el('input', 'cs-input cs-input-code'); code.value = s.code; code.maxLength = 20; code.setAttribute('aria-label', 'Service code');
+            const name = el('input', 'cs-input'); name.value = s.name; name.maxLength = 80; name.setAttribute('aria-label', 'Service name');
+            const grp = groupSelect(g.id); grp.setAttribute('aria-label', 'Move to group');
+            const grpLabel = el('label', 'cs-move', 'Move to group ');
+            grpLabel.append(grp);
+            const save = el('button', 'ab-btn cs-small', 'Save'); save.type = 'button';
+            const cancel = el('button', 'ab-btn ab-btn-plain cs-small', 'Cancel'); cancel.type = 'button';
+            save.addEventListener('click', () => {
+                const moved = grp.value !== g.id;
+                const to = grp.value === '__own__' ? 'on its own' : `in ${grp.selectedOptions[0].textContent}`;
+                run(() => post(`/api/courier-services/${encodeURIComponent(s.code)}/update`,
+                    { code: code.value, name: name.value, group: grp.value }),
+                    moved ? `${code.value.toUpperCase()} is now ${to}: its labels get that group's logo.` : `${code.value.toUpperCase()} saved.`);
+            });
+            cancel.addEventListener('click', () => { form.replaceWith(tr); });
+            td.append(code, name, grpLabel, save, cancel);
+            form.append(td);
+            tr.replaceWith(form);
+            name.focus();
+        });
+        act.append(edit, del);
+        tr.append(act);
+        return tr;
+    }
+
+    function logoArea(g) {
+        const area = el('label', 'cs-logo' + (g.logo_url ? ' cs-logo-has' : ''));
+        area.title = 'Drop a PNG logo strip here (about 6.3 : 1, e.g. 1000 × 160 px), or click to choose one';
+        if (g.logo_url) {
+            const img = el('img'); img.src = g.logo_url; img.alt = `${g.name} logo`;
+            area.append(img);
+        } else {
+            area.append(el('span', 'cs-logo-empty', 'Drop logo here'));
+        }
+        const input = el('input'); input.type = 'file'; input.accept = '.png,.jpg,.jpeg,.webp'; input.hidden = true;
+        const send = (file) => {
+            if (!file) return;
+            const fd = new FormData(); fd.append('logo', file);
+            run(() => post(`/api/courier-groups/${encodeURIComponent(g.id)}/logo`, fd, true), `Logo saved for ${g.name}.`);
+        };
+        input.addEventListener('change', () => send(input.files[0]));
+        area.addEventListener('dragover', (e) => { e.preventDefault(); area.classList.add('cs-logo-over'); });
+        area.addEventListener('dragleave', () => area.classList.remove('cs-logo-over'));
+        area.addEventListener('drop', (e) => { e.preventDefault(); area.classList.remove('cs-logo-over'); send(e.dataTransfer.files[0]); });
+        area.append(input);
+        return area;
+    }
+
+    function groupCard(g) {
+        const card = el('article', 'cs-group');
+        const head = el('div', 'cs-group-head');
+        const title = el('h3', 'cs-group-name', g.name);
+        const rename = el('button', 'ab-icon-btn', '✏️'); rename.type = 'button'; rename.title = `Rename ${g.name}`;
+        rename.addEventListener('click', () => {
+            const name = prompt('Group name', g.name);
+            if (name && name.trim() !== g.name) run(() => post(`/api/courier-groups/${encodeURIComponent(g.id)}/rename`, { name }), 'Group renamed.');
+        });
+        const del = el('button', 'ab-icon-btn', '🗑️'); del.type = 'button'; del.title = `Delete the group ${g.name}`;
+        del.addEventListener('click', () => {
+            if (!confirm(`Delete the group ${g.name} and its logo? Its services stay in the list, each on its own.`)) return;
+            run(() => post(`/api/courier-groups/${encodeURIComponent(g.id)}/delete`), `${g.name} deleted.`);
+        });
+        head.append(title, rename, del);
+        const tools = el('div', 'cs-logo-tools');
+        if (g.logo_url) {
+            const rm = el('button', 'ab-btn ab-btn-plain cs-small', 'Remove logo'); rm.type = 'button';
+            rm.addEventListener('click', () => run(() => post(`/api/courier-groups/${encodeURIComponent(g.id)}/logo/delete`), 'Logo removed.'));
+            tools.append(rm);
+        }
+        const table = el('table', 'cs-table');
+        const body = el('tbody');
+        g.services.forEach((s) => body.append(serviceRow(g, s)));
+        table.append(body);
+        const add = el('div', 'cs-add');
+        const code = el('input', 'cs-input cs-input-code'); code.placeholder = 'Code'; code.maxLength = 20; code.setAttribute('aria-label', 'New service code');
+        const name = el('input', 'cs-input'); name.placeholder = 'Service name'; name.maxLength = 80; name.setAttribute('aria-label', 'New service name');
+        const btn = el('button', 'ab-btn ab-btn-plain cs-small', '+ Add'); btn.type = 'button';
+        // A code already in another group moves here (its name kept unless one is typed)
+        btn.addEventListener('click', async () => {
+            let result = null;
+            await run(async () => { const d = await post('/api/courier-services', { code: code.value, name: name.value, group: g.id, move: true }); result = d.result; return d; });
+            if (result) say(result.moved_from ? `${result.code} moved from ${result.moved_from} to ${g.name}.` : `${result.code} added to ${g.name}.`);
+        });
+        add.append(code, name, btn);
+        card.append(head, logoArea(g), tools, table, add);
+        return card;
+    }
+
+    function draw() {
+        box.replaceChildren(...groups.map(groupCard));
+    }
+
+    document.getElementById('cs-add-group').addEventListener('click', async () => {
+        const input = document.getElementById('cs-new-group');
+        const name = input.value.trim();
+        if (await run(() => post('/api/courier-groups', { name }), `Group ${name} added: add its services in its card (at the end).`)) input.value = '';
+    });
+    run(async () => (await fetch(section.dataset.url)).json());
+});
+
+// "+ Add service" beside the consignment preview's service list: saves a new service code into the list and offers
+// it in every service dropdown on the page straight away (the main one picks it).
+document.addEventListener('DOMContentLoaded', () => {
+    const open = document.getElementById('pl-add-service');
+    const form = document.getElementById('pl-add-service-form');
+    if (!open || !form) return;
+    const { post } = CourierServices;
+    const msg = form.querySelector('.pl-add-service-msg');
+    open.addEventListener('click', () => {
+        form.hidden = !form.hidden;
+        if (!form.hidden) form.querySelector('[name=new_service_code]').focus();
+    });
+    form.querySelector('.pl-add-service-save').addEventListener('click', async () => {
+        const code = form.querySelector('[name=new_service_code]').value;
+        const name = form.querySelector('[name=new_service_name]').value;
+        const group = form.querySelector('[name=new_service_group]').value;
+        try {
+            const data = await post('/api/courier-services', { code, name, group: group || null, new_group: group ? '' : name });
+            const s = data.result;
+            document.querySelectorAll('#service_code, select.pl-service-input').forEach((sel) => {
+                const o = document.createElement('option');
+                o.value = s.code;
+                o.textContent = sel.id === 'service_code' ? `${s.code} · ${s.name}` : `${s.code} · ${s.name}`;
+                if (sel.id === 'service_code') { sel.append(o); sel.value = s.code; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+                else sel.append(o);
+            });
+            msg.textContent = `${s.code} added to the list (group ${s.group_name}). It's picked as the service; Apply to shown sets it on the consignments.`;
+            msg.classList.remove('cs-bad');
+            form.querySelectorAll('input').forEach((i) => { i.value = ''; });
+        } catch (e) {
+            msg.textContent = e.message;
+            msg.classList.add('cs-bad');
+        }
+    });
+});
+
+// =========================================
+// 29. GENERATE LABELS FROM A PACKING SHEETS PROJECT (horizontal labels, step 1)
+// =========================================
+// Picking a project lists its Final files (the Final file and any Stage files Sub-Group made: one is picked) and says
+// which Signature Links file comes with it. Built with textContent only.
+document.addEventListener('DOMContentLoaded', () => {
+    const pick = document.getElementById('pl-project-pick');
+    if (!pick) return;
+    const box = document.getElementById('pl-project-finals');
+    const sig = document.getElementById('pl-project-sig');
+    const load = document.getElementById('pl-project-load');
+    pick.addEventListener('change', () => {
+        box.replaceChildren();
+        const opt = pick.selectedOptions[0];
+        let finals = [];
+        try { finals = JSON.parse(opt.dataset.finals || '[]'); } catch (e) { finals = []; }
+        finals.forEach((f, i) => {
+            const label = document.createElement('label');
+            label.className = 'pl-csv-option';
+            const input = document.createElement('input');
+            input.type = 'radio'; input.name = 'final_file'; input.value = f; input.checked = i === 0; input.required = true;
+            const btn = document.createElement('span');
+            btn.className = 'pl-csv-btn';
+            const tick = document.createElement('span');
+            tick.className = 'pl-csv-tick'; tick.setAttribute('aria-hidden', 'true'); tick.textContent = '✓';
+            const name = document.createElement('strong');
+            name.textContent = f;
+            btn.append(tick, name);
+            label.append(input, btn);
+            box.append(label);
+        });
+        sig.textContent = !pick.value ? '' : opt.dataset.signature
+            ? `With ${opt.dataset.signature}: its codes group the labels and its Label Plugin fills in the tabs.`
+            : 'No Signature Links file in this project: the codes are worked out from the quantities.';
+        load.disabled = !pick.value;
     });
 });

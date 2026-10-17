@@ -86,7 +86,8 @@
 {# The address as one span per part. A part the courier needs (suburb, postcode; state in Australia) that's missing
    from an address shows where it belongs, in red: 'no suburb'. Same rules as missingParts() in script.js #}
 {% macro missing_parts(d) %}{% set au = not d.country or d.country|upper == 'AU' %}{% for f in (['suburb', 'state', 'postcode'] if au else ['suburb', 'postcode']) %}{% if not d[f] and (d.line1 or d.line2 or d.postcode or d.suburb) %}{{ f }},{% endif %}{% endfor %}{% endmacro %}
-{% macro address_parts(d) %}{% set missing = missing_parts(d).split(',') %}{% set parts = [] %}{% for f in ['line1', 'line2', 'suburb', 'state', 'postcode'] %}{% if d[f] or f in missing %}{% set _ = parts.append(f) %}{% endif %}{% endfor %}{% if d.country and d.country != 'AU' %}{% set _ = parts.append('country') %}{% endif %}{% for f in parts %}{% if d[f] or f == 'country' %}<span class="pl-af" data-f="{{ f }}">{{ d[f] }}</span>{% else %}<span class="pl-af pl-af-missing" data-f="{{ f }}" title="Missing: the courier needs the {{ f }}">no {{ f }}</span>{% endif %}{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
+{# The address as the courier gets it, part by part, always with its country code (AU when none is given) #}
+{% macro address_parts(d) %}{% set missing = missing_parts(d).split(',') %}{% set parts = [] %}{% for f in ['line1', 'line2', 'suburb', 'state', 'postcode'] %}{% if d[f] or f in missing %}{% set _ = parts.append(f) %}{% endif %}{% endfor %}{% set _ = parts.append('country') %}{% for f in parts %}{% if f == 'country' %}<span class="pl-af" data-f="country">{{ (d.country or 'AU')|upper }}</span>{% elif d[f] %}<span class="pl-af" data-f="{{ f }}">{{ d[f] }}</span>{% else %}<span class="pl-af pl-af-missing" data-f="{{ f }}" title="Missing: the courier needs the {{ f }}">no {{ f }}</span>{% endif %}{{ ', ' if not loop.last }}{% endfor %}{% endmacro %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -150,7 +151,7 @@
             <ul class="instructions-list">
                 <li><strong>The Packing Sheets layout:</strong> one row per store, one column per item, each pack's items under one merged header in the pack row, and the job numbers in a row above the stores.</li>
                 <li><strong>Packing-sheet codes:</strong> the "Code for Pack …" columns Packing Sheets puts at the start of each pack are read like any header: each store's cell holds its code. Sub-group codes ("Code for pack 1: 1-5") sort the labels within a code. No code column? The codes are taken from the Signature Links file, else worked out exactly as Packing Sheets does.</li>
-                <li><strong>Signature Links file (optional):</strong> the one Packing Sheets made for this job. Its <strong>Label Plugin</strong> tab fills in the tabs and header rows for you, its codes are checked against the file, and its installer barcodes go on the dividers.</li>
+                <li><strong>Signature Links file (optional):</strong> the one Packing Sheets made for this job. Its <strong>Label Plugin</strong> tab fills in the tabs and header rows for you, and its codes group the labels (checked against the quantities: a difference is a warning). The dividers have no barcodes: every item on the labels has its own.</li>
                 <li><strong>Header Row:</strong> the row just above the first store (filled in from the Label Plugin when there is one).</li>
                 <li><strong>Packing Spec:</strong> a column per pack headed with the pack's number (1, 2, 3 …), each store's spec in it (<em>OB600100100</em>, <em>2 x CS450320150</em>, <em>x</em> for none), as in Courier Import; or the stock columns named in the Label Plugin.</li>
                 <li><strong>Order:</strong> pack by pack as on the packing sheets, an audit page before each pack, then code A, B, C … with a divider before each, stores in sheet order.</li>
@@ -196,6 +197,23 @@
             {% endif %}
             <button type="submit" class="btn-generate pl-submit">Scan File</button>
         </form>
+        {% if horizontal_mode and sheet_projects %}
+        {# Or straight from a Packing Sheets project: its Final file (pick one when Sub-Group made Stage files) and its
+           Signature Links file, copied in, so the project stays as it is #}
+        <form method="POST" class="pl-from-project" id="pl-from-project">
+            <h3 class="pl-config-title">Or use a Packing Sheets project</h3>
+            <p class="pl-config-hint">Its Final file and its Signature Links file, as they are in the project. They're copied: the project stays as it is.</p>
+            <select name="from_project" id="pl-project-pick" class="project-name-input" required aria-label="Packing Sheets project">
+                <option value="">Choose a project…</option>
+                {% for p in sheet_projects %}
+                <option value="{{ p.name }}" data-finals="{{ p.finals|tojson|forceescape }}" data-signature="{{ p.signature or '' }}">{{ p.label }}</option>
+                {% endfor %}
+            </select>
+            <div class="pl-csv-options pl-project-finals" id="pl-project-finals"></div>
+            <p class="issue-detail" id="pl-project-sig"></p>
+            <button type="submit" class="btn-generate pl-submit" id="pl-project-load" disabled>Load from project</button>
+        </form>
+        {% endif %}
         {% endif %}
 
         <!-- STEP 2: TAB MAPPING -->
@@ -209,6 +227,7 @@
              Generate's required boxes are checked by script.js (section 14) with a message above the button -->
         <form method="POST" id="pl-form" novalidate data-colmap-key="{{ 'ci_column_mapping' if courier_mode else ('ph_column_mapping' if horizontal_mode else 'pl_column_mapping') }}">
             <input type="hidden" name="filename" value="{{ filename }}">
+            {% if from_project %}<input type="hidden" name="from_project" value="{{ from_project }}">{% endif %}
             
             {% for tab in tabs %}
             <input type="hidden" name="all_tabs" value="{{ tab }}">
@@ -250,7 +269,7 @@
             <p class="pl-file-note pl-signature-note{% if not signature_note.loaded %} pl-file-note-warn{% endif %}">
                 {% if signature_note.loaded %}🔗 Signature Links loaded:
                     {% if signature_note.plugin %}Label Plugin for {{ signature_note.plugin|join(', ') }};{% else %}no Label Plugin tab (an older file);{% endif %}
-                    codes for {{ signature_note.codes|join(', ') or 'no tab' }}{% if signature_note.barcodes %}; installer barcodes on the dividers{% endif %}.
+                    codes for {{ signature_note.codes|join(', ') or 'no tab' }}.
                 {% else %}🔗 No Signature Links file: codes come from the file's code columns, else they're worked out as Packing Sheets does. Scan again with the file to check them against it.{% endif %}
             </p>
             {% endif %}
@@ -279,7 +298,7 @@
                         {% if horizontal_mode and bp.found_headers.packs %}
                         <span class="metric-badge">Packs: {% for name, cols in bp.found_headers.packs.items() %}{{ name }} ({{ cols }}){{ ', ' if not loop.last }}{% endfor %}</span>
                         <span class="metric-badge">Rows: job {{ bp.found_headers.rows.job }} · pack {{ bp.found_headers.rows.pack }} · stores {{ bp.found_headers.rows.stores }}</span>
-                        <span class="metric-badge">Codes: {{ bp.found_headers.codes|join('; ') }}</span>
+                        <span class="metric-badge">Codes: {{ bp.found_headers.codes|join(', ') }}</span>
                         {% endif %}
                         {% if courier_mode and bp.found_headers.packs %}<span class="metric-badge">Pack columns: {% for n, letter in bp.found_headers.packs.items() %}{{ n }} ({{ letter }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
                     </div>
@@ -344,6 +363,18 @@
                                     {% endfor %}
                                 </select>
                                 <button type="button" id="apply-service" class="pl-btn-small">Apply to shown</button>
+                                <button type="button" id="pl-add-service" class="pl-btn-small pl-btn-plain" title="A service code that isn't in the list yet">+ Add service</button>
+                            </div>
+                            {# A new service, saved in the list (Address Book page) and offered here straight away #}
+                            <div class="pl-add-service" id="pl-add-service-form" hidden>
+                                <input type="text" name="new_service_code" maxlength="20" placeholder="Code, e.g. 20" aria-label="New service code" form="pl-no-submit">
+                                <input type="text" name="new_service_name" maxlength="80" placeholder="Name, e.g. TOLL PRIORITY 1KG SATCHEL" aria-label="New service name" form="pl-no-submit">
+                                <select name="new_service_group" aria-label="Group (its logo goes on the stitched labels)" form="pl-no-submit">
+                                    <option value="">On its own</option>
+                                    {% for g in courier.service_groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+                                </select>
+                                <button type="button" class="pl-btn-small pl-add-service-save">Save service</button>
+                                <span class="pl-add-service-msg issue-detail" role="status" aria-live="polite"></span>
                             </div>
                         </div>
                         <div class="input-field">
@@ -369,7 +400,12 @@
                         <div class="pl-issues-head"><strong>To check</strong> <span class="pl-issues-summary"></span></div>
                         <div class="pl-issues-list"></div>
                     </div>
-                    <table class="pl-courier-table">
+                    {# Green and folded away when every consignment checks out; open (with Hide) when there's something to check #}
+                    <div class="pl-con-bar" id="pl-con-bar">
+                        <span class="pl-con-state" id="pl-con-state">{{ courier.consignments|length }} consignment{{ '' if courier.consignments|length == 1 else 's' }}</span>
+                        <button type="button" class="pl-con-toggle" id="pl-con-toggle" aria-expanded="true" aria-controls="pl-con-table">▲ Hide consignments</button>
+                    </div>
+                    <table class="pl-courier-table" id="pl-con-table">
                         <thead><tr><th>#</th><th>Receiver</th><th>Address · Items</th><th>Service Code</th></tr></thead>
                         <tbody>
                         {% for c in courier.consignments %}
@@ -387,6 +423,8 @@
                                         </select>
                                     </label>
                                     <button type="button" class="pl-btn-small pl-group-merge" data-group="{{ c.group.members|tojson|forceescape }}">Merge into one</button>
+                                    <button type="button" class="pl-btn-small pl-btn-plain pl-group-separate" data-group="{{ c.group.members|tojson|forceescape }}"
+                                            title="They're different places with the same name: keep each consignment at its own address">Keep separate</button>
                                 </div>
                             </td>
                         </tr>
@@ -493,6 +531,15 @@
                 <!-- Cell layout configurator: blocks pool, cell order, live preview -->
                 <div class="pl-configurator">
                     
+                    {# Horizontal files: a 'Kinds' row of the sheet goes in after the description and an 'Item Number' row
+                       after the dimensions by default (when the file has them); every other row waits on the left #}
+                    {% set extra_rows = previews[0].found_headers.get('Extra rows') or [] %}
+                    {% set lay = namespace(kinds=None, item_no=None) %}
+                    {% if horizontal_mode %}{% for x in extra_rows %}
+                    {% if not lay.kinds and 'kind' in x.label|lower %}{% set lay.kinds = x %}
+                    {% elif not lay.item_no and ('item number' in x.label|lower or 'item no' in x.label|lower) %}{% set lay.item_no = x %}{% endif %}
+                    {% endfor %}{% endif %}
+                    {% set placed_rows = [lay.kinds.id if lay.kinds else '', lay.item_no.id if lay.item_no else ''] %}
                     <!-- LEFT COLUMN: MAPPED HEADERS -->
                     <div class="pl-config-col">
                         <h4 class="pl-config-title">1. Mapped Headers</h4>
@@ -529,7 +576,7 @@
                             {% endif %}
 
                             {# Every other row of the file written above the stores (horizontal files): a block each #}
-                            {% for x in previews[0].found_headers.get('Extra rows') or [] %}
+                            {% for x in extra_rows if x.id not in placed_rows %}
                             <div class="sortable-item" draggable="true" data-id="{{ x.id }}" title="What row {{ x.id[4:] }} of the file says for each item"><span class="badge-text">{{ x.label }}</span>
                                 <div class="cell-only-styling pl-cell-text">{{ x.label }}</div>
                             </div>
@@ -560,11 +607,23 @@
                             </div>
                             {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
+                            {% if lay.kinds %}
+                            <div class="sortable-item" draggable="true" data-id="{{ lay.kinds.id }}" title="What row {{ lay.kinds.id[4:] }} of the file says for each item"><span class="badge-text">{{ lay.kinds.label }}</span>
+                                <div class="cell-only-styling pl-cell-text">{{ lay.kinds.label }}</div>
+                            </div>
+                            {% endif %}
+
                             {% if previews[0].found_headers.get('Dimensions') %}
                             <div class="sortable-item" draggable="true" data-id="dimension"><span class="badge-text">Dimensions</span>
                                 <div class="cell-only-styling pl-cell-dim">Dimensions</div>
                             </div>
                             {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
+
+                            {% if lay.item_no %}
+                            <div class="sortable-item" draggable="true" data-id="{{ lay.item_no.id }}" title="What row {{ lay.item_no.id[4:] }} of the file says for each item"><span class="badge-text">{{ lay.item_no.label }}</span>
+                                <div class="cell-only-styling pl-cell-text">{{ lay.item_no.label }}</div>
+                            </div>
+                            {% endif %}
 
                             {% if previews[0].found_headers.get('Job Number') %}
                             <div class="sortable-item" draggable="true" data-id="job_no"><span class="badge-text">Job Number</span>
@@ -624,7 +683,7 @@
                     </div>
                     <div class="pl-csv-options pl-divider-options"{% if grouping == 'store' %} hidden{% endif %}>
                         <label class="pl-csv-option"><input type="radio" name="code_dividers" value="1"{% if dividers %} checked{% endif %}>
-                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet, with installer barcodes</small></span></label>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Divider before each code</strong><small>the Label Shuffler's divider sheet (no barcodes: the items have them)</small></span></label>
                         <label class="pl-csv-option"><input type="radio" name="code_dividers" value="0"{% if not dividers %} checked{% endif %}>
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>No dividers</strong><small>the codes follow each other</small></span></label>
                     </div>
@@ -643,7 +702,7 @@
                     {% if courier and courier.export %}
                     {% set ex = courier.export %}
                     <div class="pl-export" id="pl-export" data-defaults-url="{{ url_for('api_export_defaults') }}" hidden>
-                        <p class="pl-export-title"><strong>Export details</strong> — for deliveries outside Australia, in the OpenFreight CSV: <span id="pl-export-count">{{ courier.international }} consignment{{ '' if courier.international == 1 else 's' }}</span> in this job. Contents Weight is each row's weight.</p>
+                        <p class="pl-export-title"><strong>Export details</strong> — for deliveries outside Australia, in the OpenFreight CSV: <span id="pl-export-count">{{ courier.international }} consignment{{ '' if courier.international == 1 else 's' }}</span> in this job<span id="pl-export-stores"></span>. Contents Weight is each row's weight.</p>
                         <div class="pl-export-grid">
                             <label>Commercial value<select name="export_commercial_value" data-export="commercial_value">
                                 <option value="1"{% if ex.commercial_value == 1 %} selected{% endif %}>Yes (1)</option>
@@ -663,12 +722,17 @@
                     </div>
                     {% endif %}
                 </fieldset>
+                {% if from_project %}
+                {# Started from a Packing Sheets project: the labels go into it, so there's no new project to name #}
+                <p class="pl-into-project">📁 Saved in project <strong>{{ from_project_label or from_project }}</strong>, beside its packing sheets.</p>
+                {% else %}
                 <div class="project-name-group">
                     <label class="project-name-label" for="project_name">Name this Project / Job:</label>
                     <input type="text" id="project_name" name="project_name" placeholder="e.g. Campaign Name" class="project-name-input" maxlength="50" data-count required>
                 </div>
+                {% endif %}
                 <p class="pl-generate-error" id="pl-generate-error" role="alert" hidden></p>
-                <button type="submit" name="generate" class="btn-generate pl-submit">{{ 'Create Project & Generate CSV' if courier_mode else 'Create Project & Generate PDF' }}</button>
+                <button type="submit" name="generate" class="btn-generate pl-submit">{{ 'Create Project & Generate CSV' if courier_mode else ('Generate PDF into the project' if from_project else 'Create Project & Generate PDF') }}</button>
             {% endif %}
             
             {% endif %}

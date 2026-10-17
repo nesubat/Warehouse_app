@@ -507,16 +507,6 @@ def _check_pack_consistency(pack_groups, pack_rows, has_address, col):
                         warnings.append(_issue(rows_text, col['address'], f"{name}: store address differs between packs - they're side by "
                                                f"side in the consignment table: merge them there if they're one place", _variants(group, 'address_key', 'address')))
 
-    # Neighbouring packs with the same spec and store usually mean the Packing Spec cells weren't merged.
-    # No store column: the address (which then names the receiver) stands in for the store.
-    ids = list(pack_rows)
-    who = lambda pid: _norm(pack_groups[pid]['store_name']) or pack_rows[pid][0]['address_key']
-    for prev_id, next_id in zip(ids, ids[1:]):
-        prev, nxt = pack_groups[prev_id], pack_groups[next_id]
-        if _norm(prev['pack_spec_name']) == _norm(nxt['pack_spec_name']) and who(prev_id) == who(next_id):
-            span = _row_ranges(list(range(pack_rows[prev_id][0]['row'], pack_rows[next_id][-1]['row'] + 1)))
-            warnings.append(_issue(span, col['packing_spec'], f"Same spec {nxt['pack_spec_name']} split into separate packs — merge if one box"))
-
     return errors, warnings
 
 
@@ -822,14 +812,25 @@ def _fit_rect(slot, size):
     return fitz.Rect(x0, y0, x0 + w, y0 + h)
 
 
-def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page=None):
-    """Stacks the chosen blocks top-down; returns the total height used. Draws only when draw_page is given."""
+def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page=None, slots=None, heights=None, _y=None):
+    """Stacks the chosen blocks top-down; returns the total height used. Draws only when draw_page is given.
+    slots ({block: height}, plan_cells): each block takes the same height in every item box of the job, empty or not,
+    so job numbers, barcodes and quantities sit at the same place in every box. heights: a dict filled with what
+    each block of this item needs (plan_cells reads it)."""
     pad = 4
     inner_x0, inner_x1 = cell.x0 + pad, cell.x1 - pad
     inner_w = inner_x1 - inner_x0
     gap = 3 * text_scale
-    y = cell.y0 + pad
+    y = cell.y0 + pad if _y is None else _y
     for attr in attribute_order:
+        if slots is not None:
+            if not slots.get(attr):
+                continue  # no item of the job has this block
+            top = y
+            _layout_cell(item, [attr], cell, text_scale, thumb_scale, draw_page, heights=None, _y=top)
+            y = top + slots[attr] + gap
+            continue
+        start = y
         if attr == 'thumbnail':
             images = item.get('thumbnails') or []
             if not images:
@@ -918,16 +919,60 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
             if draw_page:
                 _draw_lines(draw_page, lines, inner_x0, inner_x1, y, fontname, size, color)
             y += len(lines) * size * LINE + gap
+        if heights is not None and y > start:
+            heights[attr] = y - start - gap
     return y - gap - cell.y0 + pad
 
 
-def _draw_cell(page, item, attribute_order, cell):
-    # Shrink text first (down to 65%), then the thumbnail, until the whole stack fits inside the cell
+def _scales(step):
+    """Step 0..70 of shrinking: text first (down to 65%), then the thumbnail."""
+    s = 1.0 - step * 0.01
+    return max(s, 0.65), (1.0 if s >= 0.65 else s / 0.65)
+
+
+def plan_cells(items, attribute_order, cell):
+    """One layout for every item box of the job: each chosen block gets the height the tallest item needs for it, at
+    one text and thumbnail scale (the largest at which that stack fits the box). An item without a value for a block
+    leaves its space empty, so every block starts at the same place in every box. Returns (text_scale, thumb_scale,
+    slots). Found by halving the steps (the stack only gets shorter as the scales shrink)."""
+    distinct = list({repr((sorted((k, str(v)) for k, v in it.items() if k != 'thumbnails'), len(it.get('thumbnails') or []))): it
+                     for it in items}.values())
+
+    def slots_at(step):
+        ts, th = _scales(step)
+        slots = {}
+        for it in distinct:
+            used = {}
+            _layout_cell(it, attribute_order, cell, ts, th, heights=used)
+            for attr, h in used.items():
+                slots[attr] = max(slots.get(attr, 0), h)
+        gap = 3 * ts
+        total = 8 + sum(h + gap for h in slots.values()) - (gap if slots else 0)
+        return ts, th, slots, total
+
+    lo, hi = 0, 70
+    if slots_at(0)[3] <= cell.height:
+        hi = 0
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if slots_at(mid)[3] <= cell.height:
+                hi = mid
+            else:
+                lo = mid + 1
+    ts, th, slots, _ = slots_at(hi)
+    return ts, th, slots
+
+
+def _draw_cell(page, item, attribute_order, cell, plan=None):
+    if plan:  # the job's shared layout (plan_cells)
+        ts, th, slots = plan
+        _layout_cell(item, attribute_order, cell, ts, th, draw_page=page, slots=slots)
+        return
+    # On its own: shrink text first (down to 65%), then the thumbnail, until the whole stack fits inside the cell
     text_scale = thumb_scale = 1.0
     for step in range(71):
-        s = 1.0 - step * 0.01
-        text_scale = max(s, 0.65)
-        thumb_scale = 1.0 if s >= 0.65 else s / 0.65
+        text_scale, thumb_scale = _scales(step)
         if _layout_cell(item, attribute_order, cell, text_scale, thumb_scale) <= cell.height:
             break
     _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page=page)
@@ -1038,11 +1083,12 @@ def spec_summary(specs):
     return "Packing Specs: " + " · ".join(f"{spec or '(none)'}: {n} label{'s' if n != 1 else ''}" for spec, n in specs.most_common())
 
 
-def draw_audit_page(doc, title, figures, notes, issues, all_good):
+def draw_audit_page(doc, title, figures, notes, issues, all_good, specs=None):
     """A PACK AUDIT page: 'PACK AUDIT' over the title ('Tab 1 - Pack 1', 'Tab 1: VIC'), the figures to check against
     the packing sheet ([(label, value)]), grey notes (lines), then what needs a look, each with its row and store
     ('Row 11 Macpac Adelaide · Pack 1: ...'), as many as fit and then how many more. Green when nothing needs a look
-    (all_good says so), amber when something should be checked."""
+    (all_good says so), amber when something should be checked. specs (a Counter of Packing Specs) are drawn as badges
+    under the figures, the way the preview shows them: 'OB1070170170 x 21' (labels with that spec), most first."""
     m = 12 * MM2PT
     colour = AUDIT_AMBER if issues else AUDIT_GREEN
     page = doc.new_page(width=A4_W, height=A4_H)
@@ -1059,6 +1105,19 @@ def draw_audit_page(doc, title, figures, notes, issues, all_good):
         audit_text(page, x + 8, 104, value, 15, True)
         x += w
     y = 134
+    if specs:
+        audit_text(page, m, y, "PACKING SPECS", 7.5, True, AUDIT_MUTED)
+        y += 8
+        x = m
+        for spec, n in specs.most_common():
+            text = _latin(f"{spec or '(none)'} x {n}")
+            w = _text_len(text, 'hebo', 10) + 18
+            if x + w > A4_W - m and x > m:  # the next badge goes on a new line
+                x, y = m, y + 24
+            page.draw_rect(fitz.Rect(x, y, x + w, y + 19), color=AUDIT_RULE, fill=(0.97, 0.97, 0.97), radius=0.3, width=0.6)
+            audit_text(page, x + 9, y + 13.5, text, 10, True)
+            x += w + 6
+        y += 19 + 20
     for line in notes:
         audit_text(page, m, y, audit_fit(line, 9, A4_W - 2 * m), 9, False, AUDIT_MUTED)
         y += 14
@@ -1178,6 +1237,13 @@ A4_W, A4_H = fitz.paper_size("a4-l")
 ZONE_A_W = 107 * MM2PT
 ZONE_A_H = 150 * MM2PT
 CHIP_H = 11 * LINE + 8
+# The row under the address on a label's first page: LABEL / PAGE (/ BOX) chips on the left and, on the right, the slot
+# Stitch Labels puts the courier service's logo in, as tall as the chips (the logos are strips about 6.3 : 1, so the
+# chips there are 9.5 pt to leave the strip its width). Its place goes in the label map.
+CHIP1_SIZE = 9.5
+LOGO_ROW_H = CHIP1_SIZE * LINE + 8   # the chips' height
+LOGO_RATIO = 6.3
+LOGO_W = LOGO_ROW_H * LOGO_RATIO     # about 43 x 6.8 mm
 ROWS = 3
 
 # One box size for every page: width from page 1's 4 columns beside the courier region,
@@ -1269,6 +1335,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
 
     assign_label_numbers(pack_groups)
     assign_barcodes(pack_groups)
+    # One item-box layout for the whole job (every box is CELL_W x CELL_H): the same block at the same place in each
+    plan = plan_cells([it for g in pack_groups.values() for it in list(g.get('code_cells') or []) + g['items']],
+                      attribute_order, fitz.Rect(0, 0, CELL_W, CELL_H))
     page_map, copies = {}, {}
     serials, tabs = serials or {}, tabs or {}
 
@@ -1298,20 +1367,13 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         to check against the packing sheet, its Packing Specs and what needs a look, row and store."""
         keys = [k for k in pack_groups if tabs.get(k, (None,))[0] == tab_no]
         boxes = sum(split_count(pack_groups[k].get('pack_spec_name', ''))[0] for k in keys)
-        units = 0.0
-        for k in keys:
-            for i in pack_groups[k]['items']:
-                try:
-                    units += float(i.get('qty') or 0)
-                except (TypeError, ValueError):
-                    pass
         specs = Counter(pack_groups[k].get('pack_spec_name', '') for k in keys)
         first, last = serials.get(keys[0], ''), serials.get(keys[-1], '')
         draw_audit_page(doc, f"Tab {tab_no}: {tab_name}" if tab_name else f"Tab {tab_no}",
                         [("Labels", len(keys)), ("Boxes", boxes), ("Stores", len({_norm(pack_groups[k]['store_name']) for k in keys})),
-                         ("Units", f"{units:g}")],
-                        [spec_summary(specs), f"Order: as in the file, store by store{f' (labels {first} - {last})' if first else ''}."],
-                        tab_notes.get(tab_no, []), "Every pack in this tab has its label.")
+                         ("Items", sum(len(pack_groups[k]['items']) for k in keys))],
+                        [f"Order: as in the file, store by store{f' (labels {first} - {last})' if first else ''}."],
+                        tab_notes.get(tab_no, []), "Every pack in this tab has its label.", specs=specs)
 
     def watermark(page, area, box, boxes, spec):
         """'BOX 1 OF 2' written diagonally across the item grid, see-through, so the cells stay readable."""
@@ -1372,7 +1434,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                                             fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
 
                     zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
-                    y = _spec_panel(page, zone_b, spec, tag=_latin(group_data.get('pack_tag') or '')) + 8
+                    y = _spec_panel(page, zone_b, spec, tag=_latin(group_data.get('pack_tag') or '')) + 6
 
                     if store and store.lower() != 'none':
                         for line in _wrap(shown_name, "hebo", 13, zone_b.width)[:2]:
@@ -1384,10 +1446,14 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                     if installer or (receiver and _norm(receiver) != _norm(store)) or contact:
                         to = ("Installer: " if installer else "Deliver to: ") + (receiver or store or '')
                         to += f" · Attn {contact}" if contact else ''
-                        for line in _wrap(to, "hebo", 9.5, zone_b.width)[:2]:
-                            page.insert_text((zone_b.x0, y + 9.5), line, fontname="hebo", fontsize=9.5,
+                        # One line when it fits at 8 pt or more, so the address keeps its room above the logo row
+                        to_size = 9.5
+                        while to_size > 8 and len(_wrap(to, "hebo", to_size, zone_b.width)) > 1:
+                            to_size -= 0.5
+                        for line in _wrap(to, "hebo", to_size, zone_b.width)[:2]:
+                            page.insert_text((zone_b.x0, y + to_size), line, fontname="hebo", fontsize=to_size,
                                              color=(0.75, 0.1, 0.1) if installer else (0, 0, 0))
-                            y += 9.5 * LINE
+                            y += to_size * LINE
 
                     address = info.get('address')
                     if not address:
@@ -1395,16 +1461,21 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         address = ", ".join(p for p in addr_parts if p)
                     if address:
                         address_lines = _wrap(address, "helv", 9, zone_b.width)
-                        room = int((zone_b.y1 - CHIP_H - 4 - y) // (9 * LINE))
+                        room = int((zone_b.y1 - LOGO_ROW_H - 3 - y) // (9 * LINE))
                         for line in address_lines[:max(0, min(3, room))]:
                             page.insert_text((zone_b.x0, y + 9), line, fontname="helv", fontsize=9)
                             y += 9 * LINE
 
-                    chip_y = zone_b.y1 - (11 * LINE + 8)
-                    chip = _counter_chip(page, zone_b.x0, chip_y, label_text)
-                    chip = _counter_chip(page, chip.x1 + 6, chip_y, page_text)
-                    if boxes > 1:
-                        _counter_chip(page, chip.x1 + 6, chip_y, f"BOX {box} OF {boxes}")
+                    # The chips, centred in the logo row and kept clear of the logo slot (smaller type if they must)
+                    chips = [label_text, page_text] + ([f"BOX {box} OF {boxes}"] if boxes > 1 else [])
+                    room_w = zone_b.width - LOGO_W - 8
+                    chip_size = CHIP1_SIZE
+                    while chip_size > 7 and sum(_text_len(t, "hebo", chip_size) + 16 for t in chips) + 6 * (len(chips) - 1) > room_w:
+                        chip_size -= 0.5
+                    chip_y = zone_b.y1 - LOGO_ROW_H + (LOGO_ROW_H - (chip_size * LINE + 8)) / 2
+                    x = zone_b.x0
+                    for t in chips:
+                        x = _counter_chip(page, x, chip_y, t, size=chip_size).x1 + 6
 
                     grid_x0 = zone_a_rect.x1 + GAP
                     cols = FIRST_COLS
@@ -1430,7 +1501,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         cy0 = MARGIN + r * (CELL_H + GAP)
                         cell = fitz.Rect(cx0, cy0, cx0 + CELL_W, cy0 + CELL_H)
                         _round_rect(page, cell, CELL_RADIUS, color=(0, 0, 0), width=0.75)
-                        _draw_cell(page, items[current_item_idx], attribute_order, cell)
+                        _draw_cell(page, items[current_item_idx], attribute_order, cell, plan)
                         current_item_idx += 1
                 if boxes > 1:  # region C: the item grid, right of the courier region on page 1, above the footer after
                     grid = fitz.Rect(grid_x0, MARGIN, A4_W - MARGIN, A4_H - MARGIN - (0 if page_num == 1 else CHIP_H + GAP))
@@ -1453,4 +1524,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         'page_size_mm': [round(A4_W / MM2PT, 1), round(A4_H / MM2PT, 1)],
         'courier_region_mm': {'x': round(MARGIN / MM2PT, 1), 'y': round(MARGIN / MM2PT, 1),
                               'width': round(ZONE_A_W / MM2PT, 1), 'height': round(ZONE_A_H / MM2PT, 1)},
+        # Where Stitch Labels puts the courier service's logo on each label's first page (LOGO_ROW_H, LOGO_W)
+        'logo_region_mm': {'x': round((MARGIN + ZONE_A_W - LOGO_W) / MM2PT, 2), 'y': round((A4_H - MARGIN - LOGO_ROW_H) / MM2PT, 2),
+                           'width': round(LOGO_W / MM2PT, 2), 'height': round(LOGO_ROW_H / MM2PT, 2)},
     }

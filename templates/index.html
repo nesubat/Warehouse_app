@@ -9,6 +9,12 @@
 <body>
 {{ nav() }}
 
+<!-- Loading Overlay: while a button here makes something (a courier CSV, labels from a Packing Sheets project) -->
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">Processing...</div>
+</div>
+
 <div class="container text-center">
     <div id="home">
         <h1>Packaging Automation Suite</h1>
@@ -116,10 +122,10 @@
 
                 <!-- COURIER CSV GROUP -->
                 {% if project.csv_files %}
-                <h4 class="file-group-title">🚚 Courier CSV</h4>
+                <h4 class="file-group-title" id="csv-{{ project.name }}">🚚 Courier CSV</h4>
                 <div class="file-list">
                     {% for file in project.csv_files %}
-                    <div class="file-row">
+                    <div class="file-row{% if file == new_file and project.name == open_project %} file-row-new{% endif %}">
                         <span class="file-name">{{ file }}</span>
                         <div class="file-actions">
                             <a href="{{ url_for('open_local_file', folder_name=project.name, filename=file) }}" class="btn-file open">📂 Open</a>
@@ -135,46 +141,78 @@
 
                 <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
-                <!-- Action Bar: Sub-Group (or Stitch Labels for courier projects) & Delete -->
-                <div style="display: flex; justify-content: space-between; align-items: center;">
+                <!-- Action Bar: everything the project can do next (left) & Delete (right) -->
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+                    <div class="project-actions">
+                    {% if project.csv_missing %}
+                    {# Only one kind of courier CSV: make the other from the details kept with it, in this project #}
+                    <form action="{{ url_for('make_other_csv', folder_name=project.name) }}" method="POST" class="project-action-form">
+                        <input type="hidden" name="kind" value="{{ project.csv_missing }}">
+                        <button type="submit" class="btn-action btn-csv" title="Make the {{ csv_kinds[project.csv_missing] }} CSV of this job, with the same rows and Item References, in this project">🚚 Create {{ csv_kinds[project.csv_missing] }} CSV</button>
+                    </form>
+                    {% endif %}
                     {% if project.courier_only %}
                     <span class="project-kind" title="Made with Courier Import: the courier CSV only">🚚 Courier Import</span>
-                    {% elif project.csv_files %}
-                    {% if project.has_label_map %}
+                    {% elif project.has_label_map %}
                     <a href="{{ url_for('stitch_page', project_name=project.name) }}" class="btn-action btn-stitch" title="Put the courier portal's labels onto these packing labels">🧵 Stitch Labels</a>
-                    {% else %}
+                    {% elif 'labels' in project.kinds and project.csv_files %}
                     <button type="button" class="btn-action btn-stitch" disabled title="This project has no label map">🧵 Stitch Labels</button>
                     {% endif %}
+                    {% if 'sheets' in project.kinds %}
+                    {# Packing Sheets projects: labels from a Final file (one: straight there; several: pick one) into this
+                       project, the Label Shuffler with its Signature Links, and Sub-Group #}
+                    {% if project.final_files %}
+                    {% if project.final_files|length == 1 %}
+                    <form action="{{ url_for('create_horizontal_labels') }}" method="POST" class="project-action-form">
+                        <input type="hidden" name="from_project" value="{{ project.name }}">
+                        <input type="hidden" name="final_file" value="{{ project.final_files[0] }}">
+                        <button type="submit" class="btn-action btn-labels" title="Make the packing labels from {{ project.final_files[0] }}{% if project.signature_file %} and {{ project.signature_file }}{% endif %}, in this project">🏷️ Generate Labels</button>
+                    </form>
                     {% else %}
-                    <a href="javascript:void(0);"  
-                    class="btn-action" 
-                    style="background-color: #f39c12; color: white; text-decoration: none; padding: 10px 15px; border-radius: 5px; font-weight: bold;" 
+                    <button type="button" class="btn-action btn-labels" onclick="document.getElementById('labels-{{ project.name }}').showModal()">🏷️ Generate Labels</button>
+                    <dialog id="labels-{{ project.name }}" class="project-dialog">
+                        <h3>Generate Labels from</h3>
+                        <form action="{{ url_for('create_horizontal_labels') }}" method="POST">
+                            <input type="hidden" name="from_project" value="{{ project.name }}">
+                            {% for f in project.final_files %}
+                            <label class="pl-csv-option project-final"><input type="radio" name="final_file" value="{{ f }}"{% if loop.first %} checked{% endif %}>
+                                <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>{{ f }}</strong></span></label>
+                            {% endfor %}
+                            <p class="project-dialog-note">{% if project.signature_file %}With {{ project.signature_file }} for the codes.{% else %}No Signature Links file in this project: the codes are worked out from the quantities.{% endif %} The labels and CSVs are saved in this project.</p>
+                            <div class="project-dialog-buttons">
+                                <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+                                <button type="submit" class="btn btn-primary">Generate Labels</button>
+                            </div>
+                        </form>
+                    </dialog>
+                    {% endif %}
+                    {% endif %}
+                    {% if project.signature_file %}
+                    <a href="{{ url_for('pdf_engine', project=project.name) }}" class="btn-action btn-shuffler" title="Shuffle the printer's labels with {{ project.signature_file }}">🖨️ Label Shuffler</a>
+                    {% endif %}
+                    {% if project.json_files %}
+                    <a href="javascript:void(0);"
+                    class="btn-action"
+                    style="background-color: #f39c12; color: white; text-decoration: none; padding: 10px 15px; border-radius: 5px; font-weight: bold;"
                     onclick="event.preventDefault(); document.getElementById('modal-{{ project.name }}').showModal()">
                         ✂️ Create Sub-Group
                     </a>
                     <dialog id="modal-{{ project.name }}" style="padding: 24px; border-radius: 12px; border: 1px solid #ddd; max-width: 420px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
                         <h3 style="margin-top: 0;">Select Sub-group State</h3>
                         <p style="color: #666; font-size: 0.95rem;">Choose which version of the metadata to use as your baseline:</p>
-                        
                         <form action="{{ url_for('setup_subgroup', project_name=project.name) }}" method="GET">
-                            
                                 <select name="target_json" style="width: 100%; padding: 10px; margin-bottom: 20px; border-radius: 6px; border: 1px solid #ccc; font-size: 1rem;">
-                                    {% if project.json_files %}
-                                        {% for j_file in project.json_files %}
-                                            <option value="{{ j_file }}">{{ j_file | replace('.json', '.xlsx') }}</option>
-                                        {% endfor %}
-                                    {% endif %}
+                                    {% for j_file in project.json_files %}
+                                        <option value="{{ j_file }}">{{ j_file | replace('.json', '.xlsx') }}</option>
+                                    {% endfor %}
                                 </select>
-                            
-                            
                             <div style="display: flex; justify-content: flex-end; gap: 10px;">
                                 <!-- Important: type="button" prevents accidental form submission -->
-                                <button type="button" 
-                                        class="btn btn-secondary" 
+                                <button type="button"
+                                        class="btn btn-secondary"
                                         onclick="document.getElementById('modal-{{ project.name }}').close()">
                                     Cancel
                                 </button>
-                                
                                 <button type="submit" class="btn btn-primary">
                                     Continue to Sub-group
                                 </button>
@@ -182,6 +220,8 @@
                         </form>
                     </dialog>
                     {% endif %}
+                    {% endif %}
+                    </div>
 
                     <!-- Master Project Delete -->
                     <form action="/delete/{{ project.name }}" method="POST" style="text-align: right;">

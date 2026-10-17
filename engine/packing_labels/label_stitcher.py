@@ -436,6 +436,97 @@ def _region(label_map):
     return rect, region_mm
 
 
+# ---------------------------------------------------------------- courier service logos
+
+def csv_kind(header):
+    """'open360' or 'openfreight' from a courier CSV's header row, else None."""
+    names = [h.strip().lower() for h in header]
+    if 'item reference' in names and 'service' in names:
+        return 'open360'
+    if 'service code' in names and 'reference' in names:
+        return 'openfreight'
+    return None
+
+
+def pack_services(project_dir, label_map):
+    """{pack item reference: service code}: the service each pack is booked with, from the project's courier CSVs as
+    saved (a change made in the CSV outside the app counts), else the one chosen in the preview (the label map).
+    Open360 rows are found by their Item Reference ('04T1P1 Store'), OpenFreight rows by their last Reference column."""
+    import csv
+    packs = [pk for pks in (label_map.get('stores') or {}).values() for pk in pks]
+    service_of = {c['number']: c.get('service_code') or '' for c in label_map.get('consignments') or []}
+    out = {pk['item_reference']: service_of.get(pk.get('consignment'), '') for pk in packs}
+    by_o360 = {pk['open360_item_reference']: pk['item_reference'] for pk in packs if pk.get('open360_item_reference')}
+    files = label_map.get('files') or {}
+    names = list(dict.fromkeys(n for n in [files.get('courier_csv')] + list(files.get('courier_csvs') or []) + [files.get('open360_csv')] if n))
+    read = []
+    for name in names:
+        try:
+            with open(os.path.join(project_dir, os.path.basename(name)), encoding='utf-8-sig', newline='') as f:
+                rows = list(csv.reader(f))
+        except OSError:
+            continue
+        kind = csv_kind(rows[0]) if rows else None
+        if kind:
+            read.append((kind, rows))
+    for kind, rows in sorted(read, key=lambda kr: kr[0] == 'open360'):  # the Open360 CSV (what's booked) has the last word
+        head = [h.strip().lower() for h in rows[0]]
+        if kind == 'open360':
+            svc, ref = head.index('service'), head.index('item reference')
+            for r in rows[1:]:
+                pack = by_o360.get(r[ref].strip()) if len(r) > max(svc, ref) else None
+                if pack and r[svc].strip():
+                    out[pack] = r[svc].strip().upper()
+        else:
+            svc, ref = head.index('service code'), len(head) - 1 - head[::-1].index('reference')
+            for r in rows[1:]:
+                if len(r) > max(svc, ref) and r[ref].strip() in out and r[svc].strip():
+                    out[r[ref].strip()] = r[svc].strip().upper()
+    return out
+
+
+def logo_region(label_map):
+    """The logo slot of a label's first page (the label map of a Generate made before logos has none)."""
+    mm = label_map.get('logo_region_mm')
+    if not mm:
+        return None
+    return fitz.Rect(mm['x'] * MM, mm['y'] * MM, (mm['x'] + mm['width']) * MM, (mm['y'] + mm['height']) * MM)
+
+
+def draw_logos(doc, label_map, logos):
+    """Puts each pack's service logo on the first page of each of its boxes. logos: {pack item reference: PNG path or
+    None}. Each logo image goes into the PDF once and is reused on every page. Returns the number of pages done."""
+    region = logo_region(label_map)
+    if region is None:
+        return 0
+    xrefs, sizes, done = {}, {}, 0
+    for pk in (p for pks in (label_map.get('stores') or {}).values() for p in pks):
+        path = logos.get(pk['item_reference'])
+        if not path:
+            continue
+        if path not in sizes:
+            try:
+                pix = fitz.Pixmap(path)
+                sizes[path] = (pix.width, pix.height)
+            except Exception:
+                sizes[path] = None
+        if not sizes[path]:
+            continue
+        w, h = sizes[path]
+        scale = min(region.width / w, region.height / h)
+        where = fitz.Rect(region.x1 - w * scale, region.y0 + (region.height - h * scale) / 2, region.x1,
+                          region.y0 + (region.height + h * scale) / 2)  # right edge of the slot, centred in the row
+        for page_no in pk.get('box_pages') or []:
+            if not 1 <= page_no <= len(doc):
+                continue
+            if path in xrefs:
+                doc[page_no - 1].insert_image(where, xref=xrefs[path])
+            else:
+                xrefs[path] = doc[page_no - 1].insert_image(where, filename=path)
+            done += 1
+    return done
+
+
 def _packing_pdf(project_dir, label_map):
     pdf_name = (label_map.get('files') or {}).get('packing_labels_pdf')
     if not pdf_name or not os.path.isfile(os.path.join(project_dir, pdf_name)):
@@ -613,14 +704,15 @@ def _rendered(placed, courier_pdfs, sources, region):
     return done
 
 
-def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched=True):
+def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched=True, logos=None):
     """Draws the Complete Labels PDF for a plan (plan_stitch), in this order:
       1. the job report (stitching results, then what Generate found), replacing Generate's report page
       2. every packing label in the packing labels' own order, with its courier label where one was found
       3. courier labels that matched no packing label (no Item Ref / Item Reference, or a code of another job),
          4-up in cut-and-stack order (four_up_order), if add_unmatched
-    Each courier label is rendered at 600 dpi only here. Returns {'placed', 'unmatched', 'duplicates',
-    'without_label', 'report_pages', 'groups'}."""
+    Each courier label is rendered at 600 dpi only here. logos: {pack item reference: (service code, PNG path or
+    None)}: each label's first page gets its service's logo (draw_logos). Returns {'placed', 'unmatched',
+    'duplicates', 'without_label', 'report_pages', 'groups', 'logos'}."""
     from datetime import datetime
     region, region_mm = _region(label_map)
     out = fitz.open(_packing_pdf(project_dir, label_map))
@@ -639,6 +731,10 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
         target, scale = fit_target(region, width, height)
         put_label(out[p['packing_page'] - 1], region, target, (width, height), flate)
         p['scale_pct'] = round(scale * DPI / 72 * 100, 1)
+    logos = logos or {}
+    logo_pages = draw_logos(out, label_map, {ref: path for ref, (_, path) in logos.items()})
+    no_logo = sorted({code for code, path in logos.values() if code and not path})
+    old_map = bool(logos) and logo_region(label_map) is None
     leftovers = [(u, render_label(sources[u['file']][u['page'] - 1]) if add_unmatched else None)
                  for u in unmatched if u.get('page') and u['file'] in sources]
     for doc in sources.values():
@@ -658,6 +754,8 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     files = {name: 0 for name, _ in courier_pdfs}  # every PDF read, even one that placed nothing
     for p in placed:
         files[p['file']] = files.get(p['file'], 0) + 1
+
+    slot_page = {sl['slot']: sl.get('page') for sl in slots}  # each box's page in the packing labels PDF
 
     def build(report_pages):
         at = lambda idx: idx + 1 + report_pages  # 0-based page in the reordered labels -> 1-based page in the file
@@ -679,7 +777,9 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
              'items': [f"{n} label{'s' if n != 1 else ''} of project {name}: book this job from this project's own "
                        f"Open360 CSV (every Generate makes new codes), or match them by hand" for name, n in booked_elsewhere.items()]},
             {'title': "Packing labels without a courier label", 'level': 'bad',
-             'items': without_label},
+             'items': [w + (f" - page {at(new_index[slot_page[w.split(' (')[0]] - 1])}"
+                            if slot_page.get(w.split(' (')[0]) and slot_page[w.split(' (')[0]] - 1 in new_index else '')
+                       for w in without_label]},
             {'title': ("Courier labels matching no packing label - 4-up at the end; cut into quarters, stack TL, TR, BL, BR"
                        if add_unmatched else "Courier labels matching no packing label - LEFT OUT of this file"), 'level': 'bad',
              'items': [f"{u['file']}{' p' + str(u['page']) if u['page'] else ''}: {u['reason']}"
@@ -688,6 +788,10 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
              'items': [f"{d['file']} p{d['page']}: {d['item_reference']} (used {d['first']})" for d in duplicates]},
             {'title': "Packs of several boxes - one packing label and one courier label per box", 'level': 'info',
              'items': [f"{ref}: {n} boxes" for ref, n in boxed]},
+            {'title': "Courier services with no logo yet - add one on the Address Book page (Courier services)", 'level': 'warn',
+             'items': no_logo},
+            {'title': "No courier logos: these packing labels were made before the logo slot - Generate them again to have it",
+             'level': 'warn', 'items': ["the label map has no logo region"] if old_map else []},
         ] + [_compact(s) for s in (project.get('report') or {}).get('sections', []) if s.get('kind') != 'left_out'
              and not s['title'].startswith("Not in the courier CSV")]  # already in "without a courier label"
         missing = len(without_label)
@@ -720,6 +824,11 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     report_pages = draw_report_pages(out, report, at=0)
     for p in placed:
         p['packing_page'] = new_index[p['packing_page'] - 1] + 1 + report_pages
+    # The packing labels still without a courier label, with their page in this file, so they can be found
+    left_out = {sl['slot'] for sl in slots if sl['not_in_csv']}
+    missing_pages = [{'slot': sl['slot'], 'store': sl['pack'].get('store', ''), 'not_in_csv': sl['slot'] in left_out,
+                      'page': new_index[sl['page'] - 1] + 1 + report_pages if sl.get('page') and sl['page'] - 1 in new_index else None}
+                     for sl in slots if sl['slot'] in set(plan['missing'])]
     # garbage=1 drops what select() left out; each courier label is its own image, so there's nothing to merge and the
     # duplicate search (garbage=3) only spent time comparing every label image with every other
     out.save(output_path, garbage=1, deflate=True)
@@ -727,14 +836,15 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     for u in unmatched:
         u.pop('text', None)
     return {'placed': placed, 'unmatched': unmatched, 'duplicates': duplicates, 'without_label': without_label,
-            'report_pages': report_pages, 'groups': [g for g in groups if g]}
+            'report_pages': report_pages, 'groups': [g for g in groups if g], 'logos': logo_pages, 'no_logo': no_logo,
+            'missing_pages': missing_pages}
 
 
-def stitch(project_dir, label_map, courier_pdfs, output_path, manual=None, add_unmatched=True):
+def stitch(project_dir, label_map, courier_pdfs, output_path, manual=None, add_unmatched=True, logos=None):
     """plan_stitch, then render_stitch: the whole stitch in one go. Returns render_stitch's result plus 'session'
     (match_session: what the matching page needs) and 'complete'."""
     plan = plan_stitch(project_dir, label_map, courier_pdfs, manual)
     session = match_session(label_map, plan)
-    result = render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched)
+    result = render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched, logos)
     session['output'] = os.path.basename(output_path)
     return {**result, 'session': session, 'complete': plan['complete']}

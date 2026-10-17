@@ -28,3 +28,7 @@ logs/
 # Claude Code: personal settings stay on each computer (the shared ones are .claude/settings.json)
 .claude/settings.local.json
 .pytest_cache/
+
+# Rendered tutorial videos (large MP4s, made outside the code) and any video working folder
+Tutorial Videos/
+brag-output*/

@@ -56,6 +56,18 @@
             </table>
         </div>
         <button type="button" id="ab-more" class="ab-btn ab-btn-plain ab-more" hidden>Load more</button>
+
+        {# The courier services offered in the preview, grouped; each group's logo goes on the stitched labels #}
+        <section class="cs-section" id="courier-services" aria-labelledby="cs-title" data-url="{{ url_for('api_courier_services') }}">
+            <h2 class="ps-heading" id="cs-title">🚚 Courier services</h2>
+            <p class="ab-intro">The services offered in the consignment preview and written in the courier CSV. Services in a group share its logo: Stitch Labels puts it on each label beside LABEL 1 OF 2, picked by the service in the courier CSV. Logo: a strip about 6.3 times as wide as it is tall (e.g. 1000 × 160 px PNG): it prints as tall as the LABEL / PAGE boxes. Move a service to another group and its labels get that group's logo.</p>
+            <div class="ab-toolbar">
+                <input type="text" id="cs-new-group" class="ab-search cs-new-group" maxlength="60" placeholder="New group name, e.g. Toll Priority" aria-label="New group name">
+                <button type="button" id="cs-add-group" class="ab-btn">+ New group</button>
+                <span id="cs-status" class="cs-status" role="status" aria-live="polite"></span>
+            </div>
+            <div id="cs-groups" class="cs-groups"></div>
+        </section>
     </div>
 
     <template id="ab-edit-template">

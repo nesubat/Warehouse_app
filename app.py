@@ -1,7 +1,7 @@
 from engine.core import paths
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, send_file
+from flask import Flask, render_template, request, redirect, url_for, send_file, abort
 import os
 import shutil
 import json
@@ -33,7 +33,8 @@ from engine.courier.courier_import import read_allocation, scan_columns, mapping
 from engine.addresses import address_reference
 from engine.core import data_transfer
 from engine.addresses.address_book import one_line as address_one_line
-from engine.packing_labels.label_stitcher import plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label
+from engine.packing_labels.label_stitcher import (plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label,
+                                                 pack_services, csv_kind)
 import threading
 from collections import Counter
 import secrets
@@ -41,9 +42,11 @@ from engine.courier.courier_export import (build_consignments, detect_series, wr
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
-                            EDITABLE_FIELDS, SERVICE_CODE_SET, load_service_usage, service_options, record_service_usage)
+                            EDITABLE_FIELDS, load_service_usage, service_options, record_service_usage,
+                            write_csv_recipe, csv_from_recipe, RECIPE_SUFFIX, CSV_KINDS)
+from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES
 import openpyxl
-from engine.core import app_log
+from engine.core import app_log, project_record
 from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file
 from engine.packing_labels.horizontal_labels import generate_horizontal_labels
 import logging
@@ -68,6 +71,8 @@ SERVICE_USAGE_FILE = os.path.join(BASE_DIR, 'data', 'service_code_usage.json')
 EXPORT_FILE = os.path.join(BASE_DIR, 'data', 'export_details.json')  # OpenFreight export details: saved defaults
 ADDRESS_BOOK = AddressBook(os.path.join(BASE_DIR, 'data', 'address_book.db'))
 SPEC_STORE = SpecStore(os.path.join(BASE_DIR, 'data', 'packing_specs.json'))
+# Courier services and their groups' logos (the logo Stitch Labels puts on each label)
+SERVICE_STORE = ServiceStore(os.path.join(BASE_DIR, 'data', 'courier_services.json'), os.path.join(BASE_DIR, 'data', 'courier_logos'))
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)
@@ -137,8 +142,7 @@ def clean_old_projects():
                 force_delete_upload(folder_path)
                 print(f"Cleaned up abandoned upload: {folder_name}")
 
-clean_old_projects()  # Retry cleanup if deletion fails
-app = Flask(__name__, 
+app = Flask(__name__,
             template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
 app.config['UPLOAD_FOLDER'] = PROJECTS_FOLDER
@@ -399,6 +403,7 @@ def generate():
 
     # Filter the list to ONLY keep actual file names (removes None/Empty strings)
     files_to_download = [f for f in raw_files if f]
+    _record(project_dir, 'packing_sheets', files_to_download + [filename])
 
     # 3. Pass the clean list to the template
     return _show('matrix.html', _at='/matrix',
@@ -493,7 +498,7 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
 def _stitch_project(project_name):
     """(project folder, label map file name, label map) for a project that has a label map, else None."""
     folder = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(project_name))
-    maps = sorted(f for f in os.listdir(folder) if f.endswith('.labelmap.json')) if os.path.isdir(folder) else []
+    maps = newest_first(folder, [f for f in os.listdir(folder) if f.endswith('.labelmap.json')]) if os.path.isdir(folder) else []
     if not maps:
         return None
     with open(os.path.join(folder, maps[0]), encoding='utf-8') as f:
@@ -565,6 +570,47 @@ def _remove_old_labels(folder, keep=None):
     return locked
 
 
+def _stitch_logos(folder, label_map):
+    """{pack item reference: (service code, its group's logo or None)}: the service each label books, read from the
+    project's courier CSVs as saved."""
+    return {ref: (code, SERVICE_STORE.logo_for(code) if code else None) for ref, code in pack_services(folder, label_map).items()}
+
+
+def _replace_courier_csv(folder, map_name, label_map, upload):
+    """Takes the courier CSV dropped on the Stitch page in place of the project's copy of the same kind (Open360 or
+    OpenFreight), so a change made outside the app shows on the labels. Returns (saved name, None) or (None, problem)."""
+    import csv as csv_module
+    raw = upload.read(20 * 1024 * 1024)
+    try:
+        text = raw.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return None, f"{upload.filename} can't be read as a CSV (save it from Excel as CSV UTF-8)."
+    rows = list(csv_module.reader(io.StringIO(text)))
+    kind = csv_kind(rows[0]) if rows else None
+    if not kind:
+        return None, f"{upload.filename} isn't an Open360 or OpenFreight courier CSV (its header row isn't one)."
+    files = label_map.setdefault('files', {})
+    names = list(dict.fromkeys(n for n in [files.get('courier_csv')] + list(files.get('courier_csvs') or []) + [files.get('open360_csv')] if n))
+    same = None
+    for name in names:
+        try:
+            with open(os.path.join(folder, os.path.basename(name)), encoding='utf-8-sig', newline='') as f:
+                head = next(csv_module.reader(f), [])
+        except OSError:
+            continue
+        if csv_kind(head) == kind:
+            same = os.path.basename(name)
+            break
+    if not same:  # this job had no CSV of that kind: kept beside the others and listed in the label map
+        same = secure_filename(upload.filename) or f"courier-{kind}.csv"
+        files['courier_csvs'] = list(files.get('courier_csvs') or []) + [same]
+        _write_json(os.path.join(folder, map_name), label_map)
+    with open(os.path.join(folder, same), 'w', encoding='utf-8-sig', newline='') as f:
+        f.write(text)
+    log_stitch.info("Stitch %s: courier CSV replaced by %s (%s, %d rows)", os.path.basename(folder), upload.filename, same, len(rows) - 1)
+    return same, None
+
+
 def _finalise(folder, label_map, pdfs, add_unmatched=True):
     """Stitches once: the plan (codes + saved hand matches) drawn into a new Complete Labels PDF, which replaces the
     earlier ones. Returns (output name, result, earlier files that were open elsewhere and stayed)."""
@@ -574,11 +620,13 @@ def _finalise(folder, label_map, pdfs, add_unmatched=True):
                                                   datetime.now().strftime("%y%m%d_%H%M")))
     started = time.perf_counter()
     try:
-        result = render_stitch(folder, label_map, pdfs, plan, os.path.join(folder, output_name), add_unmatched)
+        result = render_stitch(folder, label_map, pdfs, plan, os.path.join(folder, output_name), add_unmatched,
+                               logos=_stitch_logos(folder, label_map))
     except Exception:
         log_stitch.exception("Stitch FAILED after %.2fs", time.perf_counter() - started)
         raise
     locked = _remove_old_labels(folder, keep=output_name)
+    _record(folder, 'stitch', [output_name])
     session.update(output=output_name, added_unmatched=add_unmatched, finalised=True)
     _write_json(os.path.join(folder, SESSION_FILE), session)
     log_stitch.info("Stitched in %.2fs -> %s: %d placed, %d courier label(s) unmatched, %d packing label(s) without one, %d duplicate(s)",
@@ -609,7 +657,10 @@ def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
             STITCH_JOBS[folder] = {'state': 'done', 'output': output_name, 'placed': len(result['placed']),
                                    'added_unmatched': add_unmatched, 'locked': locked, **extra,
                                    'unmatched': len(result['unmatched']),  # really matched nothing (hand matches aren't)
-                                   'waiting': sum(1 for w in result['without_label'] if not w.endswith("(not in the courier CSV)"))}
+                                   'waiting': sum(1 for w in result['without_label'] if not w.endswith("(not in the courier CSV)")),
+                                   # each packing label still without a courier label, with its page in the new file
+                                   'without': [m for m in result.get('missing_pages', []) if not m['not_in_csv']],
+                                   'not_in_csv': [m for m in result.get('missing_pages', []) if m['not_in_csv']]}
         except Exception as e:  # shown on the page; the traceback is in the log (_finalise)
             STITCH_JOBS[folder] = {'state': 'error', 'error': str(e)}
         finally:
@@ -644,6 +695,14 @@ def stitch_page(project_name):
     if request.method == 'GET':
         return _show('stitch.html', project=os.path.basename(folder), info=info)
 
+    csv_upload = request.files.get('courier_csv')
+    if csv_upload and csv_upload.filename:
+        if not secure_filename(csv_upload.filename).lower().endswith('.csv'):
+            return _show('stitch.html', project=os.path.basename(folder), info=info,
+                         error=f"{csv_upload.filename} isn't a CSV. Drop the Open360 or OpenFreight CSV of this job.")
+        _, problem = _replace_courier_csv(folder, map_name, label_map, csv_upload)
+        if problem:
+            return _show('stitch.html', project=os.path.basename(folder), info=info, error=problem)
     pdfs = []
     for upload in request.files.getlist('labels'):
         if upload and upload.filename:
@@ -868,6 +927,108 @@ def download_file(folder_name, filename):
     return "File Not Found", 404
 
 
+def _sheet_outputs(folder_path, files=None):
+    """A Packing Sheets project's outputs for Generate Labels (horizontal) and the Label Shuffler: its Final files
+    (the Final file, and the Stage - n - Final files Sub-Group makes), newest first, and its Signature Links file
+    (one per project). Returns (finals, signature or None)."""
+    files = files if files is not None else os.listdir(folder_path)
+    finals = newest_first(folder_path, [f for f in files if f.lower().endswith('.xlsx') and not f.startswith('~$')
+                                        and re.match(r'(Stage - \d+ - )?Final ', f)])
+    signature = next((f for f in newest_first(folder_path, files)
+                      if f.lower().startswith('signature links') and f.lower().endswith(('.xlsx', '.xlsm'))), None)
+    return finals, signature
+
+
+def _sheet_projects():
+    """The Packing Sheets projects that have a Final file, newest first, for 'use a project' on Generate Labels:
+    [{'name', 'label', 'finals', 'signature'}]."""
+    out = []
+    root = app.config['UPLOAD_FOLDER']
+    for name in os.listdir(root) if os.path.isdir(root) else []:
+        path = os.path.join(root, name)
+        if not os.path.isdir(path) or ('_Job-' not in name and not any(f.startswith('Packing Sheet_') for f in os.listdir(path))):
+            continue
+        finals, signature = _sheet_outputs(path)
+        if finals:
+            project, _, job = re.sub(r'_\d{6}_\d{4}$', '', name).partition('_Job-')
+            out.append({'name': name, 'label': f"{job} | {project}" if job else project,  # as on the dashboard
+                        'finals': finals, 'signature': signature, 'time': os.path.getmtime(path)})
+    return sorted(out, key=lambda p: -p['time'])
+
+
+def _courier_csvs(folder_path, files):
+    """The project's courier CSVs by kind ({'open360': name, 'openfreight': name}, read from their header rows) and
+    its newest recipe (write_csv_recipe), or None."""
+    import csv as csv_module
+    kinds = {}
+    for f in files:
+        if f.lower().endswith('.csv'):
+            try:
+                with open(os.path.join(folder_path, f), encoding='utf-8-sig', newline='') as fh:
+                    kind = csv_kind(next(csv_module.reader(fh), []))
+            except (OSError, UnicodeDecodeError):
+                kind = None
+            if kind and kind not in kinds:
+                kinds[kind] = f
+    recipes = newest_first(folder_path, [f for f in files if f.endswith(RECIPE_SUFFIX)])
+    return kinds, (recipes[0] if recipes else None)
+
+
+@app.route('/project/<folder_name>/courier-csv', methods=['POST'])
+def make_other_csv(folder_name):
+    """The courier CSV kind a project doesn't have yet, made from its recipe in the same folder (a few ms), then back
+    to the dashboard with the project open at its courier CSVs and the new file marked."""
+    folder = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(folder_name))
+    kind = request.form.get('kind', '')
+    if not os.path.isdir(folder) or kind not in CSV_KINDS:
+        abort(404)
+    files = os.listdir(folder)
+    kinds, recipe = _courier_csvs(folder, files)
+    if not recipe:
+        return "This project has no courier CSV details saved (it was made before they were kept). Generate it again.", 400
+    if kind in kinds:
+        return redirect(url_for('dashboard', open=os.path.basename(folder), new=kinds[kind]) + '#dashboard-section')
+    started = time.perf_counter()
+    name = csv_from_recipe(folder, recipe, kind)
+    # The label map lists every courier CSV, so Stitch Labels and the Open360 codes know the new one too
+    maps = newest_first(folder, [f for f in files if f.endswith('.labelmap.json')])
+    if maps:
+        label_map = _read_json(os.path.join(folder, maps[0]), None)
+        if label_map:
+            lf = label_map.setdefault('files', {})
+            lf['courier_csvs'] = list(dict.fromkeys(list(lf.get('courier_csvs') or [lf.get('courier_csv')]) + [name]))
+            if kind == 'open360' and not lf.get('open360_csv'):
+                lf['open360_csv'] = name
+            _write_json(os.path.join(folder, maps[0]), label_map)
+    _record(folder, 'courier_csv', [name], kind=kind)
+    log_pack.info("%s CSV made from %s in %s: %s (%.0f ms)", CSV_KINDS[kind], recipe, os.path.basename(folder), name,
+                  (time.perf_counter() - started) * 1000)
+    return redirect(url_for('dashboard', open=os.path.basename(folder), new=name) + '#dashboard-section')
+
+
+def _features_from_files(folder_name, files):
+    """What a project from before records were kept was made with, read from its files' names."""
+    pdfs = [f for f in files if f.lower().endswith('.pdf')]
+    csvs = [f for f in files if f.lower().endswith('.csv')]
+    has_map = any(f.endswith('.labelmap.json') for f in files)
+    found = set()
+    if '_Job-' in folder_name or any(f.startswith('Packing Sheet_') for f in files):
+        found.add('packing_sheets')
+    if any('_Shuffled' in f for f in pdfs):
+        found.add('shuffler')
+    if has_map or any(f.startswith(('Packing Labels', 'Complete Labels')) for f in pdfs):
+        found.add('labels')
+    if csvs and not pdfs and not has_map:
+        found.add('courier_import')
+    return found
+
+
+def _record(folder, feature, files=(), **details):
+    """project_record.record, starting a project's first record from what its files show (an older project)."""
+    project_record.record(folder, feature, files, seed=lambda: _features_from_files(os.path.basename(folder), os.listdir(folder)),
+                          **details)
+
+
 @app.route('/')
 def dashboard():
     """Main dashboard displaying job history."""
@@ -893,7 +1054,8 @@ def dashboard():
                 files = newest_first(folder_path, files)  # last modified first
                 display_files = [f for f in files if not f.endswith('.json')]
                 # Sort JSON files by creation time (newest first)
-                json_files = sorted([f for f in files if f.endswith('.json') and not f.endswith('.labelmap.json')], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
+                json_files = sorted([f for f in files if f.endswith('.json') and not f.endswith(('.labelmap.json', RECIPE_SUFFIX))
+                                     and f not in (SESSION_FILE, MATCHES_FILE, project_record.RECORD_FILE)], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
 
                 
                 excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
@@ -910,21 +1072,18 @@ def dashboard():
                 job_id = _project_job(folder_path, files, display_name)
                         
                 has_label_map = any(f.endswith('.labelmap.json') for f in files)
-                courier_only = bool(csv_files) and not pdf_files and not has_label_map
+                csv_kinds, csv_recipe = _courier_csvs(folder_path, files) if csv_files else ({}, None)
 
-                # The features the project was made with, for its colours on the dashboard (the same as their tiles
-                # on Home): Courier Import, Packing Labels, or Packing Sheets, plus the Label Shuffler when its labels
-                # were shuffled there too (both shown, sharing the colour band equally)
-                sheets = '_Job-' in folder_name or any(f.startswith('Packing Sheet_') for f in files)
-                if courier_only:
-                    kinds = ['import']
-                elif has_label_map or any(f.startswith(('Packing Labels', 'Complete Labels')) for f in pdf_files):
-                    kinds = ['labels']
-                elif sheets:
-                    kinds = ['sheets'] + (['shuffler'] if any('_Shuffled' in f for f in pdf_files) else [])
-                else:
-                    kinds = ['labels'] if pdf_files else ['sheets']
-                
+                # What the project was made with: its record (project_record.json, written by each tool), else, for a
+                # project from before records were kept, read from its files. It sets the card's colours (the same as
+                # the tools' tiles on Home, sharing the band) and which buttons it offers.
+                features = project_record.features(folder_path)
+                if features is None:
+                    features = _features_from_files(folder_name, files)
+                kinds = [k for f, k in (('packing_sheets', 'sheets'), ('shuffler', 'shuffler'), ('labels', 'labels'),
+                                        ('courier_import', 'import')) if f in features] or (['labels'] if pdf_files else ['sheets'])
+                courier_only = 'courier_import' in features and 'labels' not in features and 'packing_sheets' not in features
+
                 projects.append({
                     "name": folder_name,          
                     "display_name": display_name, 
@@ -937,13 +1096,20 @@ def dashboard():
                     "has_label_map": has_label_map,
                     "courier_only": courier_only,  # Courier Import: the courier CSV only, nothing to stitch or sub-group
                     "kinds": kinds,
-                    "json_files": json_files     # Pass the grouped JSON files
+                    # Only one kind of courier CSV and the details to make the other: offer it
+                    "csv_missing": next((k for k in CSV_KINDS if k not in csv_kinds), None)
+                                   if csv_recipe and len(csv_kinds) == 1 else None,
+                    "json_files": json_files,    # Pass the grouped JSON files
+                    # Packing Sheets projects: Generate Labels from a Final file, the Label Shuffler with its Signature Links
+                    **dict(zip(('final_files', 'signature_file'),
+                               _sheet_outputs(folder_path, files) if 'sheets' in kinds else ([], None))),
                 })
                 
     # Sort projects newest to oldest
     projects.sort(key=lambda x: x['timestamp'], reverse=True)
     
-    return render_template('index.html', projects=projects)
+    return render_template('index.html', projects=projects, csv_kinds=CSV_KINDS,
+                           open_project=request.args.get('open', ''), new_file=request.args.get('new', ''))
 
 @app.route('/delete/<folder_name>', methods=['POST'])
 def delete_project(folder_name):
@@ -1047,7 +1213,8 @@ def setup_subgroup(project_name):
     target_json = request.values.get('target_json')
     # 2. Dynamic Fallback: If target_json is missing, grab the first available .json file in the project folder
     if not target_json or target_json == 'default':
-        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json') and not f.endswith('.labelmap.json')]
+        json_files = [f for f in os.listdir(project_dir) if f.endswith('.json') and not f.endswith(('.labelmap.json', RECIPE_SUFFIX))
+                      and f not in (SESSION_FILE, MATCHES_FILE, project_record.RECORD_FILE)]
         target_json = json_files[0] if json_files else f"{safe_project}.json"
         print(f"[DEBUG] No target_json specified. Defaulting to: {target_json}")
     metadata_path = os.path.join(project_dir, target_json)
@@ -1098,7 +1265,10 @@ def setup_subgroup(project_name):
 
         # 3. Trigger the Engine (We will build this function next!)
         try:
+            before = set(os.listdir(project_dir))
             execute_subgroups(project_dir, metadata, subgroup_instructions)
+            _record(project_dir, 'sub_group', sorted(set(os.listdir(project_dir)) - before),
+                                  tabs=sorted(subgroup_instructions) if isinstance(subgroup_instructions, dict) else None)
         except SubgroupValidationError as e:
             return render_template('sub-group.html', project_name=project_name, metadata=metadata,
                                    metadata_json=json.dumps(metadata), target_json=target_json,
@@ -1318,6 +1488,8 @@ def pdf_engine():
             except Exception:
                 pass
 
+            if generated_files:
+                _record(project_folder, 'shuffler', generated_files)
             return _show('pdf.html', step=3, project_name=project_name, generated_files=generated_files)
 
     # GET REQUEST: Fetch existing projects AND look for their Signature links files
@@ -1335,7 +1507,9 @@ def pdf_engine():
                 projects_info[folder_name] = sig_file
                 
     projects_json = script_json(projects_info)
-    return _show('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json)
+    chosen = os.path.basename(request.args.get('project', ''))  # from the dashboard's Label Shuffler button
+    return _show('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json,
+                 chosen=chosen if chosen in projects_info else '')
 
 
 # Make sure you have an upload folder configured in your app
@@ -1434,13 +1608,15 @@ def _mapping_view(filepath, header_row, tab, choices, mode='labels'):
     return {'header_row': header_row, 'columns': columns, 'items': items, 'by_hand': sum(1 for i in items if i['chosen'])}
 
 
-def _receiver_groups(consignments):
+def _receiver_groups(consignments, separate=()):
     """Consignments for the same receiver (a store, or an installer) at different addresses, put next to each other
     so they can be merged into one in the preview. Names count as the same when they're equal ignoring capitals,
     spacing and punctuation, or one small typo apart. Returns the consignments in the new order, each in a group
     carrying c['group'] = {'id', 'first', 'size', 'receiver', 'similar', 'members'}; 'similar' says whether every
-    address looks like the same place written differently (similar_addresses) or some really differ."""
+    address looks like the same place written differently (similar_addresses) or some really differ.
+    separate: the consignment sources the user chose to keep apart (Keep separate): a group of only those isn't one."""
     from difflib import SequenceMatcher
+    separate = set(separate)
 
     def typo_apart(a, b):
         # One character changed, added or dropped (two in a long name): 'Macpac Chadstone' / 'Macpac Chadston'. Not
@@ -1470,7 +1646,11 @@ def _receiver_groups(consignments):
             continue
         key = group_of.get(c['number'])
         members = [m for m in consignments if group_of.get(m['number']) == key] if key and sizes[key] > 1 else [c]
-        if len(members) > 1:
+        if len(members) > 1 and all(x['source_id'] in separate for m in members for x in m['cartons']):
+            # kept apart on purpose: still next to each other, without the merge heading
+            for m in members:
+                m['kept_separate'] = True
+        elif len(members) > 1:
             addressed = [m for m in members if not m.get('no_address')]
             similar = all(similar_addresses(one_line(addressed[0]['destination']), one_line(m['destination'])) for m in addressed[1:])
             info = [{'number': m['number'], 'receiver': m['destination']['receiver'],
@@ -1511,22 +1691,28 @@ def _import_csvs(project_dir, reference, project, csv_formats, cartons, consignm
     (Open360's Item Reference, OpenFreight's Reference). Returns the file names."""
     base_name = f"{reference} - {project}" if reference else project
     refs = [(x['item_reference'], x['item_reference']) for x in cartons]
-    csv_files = []
+    items = open360_items(cartons, consignments)
+    export, _ = clean_export(_export_values(form))
+    csv_files, made = [], {}
     if 'open360' in csv_formats:
         name = free_name(project_dir, f"{base_name} - Open360.csv")
         with app_log.step(log, f"  Open360 CSV {name}"):
-            write_open360_csv(os.path.join(project_dir, name), open360_items(cartons, consignments), reference, item_refs=refs)
+            write_open360_csv(os.path.join(project_dir, name), items, reference, item_refs=refs)
         log.info("    %d row(s), Shipment Reference %s", len(refs), reference)
         csv_files.append(name)
+        made['open360'] = name
     if 'openfreight' in csv_formats:
         name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
         with app_log.step(log, f"  OpenFreight CSV {name}"):
-            export, _ = clean_export(_export_values(form))
             write_courier_csv(os.path.join(project_dir, name), cartons, consignments, reference, fixed, export=export)
             abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
             if abroad:
                 log.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
         csv_files.append(name)
+        made['openfreight'] = name
+    # What both CSVs are made from, so the other one can be made later from the dashboard
+    write_csv_recipe(os.path.join(project_dir, free_name(project_dir, base_name + RECIPE_SUFFIX)), base_name, reference,
+                     reference, fixed, export, cartons, consignments, items, refs, None, made)
     return csv_files
 
 
@@ -1970,16 +2156,16 @@ def data_transfer_page():
     kept = _kept_view()  # an import's next step or result, reopened on refresh
     if kept:
         return kept
-    return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK))
+    return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK, SERVICE_STORE))
 
 
 @app.route('/data-transfer/export', methods=['POST'])
 def data_transfer_export():
     chosen = request.form.getlist('item')
     try:
-        data, manifest = data_transfer.export_zip(DATA_DIR, ADDRESS_BOOK, chosen)
+        data, manifest = data_transfer.export_zip(DATA_DIR, ADDRESS_BOOK, chosen, SERVICE_STORE)
     except data_transfer.TransferError as e:
-        return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK), error=str(e))
+        return render_template('data_transfer.html', here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK, SERVICE_STORE), error=str(e))
     log_book.info("Data export: %s", ", ".join(manifest['items']))
     return send_file(io.BytesIO(data), as_attachment=True, mimetype='application/zip',
                      download_name=f"warehouse-data-{datetime.now():%Y%m%d-%H%M}.zip")
@@ -1988,7 +2174,7 @@ def data_transfer_export():
 @app.route('/data-transfer/import', methods=['POST'])
 def data_transfer_import():
     """Step 1: an exported zip is uploaded and its contents listed. Step 2 ('apply'): the parts chosen are taken."""
-    here = data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK)
+    here = data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK, SERVICE_STORE)
     os.makedirs(TRANSFER_UPLOADS, exist_ok=True)
     if 'apply' not in request.form:
         upload = request.files.get('file')
@@ -2018,7 +2204,7 @@ def data_transfer_import():
                for k in request.form.getlist('item') if k in data_transfer.ITEMS}
     try:
         with open(path, 'rb') as f:
-            result = data_transfer.import_zip(f.read(), choices, DATA_DIR, ADDRESS_BOOK, SPEC_STORE)
+            result = data_transfer.import_zip(f.read(), choices, DATA_DIR, ADDRESS_BOOK, SPEC_STORE, SERVICE_STORE)
     except data_transfer.TransferError as e:
         return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=here, error=str(e))
     except Exception as e:
@@ -2028,7 +2214,7 @@ def data_transfer_import():
     os.remove(path)
     log_book.info("Data import: %s (backup %s)", result['done'], result['backup'])
     recheck_book_async('import')  # imported addresses checked against the official data
-    return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK), done=result['done'],
+    return _show('data_transfer.html', _at=url_for('data_transfer_page'), here=data_transfer.what_is_here(DATA_DIR, ADDRESS_BOOK, SERVICE_STORE), done=result['done'],
                  backup=os.path.relpath(result['backup'], BASE_DIR))
 
 
@@ -2325,6 +2511,93 @@ def api_address_delete(address_id):
     return {'error': 'That address no longer exists.'}, 404
 
 
+# ---------- courier services (Address Book page, and "+ Add service" in the consignment preview) ----------
+# Every change is a POST, so same_origin_only guards it.
+
+def _services_payload():
+    groups = SERVICE_STORE.load()['groups']
+    for g in groups:
+        g['logo_url'] = url_for('courier_logo', group_id=g['id'], v=os.path.getmtime(p)) if (p := SERVICE_STORE.logo_path(g)) else ''
+    return {'groups': groups}
+
+
+def _service_change(fn, what):
+    try:
+        result = fn()
+        log_book.info("Courier services: %s", what)
+        return {'ok': True, 'result': result, **_services_payload()}
+    except ServiceError as e:
+        log_book.warning("Courier services: %s not saved: %s", what, e)
+        return {'error': str(e)}, 400
+
+
+@app.route('/api/courier-services')
+def api_courier_services():
+    return _services_payload()
+
+
+@app.route('/api/courier-services', methods=['POST'])
+def api_courier_service_add():
+    d = request.get_json(silent=True) or {}
+    # Added in a group's card: a code already in another group moves into this one (the preview's + Add service
+    # doesn't move anything: a code that's there already is an error)
+    return _service_change(lambda: SERVICE_STORE.add_service(d.get('code'), d.get('name'), d.get('group') or None,
+                                                             d.get('new_group') or '', move=bool(d.get('move'))),
+                           f"added {d.get('code')}")
+
+
+@app.route('/api/courier-services/<code>/update', methods=['POST'])
+def api_courier_service_update(code):
+    d = request.get_json(silent=True) or {}
+    return _service_change(lambda: SERVICE_STORE.update_service(code, d.get('code'), d.get('name'), d.get('group') or None,
+                                                                d.get('new_group') or ''), f"updated {code}")
+
+
+@app.route('/api/courier-services/<code>/delete', methods=['POST'])
+def api_courier_service_delete(code):
+    return _service_change(lambda: SERVICE_STORE.delete_service(code), f"deleted {code}")
+
+
+@app.route('/api/courier-groups', methods=['POST'])
+def api_courier_group_add():
+    name = (request.get_json(silent=True) or {}).get('name')
+    return _service_change(lambda: SERVICE_STORE.add_group(name), f"group {name!r} added")
+
+
+@app.route('/api/courier-groups/<group_id>/rename', methods=['POST'])
+def api_courier_group_rename(group_id):
+    name = (request.get_json(silent=True) or {}).get('name')
+    return _service_change(lambda: SERVICE_STORE.rename_group(group_id, name), f"group {group_id} renamed {name!r}")
+
+
+@app.route('/api/courier-groups/<group_id>/delete', methods=['POST'])
+def api_courier_group_delete(group_id):
+    return _service_change(lambda: SERVICE_STORE.delete_group(group_id), f"group {group_id} deleted")
+
+
+@app.route('/api/courier-groups/<group_id>/logo', methods=['POST'])
+def api_courier_group_logo(group_id):
+    f = request.files.get('logo')
+    if not f or not f.filename or os.path.splitext(secure_filename(f.filename))[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+        return {'error': 'Drop a PNG or JPG logo.'}, 400
+    raw = f.read(LOGO_MAX_BYTES + 1)
+    return _service_change(lambda: SERVICE_STORE.set_logo(group_id, raw), f"logo for {group_id}")
+
+
+@app.route('/api/courier-groups/<group_id>/logo/delete', methods=['POST'])
+def api_courier_group_logo_delete(group_id):
+    return _service_change(lambda: SERVICE_STORE.delete_logo(group_id), f"logo for {group_id} removed")
+
+
+@app.route('/courier-logo/<group_id>.png')
+def courier_logo(group_id):
+    group = next((g for g in SERVICE_STORE.load()['groups'] if g['id'] == group_id), None)
+    path = SERVICE_STORE.logo_path(group)
+    if not path:
+        abort(404)
+    return send_file(path, mimetype='image/png', max_age=0)
+
+
 @app.route('/packing-labels', methods=['GET', 'POST'])
 def create_packing_labels():
     """Packing labels (PDF) and courier CSVs from a packing list (a Packing Spec column, rows merged per box)."""
@@ -2354,23 +2627,28 @@ def _signature_note(signature):
 
 def _keep_signature_upload(upload, filepath, tabs):
     """Keeps the Signature Links file sent with a horizontal distribution file next to it (an older one is
-    removed, so a re-scan without one doesn't use it). With a Label Plugin tab, the tabs it describes come
+    removed, so a re-scan without one doesn't use it). upload: the uploaded file, or a project's file path. With a Label Plugin tab, the tabs it describes come
     ticked with their header rows filled in. Returns (user_inputs or None, error text or None)."""
     path = _signature_path(filepath)
     if os.path.exists(path):
         os.remove(path)
-    if not upload or not upload.filename:
+    if isinstance(upload, str):  # a project's own Signature Links file: copied, the project keeps its own
+        shutil.copy2(upload, path)
+        shown = os.path.basename(upload)
+    elif not upload or not upload.filename:
         return None, None
-    if os.path.splitext(upload.filename)[1].lower() not in ('.xlsx', '.xlsm'):
+    elif os.path.splitext(upload.filename)[1].lower() not in ('.xlsx', '.xlsm'):
         return None, "The Signature Links file must be an .xlsx file (the one Packing Sheets made)."
-    upload.save(path)
+    else:
+        upload.save(path)
+        shown = upload.filename
     try:
         signature = read_signature_file(path)
     except Exception as e:
         os.remove(path)
         return None, f"Could not read the Signature Links file: {e}"
     plugin = signature.get('plugin') or {}
-    log_pack.info("  Signature Links %s: codes for %d tab(s), Label Plugin for %s", secure_filename(upload.filename),
+    log_pack.info("  Signature Links %s: codes for %d tab(s), Label Plugin for %s", secure_filename(shown),
                   len(signature['codes']), sorted(plugin) or 'none')
     if not plugin:
         return None, None
@@ -2395,9 +2673,46 @@ def _distribution_page(mode):
     courier_mode = mode == 'courier'
     horizontal_mode = mode == 'horizontal'
     log = log_import if courier_mode else log_pack
-    show = lambda **context: _show('packing_labels.html', mode=mode, **context)
+    # Started from a Packing Sheets project: every step keeps it, and Generate saves into it
+    into = os.path.basename(request.form.get('from_project', '')) if horizontal_mode and request.method == 'POST' else ''
+    into = into if into and os.path.isdir(os.path.join(app.config['UPLOAD_FOLDER'], into)) else ''
+    into_label = (lambda p, _, j: f"{j} | {p}" if j else p)(*re.sub(r'_\d{6}_\d{4}$', '', into).partition('_Job-')) if into else ''
+
+    def show(**context):
+        context.setdefault('from_project', into)
+        context.setdefault('from_project_label', into_label if context['from_project'] == into else '')
+        return _show('packing_labels.html', mode=mode, **context)
     if request.method == 'GET':
-        return show()
+        return show(sheet_projects=_sheet_projects() if horizontal_mode else [])
+
+    # STEP 1b: a Packing Sheets project's Final file and its Signature Links (the dashboard's Generate Labels button,
+    # or 'Use a Packing Sheets project' on this page): copied in as the upload, so the project itself stays as it is
+    if (horizontal_mode and request.form.get('from_project') and not request.form.get('filename')
+            and not (request.files.get('file') and request.files['file'].filename)):
+        project = os.path.basename(request.form['from_project'])
+        folder = os.path.join(app.config['UPLOAD_FOLDER'], project)
+        finals, signature = _sheet_outputs(folder) if os.path.isdir(folder) else ([], None)
+        final = os.path.basename(request.form.get('final_file', '')) or (finals[0] if len(finals) == 1 else '')
+        if final not in finals:
+            return show(page_error="Choose the project's Final file to make the labels from.", sheet_projects=_sheet_projects())
+        filename = secure_filename(final)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        try:
+            close_if_open_elsewhere(filepath)
+            shutil.copy2(os.path.join(folder, final), filepath)
+            wb = openpyxl.load_workbook(filepath, read_only=True)
+            try:
+                tabs = wb.sheetnames
+            finally:
+                wb.close()
+            log.info("From project %s: %s (%d tab(s)), Signature Links %s", project, final, len(tabs), signature or 'none')
+            inputs, sig_error = _keep_signature_upload(os.path.join(folder, signature) if signature else None, filepath, tabs)
+            if sig_error:
+                return show(page_error=sig_error, sheet_projects=_sheet_projects())
+            return show(tabs=tabs, filename=filename, user_inputs=inputs, from_project=project)
+        except Exception as e:
+            log.exception("Could not load %s from project %s", final, project)
+            return show(page_error=f"Could not read '{final}' from the project: {e}", sheet_projects=_sheet_projects())
 
     # STEP 1: Handle File Upload
     if 'file' in request.files:
@@ -2525,8 +2840,9 @@ def _distribution_page(mode):
             edits = _consignment_edits(request.form)
             edits.pop('__offered__', None)
             book_options = _book_options(combined, edits)
-            options = service_options(load_service_usage(SERVICE_USAGE_FILE))
-            most_used = options[0]['code'] if options[0]['used'] else ''
+            services = SERVICE_STORE.services()
+            options = service_options(load_service_usage(SERVICE_USAGE_FILE, {x['code'] for x in services}), services)
+            most_used = options[0]['code'] if options and options[0]['used'] else ''
             fixed = {**DEFAULT_FIXED, 'service_code': most_used,
                      **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
             weights = _carton_weights(request.form)
@@ -2534,7 +2850,15 @@ def _distribution_page(mode):
                                                                          SPEC_STORE.resolver(), weights)
             if courier_mode:
                 _import_item_refs(cartons, combined)
-            consignments = _receiver_groups(_check_against_book(consignments, edits, book_options))  # one receiver's next to each other
+            kept_apart = {sid for sid, e in edits.items() if isinstance(e, dict) and e.get('separate')}
+            consignments = _receiver_groups(_check_against_book(consignments, edits, book_options), kept_apart)  # one receiver's next to each other
+            # A store kept at its different addresses on purpose: the file's warning about its addresses goes too
+            apart = {_norm(c['destination']['receiver']) for c in consignments if c.get('kept_separate')}
+            if apart:
+                for bp in previews:
+                    bp['warnings'] = [w for w in bp.get('warnings') or []
+                                      if not any(_norm(w.get('text', '')).startswith(f"{n} store address") or
+                                                 _norm(w.get('text', '')).startswith(f"{n} installer addresses") for n in apart)]
             # Specs the Packing Specs page doesn't know yet are listed there for the user to fill in
             try:
                 SPEC_STORE.note_unknown(x['packing_spec'] for x in cartons if x['spec_kind'] == 'unknown')
@@ -2578,6 +2902,7 @@ def _distribution_page(mode):
                 'export': _export_values(request.form),
                 'international': sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU'),
                 'service_options': options,
+                'service_groups': [{'id': g['id'], 'name': g['name']} for g in SERVICE_STORE.load()['groups']],
                 # Horizontal labels: grouped by allocation or not, dividers or not, as chosen (kept through a preview)
                 'label_grouping': 'store' if request.form.get('label_grouping') == 'store' else 'code',
                 'code_dividers': request.form.get('code_dividers', '1') == '1',
@@ -2605,7 +2930,7 @@ def _distribution_page(mode):
         
         missing = [label for key, label in (('who_pays', 'Who Pays'), ('service_code', 'Service Code'), ('reference', 'Consignment Reference'),
                                             ('project_name', 'Project Name'))
-                   if not request.form.get(key, '').strip()]
+                   if not request.form.get(key, '').strip() and not (key == 'project_name' and into)]  # into: its own project
         csv_formats = [f for f in CSV_FORMATS if f in request.form.getlist('courier_csv')]
         if not csv_formats:
             missing.append('Courier CSV (Open360, OpenFreight or both)')
@@ -2682,7 +3007,7 @@ def _distribution_page(mode):
             for x in all_cartons:
                 if x not in cartons:
                     log.info("    left out: %s (%s)", x['item_reference'], x.get('packing_spec', ''))
-            unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_CODE_SET)
+            unknown = sorted({c['service_code_used'] for c in consignments} - SERVICE_STORE.codes())
             if unknown:
                 raise ValueError(f"Unknown service code {', '.join(repr(u) for u in unknown)}. Pick a service from the list.")
 
@@ -2691,18 +3016,32 @@ def _distribution_page(mode):
                                              'Horizontal_Labels_Job' if horizontal_mode else 'Packing_Labels_Job')
             safe_project_name = clean_file_name(raw_project_name)
             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
-            final_folder_name = f"{safe_project_name}_{time_stamp}"
-            project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
-            os.makedirs(project_dir, exist_ok=True)
-
-            # 4. Move the Excel File into the Project
-            new_filepath = os.path.join(project_dir, filename)
             signature_used = _signature_for(filepath) if horizontal_mode else None
-            if signature_used:  # the project keeps the Signature Links file it was made with (not named 'Signature links…',
-                # so the Label Shuffler doesn't take this project for one of its own)
-                shutil.copy(_signature_path(filepath), os.path.join(project_dir, f"Used Signature Links - {os.path.splitext(filename)[0]}.xlsx"))
-            shutil.move(filepath, new_filepath)
-            log.info("  project folder %s", final_folder_name)
+            if into:
+                # From a Packing Sheets project: everything goes into that project, which already has the Final file and
+                # its Signature Links (the copies made for this page go). A new label map starts a new stitching session.
+                final_folder_name = into
+                project_dir = os.path.join(app.config['UPLOAD_FOLDER'], into)
+                safe_project_name = clean_file_name(re.sub(r'_\d{6}_\d{4}$', '', into).split('_Job-')[0])
+                for name in (SESSION_FILE, MATCHES_FILE):
+                    if os.path.exists(os.path.join(project_dir, name)):
+                        os.remove(os.path.join(project_dir, name))
+                for path in (filepath, _signature_path(filepath)):
+                    if os.path.exists(path):
+                        os.remove(path)
+                log.info("  into project %s", into)
+            else:
+                final_folder_name = f"{safe_project_name}_{time_stamp}"
+                project_dir = os.path.join(app.config['UPLOAD_FOLDER'], final_folder_name)
+                os.makedirs(project_dir, exist_ok=True)
+
+                # 4. Move the Excel File into the Project
+                new_filepath = os.path.join(project_dir, filename)
+                if signature_used:  # the project keeps the Signature Links file it was made with (not named 'Signature links…',
+                    # so the Label Shuffler doesn't take this project for one of its own)
+                    shutil.copy(_signature_path(filepath), os.path.join(project_dir, f"Used Signature Links - {os.path.splitext(filename)[0]}.xlsx"))
+                shutil.move(filepath, new_filepath)
+                log.info("  project folder %s", final_folder_name)
 
             if courier_mode:
                 csv_files = _import_csvs(project_dir, reference, safe_project_name, csv_formats, cartons, consignments,
@@ -2749,7 +3088,6 @@ def _distribution_page(mode):
                         page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
                                                                report, serials, add_dividers=request.form.get('code_dividers') == '1',
                                                                group_by_code=request.form.get('label_grouping', 'code') != 'store',
-                                                               divider_barcodes=(signature_used or {}).get('barcodes'),
                                                                notes=pack_notes)
                     else:
                         page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
@@ -2769,6 +3107,7 @@ def _distribution_page(mode):
                     open360_refs = open360_item_references(items)
                 ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
                 csv_files = []
+                export, export_problems = clean_export(_export_values(request.form))
                 if 'open360' in csv_formats:
                     open360_name = free_name(project_dir, f"{base_name} - Open360.csv")
                     with app_log.step(log, f"  Open360 CSV {open360_name}"):
@@ -2778,7 +3117,6 @@ def _distribution_page(mode):
                 if 'openfreight' in csv_formats:
                     openfreight_name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
                     with app_log.step(log, f"  OpenFreight CSV {openfreight_name}"):
-                        export, export_problems = clean_export(_export_values(request.form))
                         write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,
                                           item_refs=ref_of, export=export)
                         abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
@@ -2787,6 +3125,10 @@ def _distribution_page(mode):
                     csv_files.append(openfreight_name)
                 for x, r in zip(cartons, open360_refs):
                     log.debug("    %s -> %s", x['item_reference'], r)
+                # What both CSVs are made from, so the other one can be made later from the dashboard
+                write_csv_recipe(os.path.join(project_dir, free_name(project_dir, base_name + RECIPE_SUFFIX)), base_name,
+                                 reference, shipment_reference, fixed, export, cartons, consignments, items, open360_refs,
+                                 ref_of, {k: n for k, n in zip([f for f in CSV_FORMATS if f in csv_formats], csv_files)})
                 left_out = [x for x in all_cartons if x not in cartons]
                 write_label_map(os.path.join(project_dir, map_name), cartons, consignments, reference,
                                 output_pdf_name, csv_files[0], page_info, left_out, sender,
@@ -2797,7 +3139,11 @@ def _distribution_page(mode):
                                  'report_pages': page_info.get('report_pages', 0)})
                 log.info("  label map %s", map_name)
                 output_files = [output_pdf_name] + csv_files
-            record_service_usage(SERVICE_USAGE_FILE, consignments)
+            _record(project_dir, 'courier_import' if courier_mode else 'labels',
+                                  output_files + ([map_name] if not courier_mode else []) + [filename],
+                                  **({} if courier_mode else {'layout': 'horizontal' if horizontal_mode else 'vertical',
+                                                              'from_final_file': bool(into)}))
+            record_service_usage(SERVICE_USAGE_FILE, consignments, SERVICE_STORE.codes())
             try:
                 ADDRESS_BOOK.record_used([(c['destination'], [x['source_id'] for x in c['cartons']]) for c in consignments])
                 log_book.info("Address book: %d consignment address(es) saved / marked used", len(consignments))
@@ -2878,6 +3224,9 @@ def free_port(port):
 
 
 if __name__ == '__main__':
+    # Old projects are cleared when the app starts (python app.py, the .bat, the .exe), never when another script
+    # imports app.py: tests and tools that import it must not delete the user's projects
+    clean_old_projects()
     # In debug mode Flask runs this file twice: a watcher that restarts the server on code changes, and the
     # server itself (WERKZEUG_RUN_MAIN=true). Only the first may clear the port, or the server would stop its own watcher.
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':

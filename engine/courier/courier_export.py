@@ -120,68 +120,34 @@ def save_export_defaults(path, values):
     os.replace(tmp, path)
     return clean, problems
 
-# Courier service codes offered in the preview.
-SERVICE_CODES = [
-    ('BORDERP', 'BORDER EXPRESS PARCEL'),
-    ('BORDERB', 'BORDER EXPRESS BULK'),
-    ('DTRLOF', 'DETRACK LOCAL FREIGHT'),
-    ('DHLWPXOD', 'DHL DDP EXPRESS PARCELS>30kG'),
-    ('DHLWPXUD', 'DHL DDP EXPRESS PARCELS<30KG'),
-    ('FXIEOIE', 'FEDEX INTERNATIONAL ECONOMY ECONOMY'),
-    ('FXPOIP', 'FEDEX INTERNATIONAL PRIORITY PRIORITY'),
-    ('FLASHFW', 'FLASH COURIERS EXP WAGON'),
-    ('FLASHVIP', 'FLASH COURIERS VIP CAR'),
-    ('FLASHFV', 'FLASH COURIERS EXP VAN'),
-    ('FLASHVW', 'FLASH COURIERS VIP WAGON'),
-    ('FLASHVV', 'FLASH COURIERS VIP VAN'),
-    ('FLASHS', 'FLASH COURIERS STD CAR'),
-    ('FLASHSF1', 'FLASH COURIERS STD FLATTOP'),
-    ('FLASHSF2', 'FLASH COURIERS STD FLATTOP 2SP'),
-    ('FLASHVF1', 'FLASH COURIERS VIP FLATTOP'),
-    ('FLASHVF2', 'FLASH COURIERS VIP FLATT2SP'),
-    ('FLASHSV', 'FLASH COURIERS STD VAN'),
-    ('FLASHFX', 'FLASH COURIERS EXP CAR'),
-    ('FLASHSW', 'FLASH COURIERS STD WAGON'),
-    ('STEFPP', 'STARTRACK PREMIUM (SATCHEL)'),
-    ('STEROAD', 'STARTRACK ROAD EXPRESS'),
-    ('STERET', 'STARTRACK ROAD EXPRESS TAILGATE'),
-    ('STERE2', 'STARTRACK ROAD EXPRESS 2 MAN SERVICE'),
-    ('STEPRM', 'STARTRACK PREMIUM'),
-    ('STNPRM', 'STARTRACK NATIONAL PREMIUM'),
-    ('STNFPP', 'STARTRACK NATIONAL PREMIUM(SATCHEL)'),
-    ('STNROAD', 'STARTRACK NATIONAL ROAD EXPRESS'),
-    ('TNTN', 'TNT (NSW) ROAD EXPRESS'),
-    ('TNTNONFC', 'TNT (NSW) OVERNIGHT EXPRESS'),
-    ('TNTN9AM', 'TNT (NSW) OVERNIGHT 9AM'),
-    ('TNTNSWSPEC', 'TNT (NSW) SPECIALISED (TAILGATE)'),
-    ('TNTIXP', 'TNT INTERNATIONAL EXPRESS PARCELS'),
-    ('IPECX', 'TOLL IPEC ROAD EXPRESS'),
-]
-SERVICE_CODE_SET = {code for code, _ in SERVICE_CODES}
+# Courier service codes offered in the preview: kept in data/courier_services.json (engine.courier.courier_services),
+# where they can be added, edited, grouped and given a logo from the Address Book page.
 
-
-def load_service_usage(path):
+def load_service_usage(path, codes=None):
+    """{code: times used}; codes (the service list's) leaves out services that aren't in the list any more."""
     try:
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
-        return {k: int(v) for k, v in data.items() if k in SERVICE_CODE_SET}
+        return {k: int(v) for k, v in data.items() if codes is None or k in codes}
     except (OSError, ValueError, AttributeError):
         return {}
 
 
-def service_options(usage):
-    """Service codes for the dropdowns, most used first; unused ones keep the catalogue order."""
-    order = {code: i for i, (code, _) in enumerate(SERVICE_CODES)}
-    ranked = sorted(SERVICE_CODES, key=lambda cd: (-usage.get(cd[0], 0), order[cd[0]]))
-    return [{'code': code, 'description': desc, 'used': usage.get(code, 0)} for code, desc in ranked]
+def service_options(usage, services):
+    """Service codes for the dropdowns, most used first; unused ones keep the list's order.
+    services: [{'code', 'name', 'group_name'}] from ServiceStore.services()."""
+    order = {s['code']: i for i, s in enumerate(services)}
+    ranked = sorted(services, key=lambda s: (-usage.get(s['code'], 0), order[s['code']]))
+    return [{'code': s['code'], 'description': s['name'], 'group': s.get('group_name', ''), 'used': usage.get(s['code'], 0)}
+            for s in ranked]
 
 
-def record_service_usage(path, consignments):
+def record_service_usage(path, consignments, codes):
     """After a Generate: count each consignment's service code, so the most used rise to the top."""
-    usage = load_service_usage(path)
+    usage = load_service_usage(path, codes)
     for c in consignments:
         code = c['service_code_used']
-        if code in SERVICE_CODE_SET:
+        if code in codes:
             usage[code] = usage.get(code, 0) + 1
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
@@ -900,6 +866,7 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
         'open360_shipment_reference': open360.get('shipment_reference'),
         'page_size_mm': page_info['page_size_mm'],
         'courier_label_region_mm': page_info['courier_region_mm'],
+        'logo_region_mm': page_info.get('logo_region_mm'),
         'consignments': [{
             'number': c['number'],
             'destination': {k: v for k, v in c['destination'].items() if k != 'raw'},
@@ -921,3 +888,60 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
     }
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ---------- the other courier CSV, later ----------
+# Generate (labels or Courier Import) keeps what both courier CSVs are made from in '<base>.courier.json' beside them,
+# so the kind not chosen then can be made later in a moment, the same as it would have been: same rows, same Item
+# References (so courier labels booked from either still stitch by code), same service codes, weights and export details.
+RECIPE_SUFFIX = '.courier.json'
+CSV_KINDS = {'open360': 'Open360', 'openfreight': 'OpenFreight'}
+
+
+def _plain(value):
+    """Tuples (sizes, item references) as lists for JSON."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def write_csv_recipe(path, base_name, reference, shipment_reference, fixed, export, cartons, consignments, items,
+                     open360_refs, openfreight_refs, made):
+    """Everything both courier CSVs are written from. made: {kind: file name} of the ones written now."""
+    data = {
+        'version': 1, 'base_name': base_name, 'reference': reference, 'shipment_reference': shipment_reference,
+        'fixed': fixed, 'export': export, 'made': made,
+        'cartons': [{k: v for k, v in x.items()} for x in cartons],
+        # what the writers read of each consignment (its cartons are the list above)
+        'consignments': [{'number': c['number'], 'destination': {k: v for k, v in c['destination'].items() if k != 'raw'},
+                          'service_code_used': c['service_code_used']} for c in consignments],
+        'open360': {'items': items, 'item_refs': open360_refs},
+        'openfreight': {'item_refs': openfreight_refs},
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(_plain(data), f, ensure_ascii=False)
+
+
+def csv_from_recipe(project_dir, recipe_name, kind):
+    """Writes the courier CSV of this kind from the project's recipe, beside the others. Returns its file name."""
+    if kind not in CSV_KINDS:
+        raise ValueError("Choose Open360 or OpenFreight.")
+    with open(os.path.join(project_dir, os.path.basename(recipe_name)), encoding='utf-8') as f:
+        r = json.load(f)
+    name = f"{r['base_name']} - {CSV_KINDS[kind]}.csv"
+    from engine.core.core_math import free_name
+    name = free_name(project_dir, name)
+    path = os.path.join(project_dir, name)
+    if kind == 'open360':
+        items = [{**i, 'size_cm': tuple(i['size_cm']) if i.get('size_cm') else None} for i in r['open360']['items']]
+        write_open360_csv(path, items, r['shipment_reference'], item_refs=[tuple(x) for x in r['open360']['item_refs']])
+    else:
+        cartons = [{**x, 'size_cm': tuple(x['size_cm']) if x.get('size_cm') else None} for x in r['cartons']]
+        write_courier_csv(path, cartons, r['consignments'], r['reference'], r['fixed'],
+                          item_refs=r['openfreight']['item_refs'], export=r.get('export'))
+    r.setdefault('made', {})[kind] = name
+    with open(os.path.join(project_dir, os.path.basename(recipe_name)), 'w', encoding='utf-8') as f:
+        json.dump(r, f, ensure_ascii=False)
+    return name
