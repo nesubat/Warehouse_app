@@ -4,7 +4,7 @@
   for each tab, for each pack:   audit page   - the pack's codes as on its packing sheet, with stores, boxes and
                                                 quantities per item, where the codes came from, and what needs a look
       for each code A, B, C …:   divider      - the Label Shuffler's divider sheet (pdf_engine.build_divider_sheet),
-                                                with the installer barcodes when the Signature Links file has them
+                                                without barcodes: every item on the labels has its own
                                  labels       - the standard A4 packing labels (generate_packing_labels), one per box
 
 The labels are drawn by generate_packing_labels() exactly as for vertical files, then put in this order. The page
@@ -17,7 +17,7 @@ from collections import Counter
 import pymupdf as fitz
 
 from engine.packing_labels.packing_label_generator import generate_packing_labels, draw_report_pages, A4_W, A4_H, _latin, \
-    draw_audit_page, spec_summary
+    draw_audit_page
 from engine.label_shuffler.pdf_engine import build_divider_sheet
 from engine.packing_labels.horizontal_distribution import pack_blocks, pack_summary
 
@@ -25,12 +25,11 @@ INK = (0.2, 0.2, 0.2)  # the divider caption
 
 
 def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=None, addresses=None, report=None,
-                               serials=None, add_dividers=True, divider_barcodes=None, notes=None, group_by_code=True):
+                               serials=None, add_dividers=True, notes=None, group_by_code=True):
     """pack_groups: every selected tab's groups, combined in tab order, each tab already in packing-sheet order
-    (horizontal_distribution.read_horizontal). divider_barcodes: read_divider_barcodes() of the Signature Links file,
-    {(tab, 'Code for <pack>'): {code: [entries]}}. notes: {(tab_no, pack_no): [issue dicts]} shown on the audit page.
+    (horizontal_distribution.read_horizontal). notes: {(tab_no, pack_no): [issue dicts]} shown on the audit page.
     Returns generate_packing_labels()'s page info, with the page numbers of the final PDF."""
-    divider_barcodes, notes = divider_barcodes or {}, notes or {}
+    notes = notes or {}
     if not group_by_code:
         # Not grouped by allocation: each pack's labels in the sheet's store order, and no packing-sheet code on them
         # (the Packing Spec panel says only the pack, no code boxes), no dividers. The labels only: Item References,
@@ -63,9 +62,10 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
                 codes[-1][1].append(k)
             for code, code_keys in codes:
                 if add_dividers:
-                    entries = _barcodes_for(divider_barcodes, first['tab_name'], first['pack_name'], code)
+                    # No installer barcodes here (the Label Shuffler's dividers have them): each item on these labels
+                    # carries its own job-number barcode
                     n = len(code_keys)
-                    div = build_divider_sheet(A4_W, A4_H, code or '?', n, n, False, barcode_entries=entries)
+                    div = build_divider_sheet(A4_W, A4_H, code or '?', n, n, False)
                     _divider_caption(div[0], first, n)
                     before = len(out)
                     out.insert_pdf(div)
@@ -88,15 +88,6 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
     return info
 
 
-def _barcodes_for(lookup, tab, pack, code):
-    """The installer barcodes for one code's divider, keyed as the Label Shuffler keys them."""
-    for (t, header), by_code in lookup.items():
-        name = header[len('Code for '):] if header.startswith('Code for ') else header
-        if t == tab and name.strip().lower() in (str(pack).strip().lower(), f"pack {pack}".strip().lower()):
-            return by_code.get(code)
-    return None
-
-
 def _divider_caption(page, first, count):
     """The pack this divider belongs to, small at the foot, so a stack of dividers can be told apart."""
     pack = f"Pack {first['pack_no']}" + ("" if str(first['pack_name']).strip() == str(first['pack_no']) else f" - {first['pack_name']}")
@@ -112,7 +103,7 @@ def draw_pack_audit(doc, pack_groups, keys, issues, dividers, grouped=True):
     first = pack_groups[keys[0]]
     _, rows = pack_summary(pack_groups, keys)
     boxes = sum(r['boxes'] for _, r in rows)
-    units = sum(float(i['qty']) for k in keys for i in pack_groups[k]['items'])
+    columns = first.get('pack_columns') or len({i.get('job_no') for k in keys for i in pack_groups[k]['items']})
     # 'Tab 1 - Pack 1', and a pack with a name of its own says it too: 'Tab 1 - Pack 2: Window kit'
     name = str(first['pack_name']).strip()
     title = f"Tab {first['tab_no']} - Pack {first['pack_no']}" + ('' if name.isdigit() or name == str(first['pack_no']) else f": {name}")
@@ -120,6 +111,7 @@ def draw_pack_audit(doc, pack_groups, keys, issues, dividers, grouped=True):
              "Order: code by code (A, B, C ...), a divider before each code, stores in sheet order." if dividers else
              "Order: code by code (A, B, C ...), stores in sheet order. Dividers off.")
     specs = Counter(pack_groups[k].get('pack_spec_name', '') for k in keys)
-    draw_audit_page(doc, title, [("Labels", len(keys)), ("Boxes", boxes), ("Codes", len(rows)), ("Units", f"{units:g}")],
-                    [spec_summary(specs), f"Codes: {first.get('code_source', '')}", order], issues,
-                    "Every unit in this pack is on a label, and every store has its packing-sheet code.")
+    # Items: the pack's item columns in the sheet (every column under the pack's header), not the sum of quantities
+    draw_audit_page(doc, title, [("Labels", len(keys)), ("Boxes", boxes), ("Codes", len(rows)), ("Items", columns)],
+                    [f"Codes: {first.get('code_source', '')}", order], issues,
+                    "Every unit in this pack is on a label, and every store has its packing-sheet code.", specs=specs)

@@ -329,14 +329,42 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     raw = [[ws.cell(row=r, column=x).value for x in range(1, ws.max_column + 1)] for r in range(1, ws.max_row + 1)]
     sig_rows = list(range(pack_row + 1, last_row + 1))  # the rows Packing Sheets coded
     store_key = {r: _norm(clean_store_name(val(r, store_col))) for r in store_rows}
-    code_problems = []
+    code_problems, code_warnings = [], []
     for p in packs:
         computed = {}
         if p['items']:
             _, _, _, _, ordered = generate_pack_signatures(raw, sig_rows, min(p['items']), max(p['items']))
             computed = dict(zip(sig_rows, ordered))
         sheet = next((codes for name, codes in sig_codes.items() if names_pack(name, p['name'])), None)
-        if p['code_cols']:
+        if sheet is not None:
+            # Signature Links attached: its codes make the groups (they're what the packing sheets were made with).
+            # Every check against it is a warning, on the preview and the pack's audit page; Generate goes ahead.
+            p['codes'] = {r: (sheet.get(store_key[r]) or '').upper() for r in store_rows}
+            p['code_source'] = "the Signature Links file"
+            has_qty = [r for r in store_rows if computed.get(r)]
+            missing = [r for r in has_qty if not p['codes'][r]]
+            if missing:  # a store Signature Links doesn't list: its code is worked out from the quantities
+                for r in missing:
+                    p['codes'][r] = computed.get(r, '')
+                code_warnings.append(_issue(_row_ranges(missing), f"Pack {p['name']}", "Store not in Signature Links",
+                                            "Its code was worked out from the quantities instead.", major=True))
+            stale = [r for r in has_qty if r not in missing and p['codes'][r] != computed.get(r)]
+            if stale:
+                code_warnings.append(_issue(_row_ranges(stale), f"Pack {p['name']}",
+                                            "Signature Links code doesn't match the quantities",
+                                            "The Signature Links codes are used for the grouping. The quantities may have "
+                                            "changed after Packing Sheets, or the files are from different runs.", major=True))
+            if p['code_cols']:
+                own = {r: val(r, p['code_cols']).upper() for r in store_rows}
+                off = [r for r in store_rows if own[r] != p['codes'][r]]
+                if off:
+                    code_warnings.append(_issue(_row_ranges(off), f"{L(p['code_cols'])} · Pack {p['name']}",
+                                                "Code differs from the Signature Links file",
+                                                "The Signature Links codes are used for the grouping; the two files are from "
+                                                "different Packing Sheets runs.", major=True))
+                p['code_source'] += f", checked against the file's '{val(job_row, p['code_cols'])}' column"
+            p['code_source'] += " and the quantities"
+        elif p['code_cols']:
             p['codes'] = {r: val(r, p['code_cols']).upper() for r in store_rows}
             p['code_source'] = f"the file's '{val(job_row, p['code_cols'])}' column (column {L(p['code_cols'])})"
             stale = [r for r in store_rows if p['codes'][r] != (computed.get(r) or '')]
@@ -344,24 +372,15 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
                 code_problems.append(_issue(_row_ranges(stale), f"{L(p['code_cols'])} · Pack {p['name']}",
                                             "Code doesn't match the quantities",
                                             "The quantities changed after Packing Sheets: run Packing Sheets again."))
-        elif sheet is not None:
-            p['codes'] = {r: (sheet.get(store_key[r]) or '').upper() for r in store_rows}
-            p['code_source'] = "the Signature Links file"
         else:
             p['codes'] = {r: computed.get(r, '') for r in store_rows}
             p['code_source'] = "worked out from the quantities (no code column, no Signature Links)"
-        if sheet is not None and p['code_cols']:
-            off = [r for r in store_rows if (sheet.get(store_key[r]) or '').upper() != p['codes'][r]]
-            if off:
-                code_problems.append(_issue(_row_ranges(off), f"Pack {p['name']}",
-                                            "Code differs from the Signature Links file",
-                                            "The two files are from different Packing Sheets runs."))
-            p['code_source'] += ", checked against Signature Links"
         p['subs'] = {rng: {r: val(r, x).upper() for r in store_rows} for rng, x in p['sub_cols']}
         p['code_header'] = (val(job_row, p['code_cols']) if p['code_cols'] else
                             f"Code for Pack {p['name']}" if not str(p['name']).lower().startswith('pack') else f"Code for {p['name']}")
         p['sub_headers'] = [(rng, val(job_row, x)) for rng, x in p['sub_cols']]
     errors += code_problems
+    warnings += code_warnings
 
     # 8. One pack group per store and pack that has quantities
     n_stores = len(store_rows)
@@ -369,6 +388,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     names = Counter(store_key.values())
     groups, bad_qty, x_but_qty, no_spec, spec_no_qty = {}, [], [], [], []
     grid_units = label_units = 0
+    lost = []  # (row, column, units): quantities in the grid that no label carries, for the check's coordinates
     for number, r in enumerate(store_rows, start=1):
         receiver = val(r, cols['receiver_name']) if 'receiver_name' in cols else ''
         store = clean_store_name(val(r, cols['store_name'])) if 'store_name' in cols else receiver
@@ -390,6 +410,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             spec = _spec_for(p, r, val, spec_cols, attr_rows, any(p['code_cols'] or p['sub_cols'] for p in packs))
             if items and spec.lower() in NO_PACK:
                 (x_but_qty if spec else no_spec).append((r, p))
+                lost += [(r, i['source_key'][1], float(i['qty'])) for i in items]
                 continue
             if not items:
                 if spec and spec.lower() not in NO_PACK and p.get('spec_from') == 'column':
@@ -402,14 +423,16 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             # column's header where a job number goes, the store's code where the quantity goes
             code_cells = [_code_cell(p['code_header'], code)] + [_code_cell(h, c) for (rng, h), c in
                                                                  zip(p['sub_headers'], (c for _, c in subs)) if c]
-            tag = f"PACK {p['order']} \u00b7 CODE {code or '?'}" + "".join(f" \u00b7 {rng}: {c}" for rng, c in subs if c)
+            # With Signature Links the code is in the label's own code box: the packing spec box just names the pack
+            tag = (f"PACK {p['order']}" if sig_codes else
+                   f"PACK {p['order']} \u00b7 CODE {code or '?'}" + "".join(f" \u00b7 {rng}: {c}" for rng, c in subs if c))
             serial = f"{number:0{width}d}T{tab_no}P{p['order']}"
             groups[f"ROW_{r}_P{p['order']}"] = {
                 'pack_spec_name': spec, 'store_name': store, 'receiver_name': receiver,
                 'contact': attn_text(val(r, cols['contact'])) if 'contact' in cols else '', 'install': install,
                 'address_1': parts.get('address_1', ''), 'address_2': line2,
                 **{k: parts.get(k, '') for k in ('suburb', 'state', 'postcode', 'country')},
-                'pack_no': p['order'], 'pack_name': p['name'], 'pack_code': code, 'sub_codes': subs,
+                'pack_no': p['order'], 'pack_name': p['name'], 'pack_columns': len(p['items']), 'pack_code': code, 'sub_codes': subs,
                 'pack_tag': tag, 'code_cells': code_cells, 'code_source': p['code_source'], 'serial': serial, 'store_no': number,
                 'tab_no': tab_no, 'tab_name': ws.title, 'excel_rows': [r], 'items': items,
             }
@@ -437,7 +460,14 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     if no_barcode:
         warnings.append(_issue('', f"Row {job_row}", f"Job number can't be a barcode: {', '.join(no_barcode)}", major=True))
     if abs(grid_units - label_units) > 1e-9:
-        errors.append(_issue('', 'Quantities', f"{grid_units - label_units:g} units in the grid are on no label",
+        # Where they are: each cell as Excel names it (J12) with its units, and its rows and columns
+        cells = ", ".join(f"{L(x)}{r} ({q:g})" for r, x, q in sorted(lost, key=lambda c: (c[0], c[1]))[:12])
+        more = f" and {len(lost) - 12} more" if len(lost) > 12 else ''
+        cols_of = ", ".join(L(x) for x in sorted({x for _, x, _ in lost}))
+        errors.append(_issue(_row_ranges(sorted({r for r, _, _ in lost})) if lost else '',
+                             f"{cols_of} · Quantities" if lost else 'Quantities',
+                             f"{grid_units - label_units:g} units in the grid are on no label",
+                             (f"In cell{'s' if len(lost) != 1 else ''} {cells}{more}. " if lost else '') +
                              "Fix the problems above: every unit must land on a packing label."))
     totals = [sanitize_cell(raw[totals_row - 1][x - 1]) for x in item_cols] if totals_row else []
     totals = [t for t in totals if isinstance(t, (int, float)) and t]
@@ -453,7 +483,11 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     order = sorted(groups, key=lambda k: (groups[k]['pack_no'], code_key(groups[k]['pack_code']),
                                           [code_key(c) for _, c in groups[k]['sub_codes']], groups[k]['store_no']))
     found = {'packs': {f"{p['order']}. {p['name']}": f"{L(p['cols'][0])}-{L(p['cols'][-1])}" for p in packs},
-             'codes': sorted({re.sub(r"'Code for .*?' column \(column [A-Z]+\)", "code columns", p['code_source']) for p in packs}),
+             # Where the codes came from, in a word or two for the tab's card (each pack's detail is on its audit page;
+             # a difference is a warning of its own, so this stays quiet)
+             'codes': sorted({'Signature Links' if p['code_source'].startswith('the Signature Links') else
+                              "the file's code columns" if p['code_source'].startswith("the file's") else
+                              'worked out from the quantities' for p in packs}),
              'rows': {'job': job_row, 'pack': pack_row, 'stores': f"{first_row}-{last_row}"},
              'plugin': bool(plugin), 'stores': n_stores,
              # Each pack's Packing Specs and how many labels each, for the tab's card: [{'pack', 'specs': [[spec, n]]}]

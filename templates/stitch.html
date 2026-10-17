@@ -60,6 +60,16 @@
                 </div>
                 <input type="file" name="labels" class="dropzone-input" accept=".pdf" multiple>
             </div>
+            {# Optional: the courier CSV as changed outside the app, so the labels show the services it books #}
+            <div class="dropzone st-csv-drop">
+                <div class="dropzone-content">
+                    <div class="dropzone-icon">🚚</div>
+                    <p class="dropzone-text">Changed the courier CSV after Generate? Drop it here <span class="st-optional">optional</span></p>
+                    <p class="dropzone-subtext">the Open360 or OpenFreight CSV of this job. It replaces the project's copy, and each label gets the logo of the service it books.</p>
+                    <p class="dropzone-filename"></p>
+                </div>
+                <input type="file" name="courier_csv" class="dropzone-input" accept=".csv">
+            </div>
             {% if info.candidates %}
             <fieldset class="st-existing">
                 <legend>Or use label PDFs already in this project</legend>
