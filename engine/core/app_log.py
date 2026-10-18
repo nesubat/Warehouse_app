@@ -11,13 +11,46 @@ Use:  log = app_log.get('stitch');  log.info("...")
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 
 ROOT = 'wh'
+LOG_FILE = 'warehouse.log'  # in logs/; the Logs page (log_view.py) reads it and its rotated copies
+LOG_BACKUPS = 3
 _TERMINAL = "%(asctime)s %(levelname)-7s %(name)-10s| %(message)s"
 _FILE = "%(asctime)s %(levelname)-7s %(name)-10s %(threadName)s | %(message)s"
+
+
+_errors = threading.local()
+
+
+class _RememberErrors(logging.Handler):
+    """Keeps the last error each thread logged (when, what), so a failed page can land on it on the Logs page."""
+
+    def __init__(self):
+        super().__init__(logging.ERROR)
+
+    def emit(self, record):
+        try:
+            _errors.last = (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record.created)), record.getMessage().strip())
+        except Exception:
+            pass
+
+
+def last_error():
+    """(time, message) of the last error this thread logged since forget_error(), or None."""
+    return getattr(_errors, 'last', None)
+
+
+def forget_error():
+    _errors.last = None
+
+
+def log_dir(base_dir):
+    """logs/ in the app folder, where the file log goes and the Logs page reads it."""
+    return os.path.join(base_dir, 'logs')
 
 
 def setup(base_dir):
@@ -27,6 +60,7 @@ def setup(base_dir):
         return root
     root.setLevel(logging.DEBUG)
     root.propagate = False
+    root.addHandler(_RememberErrors())
     stream = sys.stdout
     if stream is not None:
         try:
@@ -38,9 +72,9 @@ def setup(base_dir):
         term.setFormatter(logging.Formatter(_TERMINAL, "%H:%M:%S"))
         root.addHandler(term)
     try:
-        folder = os.path.join(base_dir, 'logs')
+        folder = log_dir(base_dir)
         os.makedirs(folder, exist_ok=True)
-        file = RotatingFileHandler(os.path.join(folder, 'warehouse.log'), maxBytes=2_000_000, backupCount=3, encoding='utf-8')
+        file = RotatingFileHandler(os.path.join(folder, LOG_FILE), maxBytes=2_000_000, backupCount=LOG_BACKUPS, encoding='utf-8')
         file.setLevel(logging.DEBUG)
         file.setFormatter(logging.Formatter(_FILE, "%Y-%m-%d %H:%M:%S"))
         root.addHandler(file)

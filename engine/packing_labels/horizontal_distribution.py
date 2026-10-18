@@ -32,12 +32,13 @@ from openpyxl.utils.cell import column_index_from_string
 
 from engine.packing_labels.packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
                                                             with_stores,
-                                     is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field)
+                                     is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field,
+                                     dim_part, dim_unit, join_dimensions)
 from engine.courier.courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
                             NO_PACK, TOTAL_ROW)
 from engine.courier.courier_export import attn_text
 from engine.core.core_math import (generate_pack_signatures, sanitize_cell, clean_store_name, LABEL_PLUGIN_SHEET,
-                       DIVIDER_BARCODE_SHEET, read_divider_barcodes)
+                       NOT_STORE_TABS, read_divider_barcodes)
 from engine.label_shuffler.pdf_engine import code128_modules
 from engine.courier.packing_specs import split_count
 
@@ -94,14 +95,20 @@ def read_signature_file(path):
             header = [str(h).strip() if h is not None else '' for h in rows[0]]
             if ws.title == LABEL_PLUGIN_SHEET:
                 out['plugin'] = _plugin_from_rows(header, rows[1:])
-            elif ws.title != DIVIDER_BARCODE_SHEET:
+            elif ws.title not in NOT_STORE_TABS:  # the one list of tabs that aren't store codes (core_math)
                 tab = {}
                 for c, h in enumerate(header[1:], start=1):
                     parsed = parse_code_header(h)
                     if not parsed or parsed[1]:
                         continue
-                    tab[parsed[0]] = {_norm(clean_store_name(r[0])): str(r[c]).strip()
-                                      for r in rows[1:] if r and r[0] and c < len(r) and r[c] not in (None, '')}
+                    # {store: [its codes, in row order]}: two stores of one name each keep their own code (the first
+                    # store of that name in the Final file takes the first, and so on), not the last row's for both
+                    codes = {}
+                    for r in rows[1:]:
+                        if r and r[0] and c < len(r):
+                            codes.setdefault(_norm(clean_store_name(r[0])), []).append(
+                                str(r[c]).strip() if r[c] not in (None, '') else '')
+                    tab[parsed[0]] = codes
                 if tab:
                     out['codes'][ws.title] = tab
     finally:
@@ -250,10 +257,31 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         missing = [n for n in known if not any(_norm(n) == _norm(p['name']) for p in packs)]
         if missing:
             warnings.append(_issue('', f"Row {pack_row}", f"Packs in the Label Plugin not found here: {', '.join(missing)}", major=True))
+    # A pack's number is in its labels' serials and Item References ('03T1P2'), and its Packing Spec column, Label
+    # Plugin row and Signature Links codes are all found by its name: two packs with one name or one number would get
+    # the same labels, one pack's overwriting the other's. Which is which can't be guessed, so Generate is refused.
+    header_cells = lambda same: ", ".join(f"{L(p['cols'][0])}{pack_row}" for p in same)
+    pack_errors = len(errors)
+    by_name, by_order = defaultdict(list), defaultdict(list)
+    for p in packs:
+        by_name[_norm(p['name'])].append(p)
+        by_order[p['order']].append(p)
+    for same in by_name.values():
+        if len(same) > 1:
+            errors.append(_issue('', header_cells(same), f"{len(same)} packs named '{same[0]['name']}'",
+                                 f"Give each pack its own name in row {pack_row} (as in the Packing Sheets run), "
+                                 "then upload the file again."))
+    for order, same in by_order.items():
+        if len(same) > 1 and len({_norm(p['name']) for p in same}) > 1:
+            errors.append(_issue('', header_cells(same),
+                                 f"Packs {', '.join(repr(p['name']) for p in same)} are all pack {order}",
+                                 "The Label Plugin gives them the same Pack Order: check its Pack Order column, or run "
+                                 "Packing Sheets again for a new Signature Links file."))
+    pack_errors = len(errors) > pack_errors  # then the clashing labels below are that one problem, said once here
 
     # 4. Inside each pack: code columns (headers 'Code for …') and item columns (job numbers)
     for p in packs:
-        p['code_cols'], p['sub_cols'], p['items'] = None, [], []
+        p['code_cols'], p['sub_cols'], p['items'], p['no_job'] = None, [], [], []
         for x in p['cols']:
             parsed = parse_code_header(val(job_row, x))
             if parsed:
@@ -266,6 +294,8 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
                     p['code_cols'] = x
             elif val(job_row, x):
                 p['items'].append(x)
+            else:  # no job number: checked for quantities below, once the store rows are known
+                p['no_job'].append(x)
     item_cols = [x for p in packs for x in p['items']]
     if not item_cols:
         raise PackCheckError([_issue('', f"Row {job_row}", "No item columns (job numbers) under the packs")], warnings)
@@ -295,19 +325,77 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     totals_row = next((r for r in range(last_row + 1, min(ws.max_row, last_row + 3) + 1)
                        if TOTAL_ROW.match(val(r, store_col))), None)
 
+    # 5b. Quantities no label would carry: the labels are made per store row and per item column with a job number,
+    # so units anywhere else in the grid would be left off without a word. Each is refused with its cells.
+    def units(r, x):
+        q = sanitize_cell(ws.cell(row=r, column=x).value)
+        return q if isinstance(q, (int, float)) and not isinstance(q, bool) else 0
+
+    def cells_text(cells):
+        shown = ", ".join(f"{L(x)}{r} ({q:g})" for r, x, q in cells[:12])
+        return shown + (f" and {len(cells) - 12} more" if len(cells) > 12 else '')
+    grid_rows = range(first_row, last_row + 1)
+    # A column under a pack with quantities but no job number above them (cleared by mistake)
+    for p in packs:
+        for x in p['no_job']:
+            rows = [r for r in grid_rows if units(r, x)]
+            if rows:
+                errors.append(_issue(_row_ranges(rows), f"{L(x)}{job_row}",
+                                     f"No job number in {L(x)}{job_row}: {sum(units(r, x) for r in rows):g} units in this column",
+                                     f"Pack {p['name']}. Put the item's job number in {L(x)}{job_row}, or clear the column's "
+                                     "quantities if it isn't an item."))
+    # A job number with no pack header over it (the merged pack header doesn't reach its column)
+    for x in range(first_col, last_col + 1):
+        if x not in col_pack and JOB.match(val(job_row, x)):
+            rows = [r for r in grid_rows if units(r, x)]
+            if rows:
+                errors.append(_issue(_row_ranges(rows), f"{L(x)}{pack_row}",
+                                     f"{val(job_row, x)} in {L(x)}{job_row} is under no pack header: "
+                                     f"{sum(units(r, x) for r in rows):g} units in this column",
+                                     f"Widen the pack's merged header in row {pack_row} over column {L(x)}."))
+    # A row with quantities but no store name: it can't be addressed, and isn't one of the store rows read above
+    named = set(store_rows)
+    for r in grid_rows:
+        if r in named:
+            continue
+        cells = [(r, x, units(r, x)) for x in item_cols if units(r, x)]
+        if cells:
+            errors.append(_issue(str(r), ", ".join(L(x) for _, x, _ in cells), "Quantities but no store name",
+                                 f"{sum(q for *_, q in cells):g} units in {cells_text(cells)}. Put the store's name in "
+                                 f"{L(store_col)}{r}, or clear the row's quantities."))
+    # Stores added under the last store the Label Plugin knows (Packing Sheets ran before they were added): look down to
+    # the TOTAL row, or to the last store found as without the Label Plugin
+    if plugin and plugin.get('last_row'):
+        end = next((r - 1 for r in range(last_row + 1, ws.max_row + 1) if TOTAL_ROW.match(val(r, store_col))), None)
+        if end is None:
+            end = ws.max_row
+            while end > last_row and not val(end, store_col):
+                end -= 1
+        below = [(r, x, units(r, x)) for r in range(last_row + 1, end + 1) for x in item_cols if units(r, x)]
+        if below:
+            errors.append(_issue(_row_ranges(sorted({r for r, _, _ in below})), L(store_col),
+                                 f"Stores below the Label Plugin's last store row ({last_row})",
+                                 f"{sum(q for *_, q in below):g} units in {cells_text(below)}. The stores were changed "
+                                 "after Packing Sheets ran: run Packing Sheets again for a new Signature Links file."))
+
     # 6. Item details from labelled rows above (Description, Size, Artwork …)
     attr_rows = {'job_no': job_row}
+    dim_rows = {}  # a dimension over several rows (Width, Breadth, Length …): letter -> (row, unit its label gives)
     for r in range(1, header_row + 1):
         if r == job_row:
             continue
         label = next((val(r, x) for x in range(first_col - 1, 0, -1) if x not in spec_cols.values() and val(r, x)), '')
+        part = dim_part(label) if label else None  # before _row_field: 'Size W (mm)' is a part, not the whole size
+        if part and part not in dim_rows:
+            dim_rows[part] = (r, dim_unit(label))
+            continue
         field = _row_field(label) if label else None
         if field and field not in attr_rows:
             attr_rows[field] = r
     # Every other row above the stores with something under the items, as a block of its own for the label's item box,
     # named by what's written in the label column ('Kinds', 'Item Number', a second 'Description') or by its number
     # ('Row 6'): 'row_5' -> that row's value for the item. A label written twice gives a block per row.
-    used = set(attr_rows.values()) | {pack_row, header_row}
+    used = set(attr_rows.values()) | {r for r, _ in dim_rows.values()} | {pack_row, header_row}
     extra_rows = []
     for r in range(1, header_row):
         if r in used or not any(val(r, x) for x in item_cols):
@@ -318,6 +406,8 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     info, no_image = {}, []
     for x in item_cols:
         info[x] = {f: (val(attr_rows[f], x) if f in attr_rows else '') for f in ('job_no', 'desc', 'dimension', 'material', 'notes')}
+        if not info[x]['dimension'] and dim_rows:  # the parts, each with its letter, as vertical labels show them
+            info[x]['dimension'] = join_dimensions({k: (val(r, x), unit) for k, (r, unit) in dim_rows.items()})
         info[x].update({f"row_{r}": val(r, x) for r, _ in extra_rows})
         info[x]['thumbnails'] = images.get((attr_rows['thumbnail'], x), []) if 'thumbnail' in attr_rows else []
         if 'thumbnail' in attr_rows and not info[x]['thumbnails']:
@@ -339,7 +429,12 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         if sheet is not None:
             # Signature Links attached: its codes make the groups (they're what the packing sheets were made with).
             # Every check against it is a warning, on the preview and the pack's audit page; Generate goes ahead.
-            p['codes'] = {r: (sheet.get(store_key[r]) or '').upper() for r in store_rows}
+            seen = Counter()  # the n-th store of a name takes the n-th code Signature Links has for that name
+            p['codes'] = {}
+            for r in store_rows:
+                listed = sheet.get(store_key[r]) or []
+                p['codes'][r] = (listed[seen[store_key[r]]] if seen[store_key[r]] < len(listed) else '').upper()
+                seen[store_key[r]] += 1
             p['code_source'] = "the Signature Links file"
             has_qty = [r for r in store_rows if computed.get(r)]
             missing = [r for r in has_qty if not p['codes'][r]]
@@ -386,7 +481,8 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     n_stores = len(store_rows)
     width = max(2, len(str(n_stores)))
     names = Counter(store_key.values())
-    groups, bad_qty, x_but_qty, no_spec, spec_no_qty = {}, [], [], [], []
+    groups, bad_qty, x_but_qty, no_spec, spec_no_qty, part_qty, clashes = {}, [], [], [], [], [], []
+    serials = set()
     grid_units = label_units = 0
     lost = []  # (row, column, units): quantities in the grid that no label carries, for the check's coordinates
     for number, r in enumerate(store_rows, start=1):
@@ -400,8 +496,11 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             items = []
             for x in p['items']:
                 q = sanitize_cell(ws.cell(row=r, column=x).value)
-                if isinstance(q, str):
+                if isinstance(q, (str, bool)):
                     bad_qty.append((r, x))
+                    continue
+                if q < 0 or q != int(q):  # a unit is a piece packed: -2 or 1.5 is a typo, not a quantity to guess at
+                    part_qty.append((r, x, q))
                     continue
                 if q:
                     grid_units += q
@@ -416,6 +515,15 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
                 if spec and spec.lower() not in NO_PACK and p.get('spec_from') == 'column':
                     spec_no_qty.append((r, p))
                 continue
+            serial = f"{number:0{width}d}T{tab_no}P{p['order']}"
+            key = f"ROW_{r}_P{p['order']}"
+            if key in groups or serial in serials:
+                # Never overwrite a label already made: its units would go without a word. The pack checks above
+                # should have caught the cause; this keeps it from ever happening quietly.
+                clashes.append((r, p, serial))
+                lost += [(r, i['source_key'][1], float(i['qty'])) for i in items]
+                continue
+            serials.add(serial)
             label_units += sum(float(i['qty']) for i in items)
             code = p['codes'].get(r, '')
             subs = [(rng, codes.get(r, '')) for rng, codes in p['subs'].items()]
@@ -426,8 +534,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             # With Signature Links the code is in the label's own code box: the packing spec box just names the pack
             tag = (f"PACK {p['order']}" if sig_codes else
                    f"PACK {p['order']} \u00b7 CODE {code or '?'}" + "".join(f" \u00b7 {rng}: {c}" for rng, c in subs if c))
-            serial = f"{number:0{width}d}T{tab_no}P{p['order']}"
-            groups[f"ROW_{r}_P{p['order']}"] = {
+            groups[key] = {
                 'pack_spec_name': spec, 'store_name': store, 'receiver_name': receiver,
                 'contact': attn_text(val(r, cols['contact'])) if 'contact' in cols else '', 'install': install,
                 'address_1': parts.get('address_1', ''), 'address_2': line2,
@@ -440,6 +547,12 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     # 9. Checks, each with its Excel row and column
     for r, x in bad_qty:
         errors.append(_issue(str(r), L(x), "Quantity isn't a number"))
+    for r, x, q in part_qty:
+        errors.append(_issue(str(r), L(x), "Quantity must be a whole number of 0 or more",
+                             f"{L(x)}{r} says {q:g}. Fix the quantity in the distribution file."))
+    for r, p, serial in ([] if pack_errors else clashes):
+        errors.append(_issue(str(r), f"Pack {p['name']}", "Two labels with the same reference",
+                             f"{serial}: another pack on this row is pack {p['order']} too. Check the pack headers in row {pack_row}."))
     for r, p in x_but_qty:
         errors.append(_issue(str(r), f"Pack {p['name']}", f"Pack {p['name']} marked x but has quantities",
                              "Give it a Packing Spec, or clear its quantities."))
@@ -501,7 +614,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
         'Packing Spec': True, 'Store Name': True, 'Job Number': True, 'Quantity': True,
         'Address Info': any(k in cols for k in ADDRESS_FIELDS),
         'Install': bool(install_col),
-        'Description': 'desc' in attr_rows, 'Dimensions': 'dimension' in attr_rows, 'Material': 'material' in attr_rows,
+        'Description': 'desc' in attr_rows, 'Dimensions': 'dimension' in attr_rows or bool(dim_rows), 'Material': 'material' in attr_rows,
         'Notes': 'notes' in attr_rows, 'Thumbnail': 'thumbnail' in attr_rows,
         # The other rows, each a block the page offers: [{'id': 'row_5', 'label': 'Kinds (row 5)'}]
         'Extra rows': [{'id': f"row_{r}", 'label': f"{label} (row {r})" if label else f"Row {r}"} for r, label in extra_rows],

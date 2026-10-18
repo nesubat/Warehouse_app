@@ -6,7 +6,10 @@ import pandas as pd
 import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
+from engine.core import app_log, progress
 from engine.core.core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
+
+log = app_log.get('sheets')  # Packing Sheets: the Logs page and the loading overlay (progress.py) show its steps
 
 
 
@@ -393,6 +396,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     
     tab_summaries = {}
     tab_column_jobs = {}  # {tab: {col: job number}} for every pack column with a job number
+    progress.stage("Opening the file in Excel", 2, 10)
+    log.info("  opening %s in Excel (%d tab(s): %s)", original_filename, len(selected_tabs), ", ".join(selected_tabs))
     app = xw.App(visible=False)
     app.display_alerts = False
     
@@ -410,7 +415,11 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
         master_stock_data = []
         master_job_data = []
 
-        for tab_name in selected_tabs:
+        progress.stage("Working out the codes and the packing sheets", 10, 75)
+        for tab_no, tab_name in enumerate(selected_tabs):
+            progress.tick(tab_no, len(selected_tabs), f"Tab {tab_name}: codes and packing sheet ({tab_no + 1} of {len(selected_tabs)})")
+            log.info("  tab %s: %d pack(s), stores to row %s", tab_name, len(tab_data_memory[tab_name]["pack_ranges"]),
+                     tab_data_memory[tab_name]["last_row"])
             sheet2 = wb2_xw.sheets[tab_name]
             tab_info = tab_data_memory[tab_name]
             last_col = max(p["end"] for p in tab_info["pack_ranges"])
@@ -472,7 +481,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 
                # CALL THE NEW DECOUPLED ENGINE
                 row_signatures, unique_sigs, sig_to_letter, summary_counts, ordered_codes = generate_pack_signatures(raw_values, store_rows, p_start, p_end)
-                print(f"Processed pack '{p_name}' in tab '{tab_name}': {len(unique_sigs)} unique signatures found.")
+                log.info("    pack %s: %d different allocation(s) (codes A, B …)", p_name, len(unique_sigs))
                     
                 is_pack_selected = p_name.strip() in selected_list
                 
@@ -495,7 +504,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                         sheet1_xw, col_letter_start, p_start, p_end, 
                         pack_group_row, tab_info['job_id_row'], tab_info['last_row']
                     )
-                    print(f"Inserted and formatted signature column for pack '{p_name}' in tab '{tab_name}'.")
+                    log.debug("    pack %s: Code for Pack column put in the Final file", p_name)
 
                     # --- THE BATCH WRITE FIX ---
                     # Bundle all the letters into a 2D array (a vertical column list)
@@ -510,7 +519,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                     if batch_data:
                         start_r = row_signatures[0][0] # Grab the very first row number
                         sheet1_xw.range(f"{col_letter_start}{start_r}").value = batch_data
-                        print(f"Batch wrote {len(batch_data)} signature codes for pack '{p_name}' in tab '{tab_name}'.")
+                        log.debug("    pack %s: %d store codes written", p_name, len(batch_data))
                     # =========================================================
                     # NEW: RE-MERGE MAIN PACK HEADER AFTER BATCH WRITE
                     # =========================================================
@@ -649,6 +658,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
                 
         stock_sheet.range("A:B").api.EntireColumn.AutoFit()
                     
+        progress.stage("Saving the Final file and the Packing Sheet", 75, 85)
+        log.info("  saving %s", " and ".join(n for n in (file1_name, file2_name) if n))
         if any_packs_selected:
             wb1_xw.save()
             wb1_xw.close()
@@ -666,6 +677,8 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     # PHASE 3: GENERATE FILE 3 (Pandas Rebuild Architecture)
     # =====================================================
     if any_packs_selected:
+        progress.stage("Writing the Signature Links file", 85, 98)
+        log.info("  writing %s (store codes, divider barcodes, Label Plugin)", file3_name)
         wb_raw = openpyxl.load_workbook(file_path, data_only=True)
         
         with pd.ExcelWriter(file3_path, engine='xlsxwriter') as writer:
@@ -755,4 +768,6 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             json.dump(project_metadata, f, indent=4)
 
     shared_job_warnings = find_shared_job_numbers(master_job_data)
+    for w in shared_job_warnings:
+        log.warning("    needs a look: job number %s", w)
     return file1_name, file2_name, file3_name, shared_job_warnings

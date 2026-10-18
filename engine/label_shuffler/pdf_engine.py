@@ -5,6 +5,10 @@ import math
 import re
 import collections
 
+from engine.core import app_log, progress
+
+log = app_log.get('shuffler')  # the Label Shuffler: the Logs page and the loading overlay show its steps
+
 # ==========================================
 # UTILITY: SIZE-SAFE TEXTBOX INSERTION
 # ==========================================
@@ -43,6 +47,14 @@ def group_missing_stores_by_code(store_mapping, found_stores):
 # ==========================================
 # UTILITY: PROFESSIONAL AUDIT REPORT GENERATOR
 # ==========================================
+def _log_matches(store_mapping, confirmed_stores, missing_stores_grouped, unmatched, blank, item_name):
+    """What the shuffle found, for the Logs page: stores matched, labels left over, and each code's missing stores."""
+    log.info("    %d of %d store(s) matched, %d %s unmatched, %d blank", len(confirmed_stores), len(store_mapping),
+             unmatched, item_name.lower(), blank)
+    for code, names in missing_stores_grouped:
+        log.warning("    needs a look: code %s, no label for %s", code or '(no code)', ", ".join(names))
+
+
 def build_audit_report(pdf_filename, page_width, report_height, missing_stores_grouped, unmatched_count, blank_count, item_name="PAGES"):
     """Generates a highly professional, formatted warning page."""
     audit_doc = fitz.open()
@@ -605,6 +617,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
     bottom_target = fitz.Rect(0, half_height, 289, page_height)
 
     for page_num in range(len(doc)):
+        progress.tick(page_num, len(doc), f"{pdf_filename}: page {page_num + 1} of {len(doc)}")
         page = doc[page_num]
 
         top_text = page.get_text("text", clip=top_target).lower()
@@ -617,19 +630,19 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
             store_halves[top_match].append({'doc_type': 'original', 'page_num': page_num, 'half': 'top', 'code': store_mapping[top_match]})
         elif not top_text.strip():
             blank_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top'})
-            print(f"[DEBUG] BLANK Top Half detected on Page {page_num + 1}")
+            log.debug(f"BLANK Top Half detected on Page {page_num + 1}")
         else:
             unmatched_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'top'})
-            print(f"[DEBUG] Unmatched Top Half on Page {page_num + 1}")
+            log.debug(f"Unmatched Top Half on Page {page_num + 1}")
 
         if bottom_match:
             store_halves[bottom_match].append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom', 'code': store_mapping[bottom_match]})
         elif not bottom_text.strip():
             blank_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom'})
-            print(f"[DEBUG] BLANK Bottom Half detected on Page {page_num + 1}")
+            log.debug(f"BLANK Bottom Half detected on Page {page_num + 1}")
         else:
             unmatched_halves.append({'doc_type': 'original', 'page_num': page_num, 'half': 'bottom'})
-            print(f"[DEBUG] Unmatched Bottom Half on Page {page_num + 1}")
+            log.debug(f"Unmatched Bottom Half on Page {page_num + 1}")
 
     # Where a store shows up on 2+ separate halves, neither can be trusted to be the
     # single "true" copy - move all of them to Unmatched for the tool operator to sort
@@ -639,7 +652,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
         if len(halves) > 1:
             for h in halves:
                 unmatched_halves.append(h)
-                print(f"[DEBUG] Store '{store}' matched on {len(halves)} separate halves - diverting Page {h['page_num'] + 1} ({h['half']}) to Unmatched")
+                log.debug(f"Store '{store}' matched on {len(halves)} separate halves - diverting Page {h['page_num'] + 1} ({h['half']}) to Unmatched")
         else:
             confirmed_stores.add(store)
             all_extracted_halves.extend(halves)
@@ -651,6 +664,7 @@ def process_split_layout(doc, sorted_stores, store_mapping, page_width, page_hei
     missing_stores_grouped = group_missing_stores_by_code(store_mapping, confirmed_stores)
     divider_info_by_code = analyze_matches(store_mapping, sorted_stores, confirmed_stores)
     audit_doc = build_audit_report(pdf_filename, page_width, half_height, missing_stores_grouped, len(unmatched_halves), len(blank_halves), "HALVES")
+    _log_matches(store_mapping, confirmed_stores, missing_stores_grouped, len(unmatched_halves), len(blank_halves), "HALVES")
 
     audit_halves = [{'doc_type': 'audit', 'page_num': i, 'half': 'full'} for i in range(len(audit_doc))]
 
@@ -751,11 +765,12 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
     store_instance_count = collections.defaultdict(int)
 
     for page_num in range(len(doc)):
+        progress.tick(page_num, len(doc), f"{pdf_filename}: page {page_num + 1} of {len(doc)}")
         page = doc[page_num]
         full_text = page.get_text("text").strip()
 
         if not full_text:
-            print(f"[DEBUG] Blank Page detected on Page {page_num + 1}. Skipping.")
+            log.debug(f"Blank Page detected on Page {page_num + 1}. Skipping.")
             blank_pages.append(page)
             continue
 
@@ -786,7 +801,7 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
 
         if not current_store:
             unmatched_pages.append(page)
-            print(f"[DEBUG] Unmatched/Junk Label on Page: {page_num + 1}")
+            log.debug(f"Unmatched/Junk Label on Page: {page_num + 1}")
         else:
             store_pages[current_store].append(page_num)
 
@@ -817,6 +832,7 @@ def process_standard_layout(doc, sorted_stores, store_mapping, page_width, page_
     missing_stores_grouped = group_missing_stores_by_code(store_mapping, confirmed_stores)
     divider_info_by_code = analyze_matches(store_mapping, sorted_stores, confirmed_stores)
     audit_doc = build_audit_report(pdf_filename, page_width, page_height, missing_stores_grouped, len(unmatched_pages), len(blank_pages), "PAGES")
+    _log_matches(store_mapping, confirmed_stores, missing_stores_grouped, len(unmatched_pages), len(blank_pages), "PAGES")
 
     # Stitching
     final_shuffled_doc = fitz.open()
@@ -882,8 +898,8 @@ def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, sign
     width_mm = math.ceil(page_width * 0.3528 * 10) / 10
     height_mm = math.ceil(page_height * 0.3528 * 10) / 10
     
-    print(f"\n[ENGINE] Processing {pdf_filename} against Signature: '{signature_header}'")
-    print(f"[ENGINE] Detected Page Size: {width_mm} x {height_mm} (Split Layout: {is_split_layout})")
+    log.info(f"  shuffling {pdf_filename} by the codes of '{signature_header}'")
+    log.info(f"    {len(doc)} page(s) of {width_mm} x {height_mm} mm, {'two labels a page' if is_split_layout else 'one label a page'}")
 
     # Traffic Router
     if is_split_layout:
@@ -897,5 +913,5 @@ def process_and_shuffle_pdf(input_pdf_path, store_mapping, output_pdf_path, sign
     final_shuffled_doc.close()
     doc.close()
     
-    print(f"\n[SUCCESS] Document saved to: {output_pdf_path}")
+    log.info(f"    saved {os.path.basename(output_pdf_path)}")
     return True

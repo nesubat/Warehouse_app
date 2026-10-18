@@ -5,6 +5,10 @@ import xlwings as xw
 from openpyxl.utils import get_column_letter
 from engine.core.core_math import generate_pack_signatures, update_metadata_for_subgroup, format_file1, format_file2, close_if_open_elsewhere
 
+from engine.core import app_log, progress
+
+log = app_log.get('subgroup')  # Sub-Group: the Logs page and the loading overlay show its steps
+
 
 class SubgroupValidationError(Exception):
     """Raised when the user-provided item row/numbers can't be safely resolved against the sheet."""
@@ -55,13 +59,9 @@ def _map_item_columns(row_data, tab_name, item_row):
 
 
 def execute_subgroups(project_dir, metadata, subgroup_instructions):
-    print("\n[DEBUG] =========================================")
-    print("[DEBUG] STARTING SUB-GROUP ENGINE (XLWINGS)")
-    print("[DEBUG] =========================================")
-    
     file1_name = metadata.get("file1_name")
     if not file1_name:
-        print("[ERROR] File 1 name missing from metadata.")
+        log.error("  the project's details file names no Final file: the sub-groups can't be made")
         return False
         
     job_id = metadata.get("job_id", "UNKNOWN")
@@ -94,10 +94,8 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
     file2_name = f"Packing Sheet_{job_id}{file_ext}"
     file2_path = os.path.join(project_dir, file2_name)
     
-    print(f"[DEBUG] Target File 1 (Source): {file1_name}")
-    print(f"[DEBUG] New File 1 (Output): {new_file1_name}")
-    print(f"[DEBUG] Target File 2 (Master Packing Sheet): {file2_name}")
-    
+    log.info(f"  from {file1_name} to {new_file1_name}")
+    log.debug(f"  Target File 2 (Master Packing Sheet): {file2_name}")
     # Update metadata to reflect its new identity
     metadata["file1_name"] = new_file1_name
     
@@ -105,17 +103,18 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
     app.display_alerts = False
     
     try:
-        print("[DEBUG] Opening Excel files in background...")
+        log.debug("  Opening Excel files in background...")
         close_if_open_elsewhere(file1_path)
         close_if_open_elsewhere(file2_path)
         wb1 = app.books.open(file1_path)
         wb2 = app.books.open(file2_path)
-        print("[DEBUG] Excel files opened successfully.")
-        
-        for tab_name, tab_data in subgroup_instructions.items():
-            print(f"\n[DEBUG] --- Processing Tab: {tab_name} ---")
+        log.debug("  Excel files opened successfully.")
+        progress.stage("Making the sub-groups in Excel", 10, 90)
+        for tab_no, (tab_name, tab_data) in enumerate(subgroup_instructions.items()):
+            progress.tick(tab_no, len(subgroup_instructions), f"Tab {tab_name} ({tab_no + 1} of {len(subgroup_instructions)})")
+            log.info(f"  tab {tab_name}: {len(tab_data['packs'])} pack(s) to split")
             if tab_name not in [s.name for s in wb1.sheets]:
-                print(f"[DEBUG] Tab {tab_name} not found in File 1. Skipping.")
+                log.debug(f"  Tab {tab_name} not found in File 1. Skipping.")
                 continue
                 
             ws1 = wb1.sheets[tab_name]
@@ -125,12 +124,11 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             job_id_row = meta_tab["job_id_row"]
             last_row = meta_tab["last_row"]
             
-            print(f"[DEBUG] Coordinates -> Item Row: {item_row}, Pack Row: {pack_group_row}, Job ID Row: {job_id_row}, Last Row: {last_row}")
-            
+            log.debug(f"  Coordinates -> Item Row: {item_row}, Pack Row: {pack_group_row}, Job ID Row: {job_id_row}, Last Row: {last_row}")
             # =========================================================
             # STAGE 1: MEMORY EXTRACTION & MATH (didn't like the approach of mapping whole columns, so we will map item numbers to their respective columns by going through only pack selected.)
             # =========================================================
-            print("[DEBUG] [STAGE 1] Extracting 2D Array and mapping item numbers...")
+            log.debug("  Extracting 2D Array and mapping item numbers...")
             raw_values = ws1.used_range.value
 
             if item_row - 1 >= len(raw_values):
@@ -145,7 +143,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             compiled_data = {}
             
             for pack_name, ranges in tab_data["packs"].items():
-                print(f"[DEBUG] Computing Sub-groups for Parent Pack: {pack_name}")
+                log.info(f"    pack {pack_name}: items {', '.join(f'{a}-{b}' for a, b in ranges)}")
                 compiled_data[pack_name] = []
                 for sg_index, (start_num, end_num) in enumerate(ranges):
                     start_col = item_col_map.get(int(start_num))
@@ -161,14 +159,13 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                             f"fields or the Item Number Row."
                         )
 
-                    print(f"[DEBUG]   -> Sub-group {start_num}-{end_num} mapped to Columns {start_col_letter} through {end_col_letter}")
+                    log.debug(f"  -> Sub-group {start_num}-{end_num} mapped to Columns {start_col_letter} through {end_col_letter}")
                     store_rows = range(pack_group_row + 1, last_row + 1)
                     
                     row_sigs, unique_sigs, sig_to_letter, summary_counts, ordered_codes = generate_pack_signatures(
                         raw_values, store_rows, start_col, end_col
                     )
-                    print(f"[DEBUG]   -> Math complete: Found {len(unique_sigs)} unique signatures.")
-                    
+                    log.info(f"      items {start_num}-{end_num}: {len(unique_sigs)} different allocation(s) (codes A, B …)")
                     compiled_data[pack_name].append({
                         "header_str": f"pack {pack_name}: {start_num}-{end_num}",
                         "start_num": start_num,
@@ -185,15 +182,14 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             # =========================================================
             # STAGE 2: RIGHT-TO-LEFT INSERTION (FILE 1)
             # =========================================================
-            print("\n[DEBUG] [STAGE 2] Sorting packs for Right-To-Left insertion...")
+            log.debug("  putting the sub-group code columns in, right to left")
             packs_to_process = []
             for p_name in compiled_data.keys():
                 c_col = meta_tab["packs"][p_name]["code_col"]
                 packs_to_process.append((c_col, p_name))
                 
             packs_to_process.sort(key=lambda x: x[0], reverse=True)
-            print(f"[DEBUG] Insertion order: {[p[1] for p in packs_to_process]}")
-            
+            log.debug(f"  Insertion order: {[p[1] for p in packs_to_process]}")
             for code_col_orig, p_name in packs_to_process:
                 subgroups = compiled_data[p_name]
                 current_pstart = meta_tab["packs"][p_name]["code_col"]
@@ -203,7 +199,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                 current_pend = meta_tab["packs"][p_name]["current_end"]
                 current_pend_col = get_column_letter(current_pend)
                 
-                print(f"[DEBUG] Modifying File 1 for Pack: {p_name} | Base Insertion Col: {insert_base}")
+                log.debug(f"  Modifying File 1 for Pack: {p_name} | Base Insertion Col: {insert_base}")
                 # Unmerge the cell at the pack group row for the original code column to prepare for new insertions
                 ws1.range(f"{current_pstart_col}{pack_group_row}:{current_pend_col}{pack_group_row}").unmerge()
                 # Insert new columns and batch write sigs for each sub-group
@@ -212,7 +208,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     current_insert_idx = insert_base + sg_index
                     col_letter = get_column_letter(current_insert_idx)
                     
-                    print(f"[DEBUG]   -> Inserting column {col_letter} for Sub-group {sg['header_str']}")
+                    log.debug(f"  -> Inserting column {col_letter} for Sub-group {sg['header_str']}")
                     ws1.range(f"{col_letter}:{col_letter}").insert('right')
                     ws1.range(f"{col_letter}{job_id_row}").value = f"Code for {sg['header_str']}"
                     
@@ -231,8 +227,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     if batch_data:
                         start_row = row_sigs[0][0]  # First row number
                         ws1.range(f"{col_letter}{start_row}").value = batch_data
-                        print(f"[DEBUG]   -> Wrote {len(batch_data)} rows of signature codes to column {col_letter} starting at row {start_row}.")
-
+                        log.debug(f"  -> Wrote {len(batch_data)} rows of signature codes to column {col_letter} starting at row {start_row}.")
                     metadata = update_metadata_for_subgroup(
                         metadata, tab_name, p_name, sg['header_str'], current_insert_idx, sg['start_col'], sg['end_col']
                     )
@@ -245,7 +240,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
             # =========================================================
             # STAGE 3: SIDE-BY-SIDE MATRIX LAYOUT (FILE 2)
             # =========================================================
-            print("\n[DEBUG] [STAGE 3] Generating Side-by-Side Matrix Layout in File 2...")
+            log.debug("  writing the sub-group packing sheets")
             file2_matrices = []
             for p_name, ranges in tab_data["packs"].items():
                 if p_name in compiled_data:
@@ -259,7 +254,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
         
                     # Check if the sub-group tab already exists
                 if sg_tab_name in [s.name for s in wb2.sheets]:
-                    print(f"[DEBUG] Reusing existing tab: {sg_tab_name}")
+                    log.debug(f"  Reusing existing tab: {sg_tab_name}")
                     ws2_sg = wb2.sheets[sg_tab_name]
                     last_col = ws2_sg.range(job_id_row, ws2_sg.cells.last_cell.column).end('left').column
                     
@@ -268,12 +263,12 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                             
                 else:
                     # Tab doesn't exist yet, so create it
-                    print(f"[DEBUG] Created new tab: {sg_tab_name}")
+                    log.debug(f"  Created new tab: {sg_tab_name}")
                     ws2_sg = wb2.sheets.add(name=sg_tab_name, after=ws2_orig)
                     offset_col = 1
 
                 # --- ADD THIS: Re-map item columns after Stage 2 insertions ---
-                print("[DEBUG] Re-mapping item columns in File 1 after insertions...")
+                log.debug("  Re-mapping item columns in File 1 after insertions...")
                 # Pull the freshly updated item row from File 1
                 updated_item_row_data = ws1.range(f"{item_row}:{item_row}").value
                 updated_item_col_map = _map_item_columns(updated_item_row_data, tab_name, item_row)
@@ -292,12 +287,9 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                         )
 
                     col_span = e_col - s_col
-                    print(f"[DEBUG] Building Matrix for {p_name} ({sg_mat['header_str']}) at offset column {offset_col}")
-
+                    log.debug(f"  Building Matrix for {p_name} ({sg_mat['header_str']}) at offset column {offset_col}")
                     # 1. COPY EXACT METADATA SNIPPET
-                    print(f"[DEBUG]   -> Copying metadata snippet from File 1 (Cols {get_column_letter(s_col)} to {get_column_letter(e_col)})")
-                    
-                    
+                    log.debug(f"  -> Copying metadata snippet from File 1 (Cols {get_column_letter(s_col)} to {get_column_letter(e_col)})")
                     # IF YOU ONLY WANT TO COPY THE SINGLE PACK GROUP ROW:
                     snippet_range = ws1.range((1, s_col), (pack_group_row-1, e_col))
                     snippet_range.copy(ws2_sg.range((1, offset_col)))
@@ -334,7 +326,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     
 
                     # 3. BUILD MATRIX DATA
-                    print("[DEBUG]   -> Compiling Matrix array...")
+                    log.debug("  -> Compiling Matrix array...")
                     write_data = []
                     num_items = len(sg_mat["unique_sigs"][0])
                     totals = [0] * (num_items + 1)
@@ -362,7 +354,7 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     write_data.append(total_row)
 
                     # 4. INJECT AND FORMAT
-                    print("[DEBUG]   -> Injecting Matrix array and applying formatting...")
+                    log.debug("  -> Injecting Matrix array and applying formatting...")
                     format_file2(ws2_sg, pack_group_row, offset_col, offset_col + col_span, write_data)
                     ws2_sg.range((job_id_row, offset_col + col_span + 1), (job_id_row, offset_col + col_span + 2)).api.EntireColumn.AutoFit()
 
@@ -373,18 +365,14 @@ def execute_subgroups(project_dir, metadata, subgroup_instructions):
                     offset_col = last_col + 2  # Move to the next starting column for the next matrix
         # =========================================================  
 
-        print("\n[DEBUG] Saving and closing workbooks...")
+        log.info(f"  saving {new_file1_name} and {file2_name}")
         wb1.save(new_file1_path)
         wb1.close()
         wb2.save()
         wb2.close()
-        print("[DEBUG] Sub-group execution completed successfully!")
-        
     except Exception as e:
-        print(f"[FATAL ERROR] Sub-group execution failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise e
+        log.exception("  the sub-groups could not be made: %s", e)
+        raise
     finally:
         try:
             app.quit()

@@ -127,6 +127,26 @@
           <div class="blueprint-card blueprint-error pl-page-error">
               <h4 class="pl-page-error-title">❌ Could Not Process File</h4>
               <p class="pl-page-error-text">{{ page_error }}</p>
+              {% if run_failure and run_failure.where %}
+              <p class="pl-run-where"><strong>Stopped in the app at:</strong> {{ run_failure.where }}{% if run_failure.inside %} (inside {{ run_failure.inside }}){% endif %}</p>
+              {% endif %}
+              {% if run_log %}
+              {# Every line this Generate wrote before it stopped: the same lines as the Logs page, the fine detail too #}
+              <details class="pl-run-log">
+                  <summary>What the app did before it stopped ({{ run_log|length }} line{{ '' if run_log|length == 1 else 's' }})</summary>
+                  <ol class="pl-run-lines">
+                      {% for x in run_log %}
+                      <li class="lg-line lv-{{ x.level }}" style="padding-left: {{ [x.depth, 6]|min * 14 + 8 }}px">
+                          <span class="lg-line-time">{{ x.clock }}</span>
+                          {% if x.level in ('WARNING', 'ERROR', 'CRITICAL') %}<span class="lg-tag">{{ 'Needs a look' if x.level == 'WARNING' else 'Problem' }}</span>{% endif %}
+                          <span class="lg-line-text">{{ x.text }}</span>
+                          {% if x.more %}<details class="lg-tech"><summary>Technical detail (the full trace)</summary><pre class="lg-trace">{{ x.more|join('\n') }}</pre></details>{% endif %}
+                      </li>
+                      {% endfor %}
+                  </ol>
+                  <p class="pl-run-more">Every run is also on the <a href="{{ url_for('logs_page') }}">Logs</a> page.</p>
+              </details>
+              {% endif %}
           </div>
         {% endif %}
 

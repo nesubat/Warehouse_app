@@ -27,6 +27,16 @@
         {% if info %}
         <p class="st-facts">{{ info.packs }} packing label{{ '' if info.packs == 1 else 's' }} with a courier consignment{% if info.boxed %} ({{ info.boxed }} pack{{ '' if info.boxed == 1 else 's' }} of several boxes, one label per box){% endif %}{% if info.with_code %} · {{ info.with_code }} with a unique code{% else %} · <span class="st-warn">no unique codes (generated before codes existed): matching falls back to the Item Ref text</span>{% endif %}{% if info.left_out %} · {{ info.left_out }} not in the courier CSV (no courier label expected){% endif %}</p>
 
+        {% if info.runs %}
+        {# Labels from more than one Final file in this project: each run is stitched on its own #}
+        <nav class="st-runs" aria-label="Labels in this project">
+            <p class="ps-hint">This project has labels from {{ info.runs|length }} runs. Pick the one to stitch: each keeps its own courier labels and Complete Labels file.</p>
+            <ul>{% for r in info.runs %}
+                <li class="{{ 'st-run-current' if r.current }}">{% if r.current %}<strong>{{ r.pdf }}</strong> <span class="st-csv-meta">· made {{ r.when }} · stitching this one</span>{% else %}<a href="{{ url_for('stitch_page', project_name=project, run=r.map) }}">{{ r.pdf }}</a> <span class="st-csv-meta">· made {{ r.when }}</span>{% endif %}{% if r.stitched %} <span class="st-csv-meta">· stitched: {{ r.stitched|join(', ') }}</span>{% endif %}</li>
+            {% endfor %}</ul>
+        </nav>
+        {% endif %}
+
         {% if report %}
         {# Everything matched: no details needed, just the file #}
         <div class="st-result st-done">
@@ -37,6 +47,16 @@
             </p>
             {% if report.without_label %}<p class="ps-hint">Without a courier label (not in the courier CSV): {{ report.without_label|join(' · ') }}</p>{% endif %}
             {% if report.duplicates %}<p class="ps-hint">{{ report.duplicates|length }} courier label{{ '' if report.duplicates|length == 1 else 's' }} came twice; the first was used (page 1 of the PDF lists them).</p>{% endif %}
+            {% if report.service_csv %}<p class="ps-hint">Services and logos from {{ report.service_csv }}.</p>{% endif %}
+            {% if report.address_changes %}
+            {# The courier label comes from the CSV, the packing label from Generate: say where they now differ #}
+            <div class="st-address-changes" role="alert">
+                <p><strong>{{ report.address_changes|length }} consignment{{ '' if report.address_changes|length == 1 else 's' }} with a different address in {{ report.service_csv }}</strong> than on the packing labels. The courier label shows the CSV's address: check these before they go out.</p>
+                <ul>{% for m in report.address_changes %}
+                    <li><strong>#{{ m.number }} {{ m.stores|join(', ') }}</strong><br>Packing labels: {{ m.labels }}<br>Courier CSV: {{ m.now }}</li>
+                {% endfor %}</ul>
+            </div>
+            {% endif %}
             {% if locked %}<p class="ps-hint st-warn">Still open in another program, so not removed: {{ locked|join(', ') }}. Close it and stitch again (or delete it) to keep one Complete Labels file.</p>{% endif %}
         </div>
         {% elif info.matching %}
@@ -64,12 +84,24 @@
             <div class="dropzone st-csv-drop">
                 <div class="dropzone-content">
                     <div class="dropzone-icon">🚚</div>
-                    <p class="dropzone-text">Changed the courier CSV after Generate? Drop it here <span class="st-optional">optional</span></p>
-                    <p class="dropzone-subtext">the Open360 or OpenFreight CSV of this job. It replaces the project's copy, and each label gets the logo of the service it books.</p>
+                    <p class="dropzone-text">Changed the courier CSV outside this project? Attach it here <span class="st-optional">optional</span></p>
+                    <p class="dropzone-subtext">the Open360 or OpenFreight CSV of this job. It's kept in the project beside the others (nothing is replaced) and used for the services, logos and the address check below.</p>
                     <p class="dropzone-filename"></p>
                 </div>
                 <input type="file" name="courier_csv" class="dropzone-input" accept=".csv">
             </div>
+            {% if info.csvs %}
+            {# Which of the project's courier CSVs has the services now: its services pick the logos, its addresses are
+               checked against the packing labels. An attached CSV (above) is used instead. #}
+            <fieldset class="st-existing st-service-csv">
+                <legend>Which courier CSV has the current services?</legend>
+                <p class="ps-hint">Each label gets the logo of the service this file books, and its addresses are checked against the packing labels. If you changed one of these files, pick it.</p>
+                {% for c in info.csvs %}
+                <label><input type="radio" name="service_csv" value="{{ c.name }}"{% if c.name == info.service_csv %} checked{% endif %}>
+                    {{ c.name }} <span class="st-csv-meta">{{ c.kind }} · saved {{ c.saved }}{% if c.changed %} · <strong>changed after Generate</strong>{% endif %}</span></label>
+                {% endfor %}
+            </fieldset>
+            {% endif %}
             {% if info.candidates %}
             <fieldset class="st-existing">
                 <legend>Or use label PDFs already in this project</legend>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+{% from '_nav.html' import nav with context %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Logs</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+
+    {{ nav(active='log') }}
+
+    <div class="container ab-page lg-page" id="logs-page" data-url="{{ url_for('api_logs') }}">
+        <h1>📜 Logs</h1>
+        <p class="ab-intro">What the app is doing and what it has done: every upload, preview, Generate, stitch and address check, with what it found. Runs with something to look at are marked. Click a run to see each step.</p>
+
+        {# Sent here by something that failed: its run is opened below (log_view.find_activity) #}
+        <div class="lg-focus-note" id="lg-focus-note" role="alert" hidden>
+            <p><strong>That didn't work.</strong> <span id="lg-focus-text">What happened is opened below: the error, where in the app it stopped, and what the app did just before.</span></p>
+            <a id="lg-focus-back" class="ab-btn ab-btn-plain" hidden>← Back to the page</a>
+        </div>
+
+        {# Live: what's running now, and today's totals #}
+        <div class="lg-status">
+            <div class="lg-now" id="lg-now" role="status" aria-live="polite">
+                <span class="lg-dot" aria-hidden="true"></span><span id="lg-now-text">Reading the log…</span>
+            </div>
+            <div class="lg-today">
+                <span class="metric-badge">Today: <strong id="lg-count">–</strong> runs</span>
+                <button type="button" class="metric-badge lg-badge-warn" id="lg-count-issues" title="Show only the runs that need a look">⚠ <strong>–</strong> need a look</button>
+                <button type="button" class="metric-badge lg-badge-error" id="lg-count-problems" title="Show only the runs that failed">✖ <strong>–</strong> problems</button>
+            </div>
+        </div>
+
+        <div class="ab-toolbar lg-toolbar">
+            <input type="search" id="lg-search" class="ab-search" placeholder="Search: a file, project, store, job number…" aria-label="Search the log" autocomplete="off">
+            <select id="lg-area" aria-label="Part of the app"><option value="">Every part of the app</option></select>
+            <select id="lg-show" aria-label="Which runs">
+                <option value="all">Everything</option>
+                <option value="issues">Needs a look and problems</option>
+                <option value="problems">Problems only</option>
+            </select>
+            <select id="lg-day" aria-label="When">
+                <option value="today">Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="week">Last 7 days</option>
+                <option value="all">Everything kept</option>
+            </select>
+            <button type="button" id="lg-live" class="ab-btn ab-btn-plain" aria-pressed="true" title="New lines appear as the app writes them">⏸ Pause</button>
+        </div>
+        <div class="ab-meta"><span id="lg-summary"></span><span id="lg-kept"></span></div>
+
+        <ol class="lg-list" id="lg-list" aria-label="Runs, newest first"></ol>
+        <p class="lg-empty" id="lg-empty" hidden>Nothing here for these choices. Try another day, or Everything.</p>
+        <button type="button" id="lg-more" class="ab-btn ab-btn-plain ab-more" hidden>Show older</button>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

@@ -1125,6 +1125,11 @@ button:hover {
 .issue-see-below { font-size: 13px; color: #566573; margin: 4px 0 0; }
 
 .sticky-nav .divider { color: #ccc; }
+.sticky-nav .nav-help { margin-left: auto; display: flex; align-items: center; }  /* Help: at the right end of the bar */
+.nav-help-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%;
+  border: 2px solid currentColor; font-size: 15px; font-weight: 800; line-height: 1; }
+.sticky-nav a.nav-help:hover .nav-help-icon, .sticky-nav a.nav-help:focus-visible .nav-help-icon { background: #3498db; border-color: #3498db; color: #fff; }
+.sticky-nav a.nav-help:focus-visible { outline: 2px solid #3498db; outline-offset: 3px; border-radius: 50%; }
 
 .pl-page .pl-top-links { margin-bottom: 20px; display: flex; gap: 15px; }
 .pl-page .pl-page-error { margin-bottom: 20px; }
@@ -2054,3 +2059,123 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 
 .cs-move { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; font-size: 13px; font-weight: 600; color: #2c3e50; }
 .cs-move .cs-input { flex: 1 1 auto; }
+
+/* =========================================
+   LOGS (logs.html): runs newest first, live status, details on click
+========================================= */
+.lg-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; }
+.lg-now { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid #d5dbdb; border-radius: 6px; background: #fff; color: #2c3e50; font-weight: 600; flex: 1 1 360px; min-width: 0; }
+.lg-dot { width: 10px; height: 10px; border-radius: 50%; background: #95a5a6; flex: none; }
+.lg-running .lg-dot { background: #27ae60; animation: lg-pulse 1.2s ease-in-out infinite; }
+.lg-running { border-color: #27ae60; background: #eafaf1; }
+.lg-paused .lg-dot { background: #bdc3c7; animation: none; }
+@keyframes lg-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .lg-running .lg-dot { animation: none; } }
+.lg-today { display: flex; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+.lg-today button.metric-badge { cursor: pointer; font: inherit; }
+.lg-today button.metric-badge:hover { background: #f4f6f7; }
+.lg-badge-warn { border-color: #f0c36d !important; color: #8a5a00; }
+.lg-badge-error { border-color: #e6a39b !important; color: #a93226; }
+.lg-toolbar select { padding: 10px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; background: #fff; }
+.lg-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lg-item { background: #fff; border: 1px solid #e1e5e8; border-left: 4px solid #bdc3c7; border-radius: 6px; }
+.lg-item.lv-WARNING { border-left-color: #f39c12; }
+.lg-item.lv-ERROR, .lg-item.lv-CRITICAL { border-left-color: #c0392b; background: #fdf2f1; }
+.lg-head { display: grid; grid-template-columns: 112px 1fr auto; gap: 12px; align-items: start; width: 100%; padding: 10px 14px; background: none; border: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.lg-head:disabled { cursor: default; }
+/* Hover: the run lifts a little and its text gets darker (not the app's blue button hover, which hid the text) */
+.lg-head:hover { background: rgba(52, 152, 219, .08); }
+.lg-item:hover { border-top-color: #b8c4ce; border-right-color: #b8c4ce; border-bottom-color: #b8c4ce; box-shadow: 0 1px 5px rgba(44, 62, 80, .12); }
+.lg-head:hover .lg-title { color: #17202a; }
+.lg-head:hover .lg-time, .lg-head:hover .lg-count { color: #2c3e50; }
+.lg-head:hover .lg-result { filter: brightness(.8); }
+.lg-head:focus-visible { outline: 2px solid #3498db; outline-offset: -2px; }
+.lg-time { font-variant-numeric: tabular-nums; color: #7f8c8d; font-size: 13px; padding-top: 2px; }
+.lg-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.lg-top { display: flex; gap: 6px; flex-wrap: wrap; }
+.lg-area, .lg-bg, .lg-tag { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; background: #ecf0f1; color: #2c3e50; }
+.lg-area-packing { background: #e8f1fb; color: #1f5f99; }
+.lg-area-import { background: #eef7ee; color: #2d6a33; }
+.lg-area-stitch { background: #f4ecf7; color: #6c3483; }
+.lg-area-book { background: #fef5e7; color: #8a5a00; }
+.lg-bg { background: #f4f6f7; color: #7f8c8d; font-weight: 600; }
+.lv-WARNING > .lg-head .lg-tag, .lg-line.lv-WARNING .lg-tag { background: #fdebd0; color: #8a5a00; }
+.lv-ERROR > .lg-head .lg-tag, .lv-CRITICAL > .lg-head .lg-tag, .lg-line.lv-ERROR .lg-tag { background: #f5b7b1; color: #78281f; }
+.lg-title { color: #2c3e50; overflow-wrap: anywhere; }
+.lg-result { color: #1e8449; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.lv-ERROR .lg-result, .lv-CRITICAL .lg-result { color: #a93226; }
+.lg-count { color: #7f8c8d; font-size: 13px; white-space: nowrap; padding-top: 2px; }
+.lg-details { border-top: 1px solid #eef0f2; padding: 8px 14px 12px; font-size: 13px; }
+.lg-detail-toggle { margin: 0 0 6px; }
+.lg-line { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 2px 8px; border-radius: 3px; }
+.lg-line.lv-WARNING { background: #fef9e7; }
+.lg-line.lv-ERROR, .lg-line.lv-CRITICAL { background: #fdedec; }
+.lg-line.lv-DEBUG { color: #7f8c8d; }
+.lg-hide-detail .lg-line.lv-DEBUG { display: none; }
+.lg-line-time { font-variant-numeric: tabular-nums; color: #95a5a6; flex: none; }
+.lg-line-text { overflow-wrap: anywhere; min-width: 0; flex: 1 1 300px; }
+.lg-trace { flex-basis: 100%; margin: 4px 0 0; padding: 8px; background: #f8f9f9; border: 1px solid #e5e8e8; border-radius: 4px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.lg-empty { color: #7f8c8d; text-align: center; padding: 24px 0; }
+.lg-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 4px 0 10px; }
+.lg-facts dt { color: #7f8c8d; font-weight: 600; }
+.lg-facts dd { margin: 0; color: #2c3e50; overflow-wrap: anywhere; }
+.lg-sec { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e1e5e8; }
+.lg-sec-title { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #566573; }
+.lg-sec-before .lg-line { color: #7f8c8d; }
+.lg-sec-fail { background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; padding: 10px 12px; }
+.lg-sec-fail .lg-sec-title { color: #922b21; }
+.lg-fail-error { margin: 0 0 6px; color: #78281f; font-size: 14px; overflow-wrap: anywhere; }
+.lg-fail-where { margin: 0 0 4px; color: #2c3e50; overflow-wrap: anywhere; }
+.lg-fail-code { margin: 0 0 6px; padding: 6px 8px; background: #fff; border: 1px solid #f5b7b1; border-radius: 4px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-tech { flex-basis: 100%; margin-top: 4px; }
+.lg-tech summary { cursor: pointer; color: #566573; font-size: 12px; }
+.lg-page [hidden] { display: none !important; }
+@media (max-width: 640px) {
+  .lg-head { grid-template-columns: 1fr; gap: 4px; }
+  .lg-count { justify-self: start; }
+}
+
+/* Loading overlay: live progress (followProgress in script.js, progress.py) */
+.lp-box { width: min(760px, calc(100vw - 32px)); margin-top: 22px; }
+.lp-bar { height: 12px; border-radius: 6px; background: #334155; overflow: hidden; position: relative; }
+.lp-fill { height: 100%; width: 0; background: #3498db; border-radius: 6px; transition: width .4s ease; }
+.lp-waiting .lp-fill { width: 35% !important; position: absolute; animation: lp-slide 1.4s ease-in-out infinite; }
+@keyframes lp-slide { 0% { left: -35%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .lp-waiting .lp-fill { animation: none; left: 0; width: 100% !important; opacity: .4; } }
+.lp-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font-size: 15px; }
+.lp-step { font-weight: 600; overflow-wrap: anywhere; }
+.lp-pct { color: #cbd5e1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lp-lines { list-style: none; margin: 14px 0 0; padding: 10px 12px; background: rgba(255, 255, 255, .06); border-radius: 6px; font-size: 13px; color: #cbd5e1; min-height: 1.4em; max-height: 40vh; overflow: auto; text-align: left; }
+.lp-line-time { color: #64748b; margin-right: 8px; font-variant-numeric: tabular-nums; }
+.lp-line.lv-DEBUG { color: #94a3b8; }
+.lp-lines:empty { display: none; }
+.lp-line { padding: 1px 0; overflow-wrap: anywhere; }
+.lp-line.lv-WARNING { color: #fcd34d; }
+.lp-line.lv-ERROR, .lp-line.lv-CRITICAL { color: #fca5a5; }
+/* A stopped Generate: what it did before it stopped (packing_labels.html, the same lines as the Logs page) */
+.pl-run-where { margin: 6px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+.pl-run-log { margin-top: 10px; background: #fff; border: 1px solid #f5b7b1; border-radius: 6px; padding: 8px 12px; }
+.pl-run-log > summary { cursor: pointer; font-weight: 600; color: #922b21; }
+.pl-run-lines { list-style: none; margin: 8px 0 0; padding: 0; max-height: 360px; overflow: auto; font-size: 13px; text-align: left; }
+.pl-run-more { margin: 8px 0 0; font-size: 13px; color: #7f8c8d; }
+
+/* Dashboard: making the other courier CSV after the project's one was changed (index.html) */
+.project-csv-stale { flex-basis: 100%; margin: 6px 0; padding: 10px 14px; background: #fef9e7; border: 1px solid #f0c36d; border-radius: 6px; color: #5d4300; }
+.project-csv-stale p { margin: 0 0 8px; }
+.project-csv-stale form { display: flex; gap: 8px; align-items: center; }
+
+/* Stitch page: which courier CSV has the services, and addresses that differ from the packing labels (stitch.html) */
+.st-service-csv label { display: block; margin: 4px 0; }
+.st-csv-meta { color: #7f8c8d; font-size: 13px; }
+.st-address-changes { margin: 10px 0; padding: 10px 14px; background: #fef9e7; border: 1px solid #f0c36d; border-radius: 6px; color: #5d4300; text-align: left; }
+.st-address-changes ul { margin: 6px 0 0; padding-left: 18px; }
+.st-address-changes li { margin: 4px 0; overflow-wrap: anywhere; }
+.st-runs { margin: 8px 0 14px; padding: 10px 14px; border: 1px solid #d5dbdb; border-radius: 6px; background: #fff; text-align: left; }
+.st-runs ul { margin: 6px 0 0; padding-left: 18px; }
+.st-runs li { margin: 3px 0; overflow-wrap: anywhere; }
+.st-run-current { color: #1e8449; }
+
+/* Logs: sent here by something that failed (logs.html) */
+.lg-focus-note { margin: 0 0 16px; padding: 12px 16px; background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; color: #78281f; }
+.lg-focus-note p { margin: 0 0 8px; }
+.lg-item.lg-focus { box-shadow: 0 0 0 3px #e74c3c; scroll-margin-top: 90px; }

@@ -26,6 +26,11 @@ FINAL = "Final J476699 Spring rollout.xlsx"
 SIG = "Signature links_J476699.xlsx"
 
 
+def serial_of(code):
+    """'03T1P2QWXK' -> '03T1P2': the serial printed on the packing label, without this Generate's code."""
+    return re.sub(r"[A-Z]{4,}$", "", code)
+
+
 @pytest.fixture()
 def files(tmp_path):
     codes = build_final_file(tmp_path / FINAL)
@@ -218,19 +223,19 @@ def test_page_generates_labels_csv_and_label_map(client, files):
     labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
     assert any(n.startswith("Used Signature Links") for n in names)
     rows = open(folder / open360, encoding="utf-8").read()
-    assert "03T1P2 Chadstone" in rows and "01T2P1 Corio Village" in rows
+    assert re.search(r"03T1P2[A-Z]{4} Chadstone", rows) and re.search(r"01T2P1[A-Z]{4} Corio Village", rows)
     doc = fitz.open(folder / pdf)
     texts = [p.get_text() for p in doc]
     # report, then per pack: audit page, divider per code, labels
     audit = texts[labelmap.get("report_pages", 1)]
     assert "PACK AUDIT" in audit and "Tab 1 - Pack 1" in audit  # the header: PACK AUDIT over Tab 1 - Pack 1
     codes = {pk["open360_code"] for packs in labelmap["stores"].values() for pk in packs}
-    assert "03T1P2" in codes
+    assert "03T1P2" in {serial_of(c) for c in codes} and all(c != serial_of(c) for c in codes)  # serial + a code
     for packs in labelmap["stores"].values():  # every label-map page really is that pack's packing label
         for pk in packs:
             for p in pk["pdf_pages"] + pk["box_pages"]:
-                assert pk["open360_code"] + "." in texts[p - 1], (pk["open360_code"], texts[p - 1][:200])
-    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if pk["open360_code"] == "03T1P2")
+                assert serial_of(pk["open360_code"]) + "." in texts[p - 1], (pk["open360_code"], texts[p - 1][:200])
+    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if serial_of(pk["open360_code"]) == "03T1P2")
     assert chad["boxes"] == 2 and len(set(chad["box_pages"])) == 2  # one courier label per box
 
 
@@ -260,7 +265,7 @@ def test_courier_labels_stitch_onto_their_packing_labels(client, files):
     labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
     rows = list(csv.DictReader(open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8")))
     refs = [r["Item Reference"] for r in rows for _ in range(int(r["Item Quantity"] or 1))]
-    assert all(re.match(r"\d{2}T\dP\d ", ref) for ref in refs)
+    assert all(re.match(r"\d{2}T\dP\d[A-Z]{4} ", ref) for ref in refs)  # serial + this Generate's code
     random.Random(7).shuffle(refs)
     courier = fitz.open()
     for ref in refs:  # a 4x6 courier label with its Item Ref
@@ -297,7 +302,7 @@ def test_labels_carry_code_boxes_and_audit_page_is_short(client, files):
     names = os.listdir(folder)
     doc = fitz.open(folder / next(n for n in names if n.startswith("Packing Labels Only")))
     labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
-    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if pk["open360_code"] == "03T1P2")
+    chad = next(pk for pk in labelmap["stores"]["Chadstone"] if serial_of(pk["open360_code"]) == "03T1P2")
     page = " ".join(doc[chad["pdf_pages"][0] - 1].get_text().split())  # a long header wraps in its box
     assert page.count("Code for Pack 2") == 1 and "Code for pack 2: 1-2" in page  # header once: no barcode caption
     words = [w[4] for w in doc[chad["pdf_pages"][0] - 1].get_text("words")]
@@ -471,13 +476,13 @@ def test_page_without_grouping_keeps_sheet_order_and_no_codes(client, files):
     assert labels and not any(" CODE " in t or "Code for Pack" in t for t in labels)
     packs = [pk for store in labelmap["stores"].values() for pk in store]
     label_pages = {p for pk in packs for p in pk["pdf_pages"]}
-    blocks = {pk["open360_code"][2:] for pk in packs}  # 'T1P2': one audit page per tab and pack
+    blocks = {serial_of(pk["open360_code"])[2:] for pk in packs}  # 'T1P2': one audit page per tab and pack
     assert len(doc) == labelmap.get("report_pages", 1) + len(blocks) + len(label_pages)  # nothing else: no dividers
     for block in blocks:  # within a pack, stores in sheet order (the serial's store number)
-        firsts = sorted((pk["pdf_pages"][0], int(pk["open360_code"][:2])) for pk in packs if pk["open360_code"][2:] == block)
+        firsts = sorted((pk["pdf_pages"][0], int(pk["open360_code"][:2])) for pk in packs if serial_of(pk["open360_code"])[2:] == block)
         assert [n for _, n in firsts] == sorted(n for _, n in firsts)
     rows = open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8").read()
-    assert "03T1P2 Chadstone" in rows and "01T2P1 Corio Village" in rows
+    assert re.search(r"03T1P2[A-Z]{4} Chadstone", rows) and re.search(r"01T2P1[A-Z]{4} Corio Village", rows)
 
 
 def test_courier_labels_rendered_in_workers_match_rendering_here(tmp_path, monkeypatch):
@@ -756,8 +761,93 @@ def test_labels_from_a_packing_sheets_project_are_saved_in_that_project(client, 
     assert any(n.startswith("Packing Labels Only") for n in new) and any(n.endswith(".labelmap.json") for n in new)
     assert any(n.endswith("Open360.csv") for n in new) and any(n.endswith(".courier.json") for n in new)
     assert not (projects / filename).exists()  # the copy made for the page went
+    assert not any(n.startswith("Used for labels") for n in new)  # unchanged: no copy kept
     page = c.get("/").data.decode()
     assert "Stitch Labels" in page and "Create OpenFreight CSV" in page and "Label Shuffler" in page
+
+
+def _into_project_form(c, app_module, folder, final):
+    c.post("/packing-labels/horizontal", data={"from_project": folder.name, "final_file": final.name}, follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "from_project": folder.name,
+            "all_tabs": ["Spring Sale", "Easter"], "selected_tabs": ["Spring Sale", "Easter"],
+            "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    gen = {**form, "generate": "1", "who_pays": "S", "service_code": app_module.SERVICE_STORE.services()[0]['code'],
+           "reference": "J476699", "courier_csv": ["open360"], "code_dividers": "1",
+           "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty"}
+    return form, gen
+
+
+def test_a_failed_generate_into_a_project_leaves_the_project_as_it_was(client, files):
+    """A failure takes back only what the run wrote: the Packing Sheets project (Final file, Packing Sheet, Signature
+    Links) stays, and so does the page's copy, so Generate can be tried again."""
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = _sheets_project(projects, final, sig)
+    before = set(os.listdir(folder))
+    form, gen = _into_project_form(c, app_module, folder, final)
+    r = c.post("/packing-labels/horizontal", data={**gen, "service_code": "NOPE1"}, follow_redirects=True)
+    assert "Unknown service code" in r.data.decode()
+    assert folder.is_dir() and set(os.listdir(folder)) == before
+    assert (projects / form["filename"]).exists()  # the copy being worked on, for a retry
+
+
+def test_only_a_real_packing_sheets_project_takes_labels(client, files):
+    c, app_module, projects = client
+    for bad in ("..", ".", "Not a project"):
+        r = c.post("/packing-labels/horizontal", data={"from_project": bad, "final_file": "Final x.xlsx"}, follow_redirects=True)
+        assert "on the dashboard any more: pick one from the list" in r.data.decode(), bad
+    assert app_module._sheet_project("..") == "" and app_module._sheet_project("../projects") == ""
+
+
+def test_an_edited_final_file_copy_is_kept_with_the_labels(client, files):
+    """Fixes made with Open Excel on the page go into the labels; the copy they were made from stays in the project."""
+    from openpyxl import load_workbook
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = _sheets_project(projects, final, sig)
+    form, gen = _into_project_form(c, app_module, folder, final)
+    copy = projects / form["filename"]
+    wb = load_workbook(copy)
+    wb.worksheets[0]["AZ1"] = "checked by the warehouse"  # an edit away from the grid
+    wb.save(copy)
+    r = c.post("/packing-labels/horizontal", data=gen, follow_redirects=True)
+    assert "Labels Successfully Generated" in r.data.decode()
+    kept = [n for n in os.listdir(folder) if n.startswith("Used for labels - ")]
+    assert len(kept) == 1 and kept[0] in r.data.decode() and not copy.exists()
+    assert load_workbook(folder / kept[0]).worksheets[0]["AZ1"].value == "checked by the warehouse"
+    assert app_module._sheet_outputs(str(folder))[0] == [final.name]  # not taken for a Final file
+
+
+def test_the_other_csv_warns_when_the_project_csv_was_changed_and_never_overwrites(client, files):
+    """An Open360 CSV edited after Generate (saved by Excel in its own code page): the card says the new OpenFreight
+    CSV won't have those changes and makes it only when asked again, as a new file; the edited one stays as it was."""
+    import time
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = run_page(client, final, sig)
+    open360 = next(n for n in os.listdir(folder) if n.endswith("Open360.csv"))
+    (folder / next(n for n in os.listdir(folder) if n.endswith("OpenFreight.csv"))).unlink()
+    edited = (folder / open360).read_text(encoding="utf-8-sig").replace("Corio Village", "Corio Village Café")
+    (folder / open360).write_bytes(edited.encode("cp1252"))  # as Excel's "CSV (Comma delimited)" saves it
+    later = time.time() + 30
+    os.utime(folder / open360, (later, later))
+    kinds, _ = app_module._courier_csvs(str(folder), os.listdir(folder))
+    assert kinds == {"open360": open360}  # still known for what it is
+    r = c.post(f"/project/{folder.name}/courier-csv", data={"kind": "openfreight"})
+    assert "stale=" in r.headers["Location"] and not any(n.endswith("OpenFreight.csv") for n in os.listdir(folder))
+    page = c.get(r.headers["Location"]).data.decode()
+    assert "was changed after the labels were generated" in page and "Make it anyway" in page
+    c.post(f"/project/{folder.name}/courier-csv", data={"kind": "openfreight", "confirm": "1"})
+    assert any(n.endswith("OpenFreight.csv") for n in os.listdir(folder))
+    assert (folder / open360).read_bytes() == edited.encode("cp1252")  # the edited file untouched
+
+
+def test_unused_name_never_returns_a_file_that_is_there(tmp_path):
+    from engine.core.core_math import unused_name
+    assert unused_name(str(tmp_path), "J1 - OpenFreight.csv") == "J1 - OpenFreight.csv"
+    (tmp_path / "J1 - OpenFreight.csv").write_text("x")
+    (tmp_path / "J1 - OpenFreight (2).csv").write_text("x")
+    assert unused_name(str(tmp_path), "J1 - OpenFreight.csv") == "J1 - OpenFreight (3).csv"
 
 
 def test_courier_import_keeps_the_details_for_the_other_csv(client, tmp_path):
@@ -783,8 +873,16 @@ def test_courier_import_keeps_the_details_for_the_other_csv(client, tmp_path):
     c.post("/courier-import", data={**form, "preview": "1"}, follow_redirects=True)
     r = c.post("/courier-import", data={**form, "generate": "1", "who_pays": "S", "reference": "J476702",
                                         "service_code": app_module.SERVICE_STORE.services()[0]['code'],
-                                        "project_name": "Openings", "courier_csv": ["open360"]}, follow_redirects=True)
+                                        "project_name": "Openings", "courier_csv": ["open360"],
+                                        "progress_id": "courier-import-0001"}, follow_redirects=True)
     assert "Courier Import File Generated" in r.data.decode()
+    # The loading overlay followed it: every step, its log lines (the same as the Logs page), 100 % at the end
+    shown = c.get("/api/progress/courier-import-0001").get_json()
+    lines = [x['text'] for x in shown['lines']]
+    assert shown['finished'] and shown['percent'] == 100 and shown['counted']
+    assert any(t.startswith("Generate openings.xlsx") for t in lines) and any(t.startswith("Open360 CSV") for t in lines)
+    assert any(t.startswith("details for the other courier CSV") for t in lines)
+    assert any(t.startswith("Generate done in") for t in lines)
     folder = next(p for p in projects.iterdir() if p.is_dir())
     assert "Create OpenFreight CSV" in c.get("/").data.decode()
     started = time.perf_counter()
@@ -845,3 +943,316 @@ def test_same_name_at_different_addresses_can_be_kept_separate():
     assert grouped[0]['group']['first'] and grouped[0]['group']['size'] == 2
     apart = app_module._receiver_groups([con(1, '212 High Street', 'a'), con(2, 'Shop D05, Central Street', 'b')], {'a', 'b'})
     assert all('group' not in c and c['kept_separate'] for c in apart)
+
+
+def test_generate_reports_its_progress_for_the_loading_overlay(client, files, monkeypatch):
+    """The overlay's bar (progress.py): only forward, the labels counted as they're drawn, finished at 100 % with
+    the run's own log lines."""
+    from engine.core import progress
+    seen, real_tick = [], progress.tick
+
+    def spy(done, total, step=None):
+        real_tick(done, total, step)
+        seen.append((progress.get(progress.current())['percent'], step))
+    monkeypatch.setattr(progress, 'tick', spy)
+    final, sig, _ = files
+    run_page(client, final, sig, extra={"progress_id": "overlay-test-0001"})
+    percents = [p for p, _ in seen]
+    assert percents == sorted(percents) and percents[0] == 2 and percents[-1] < 90  # reading the tabs, then drawing
+    assert seen[-1][1].startswith("Saving the PDF in packing-sheet order")
+    assert any(s and s.startswith("Drawing the packing labels: 1 of ") for _, s in seen)
+    c, *_ = client
+    d = c.get("/api/progress/overlay-test-0001").get_json()
+    assert d['finished'] and d['percent'] == 100 and d['counted']
+    assert any(x['text'].startswith("Generate done in") for x in d['lines'])
+    assert c.get("/api/progress/never-started-01").status_code == 404
+
+
+def test_a_stopped_generate_shows_what_it_did_and_where_it_stopped(client, files):
+    """The page that says Generate stopped lists the run's own log lines (progress.lines_now), the same as the Logs
+    page, so what happened is there without opening the log."""
+    c, app_module, _ = client
+    final, sig, _ = files
+    with open(final, "rb") as f, open(sig, "rb") as s:
+        c.post("/packing-labels/horizontal", data={"file": (f, final.name), "signature_file": (s, sig.name)},
+               content_type="multipart/form-data", follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+            "selected_tabs": ["Spring Sale", "Easter"], "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    r = c.post("/packing-labels/horizontal", data={**form, "generate": "1", "who_pays": "S", "service_code": "NOPE1",
+                                                   "reference": "J476699", "project_name": "Stopped run",
+                                                   "courier_csv": ["open360"], "progress_id": "stopped-run-0001",
+                                                   "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty"},
+               follow_redirects=True)
+    page = r.data.decode()
+    assert "Unknown service code" in page and "What the app did before it stopped" in page
+    assert "Stopped in the app at:</strong> app.py, line" in page and "in _distribution_page" in page
+    assert "Generate FAILED after" in page and "Technical detail (the full trace)" in page
+
+
+def test_stitch_page_picks_the_courier_csv_and_keeps_an_attached_one_beside_it(client, files):
+    """The Stitch page lists the job's courier CSVs (the changed one marked) to pick the one with the current
+    services; an attached CSV is kept beside the project's (nothing replaced) and remembered for Finalise; another
+    job's CSV is refused."""
+    import io as io_module
+    import time
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = run_page(client, final, sig)
+    open360 = next(n for n in os.listdir(folder) if n.endswith("Open360.csv"))
+    original = (folder / open360).read_bytes()
+    later = time.time() + 600
+    os.utime(folder / open360, (later, later))
+    page = c.get(f"/stitch/{folder.name}").data.decode()
+    assert "Which courier CSV has the current services?" in page and "changed after Generate" in page
+    before = set(os.listdir(folder))
+    edited = original.decode("utf-8-sig").replace("DHLWPXOD", "TNTN").encode("utf-8-sig")
+    r = c.post(f"/stitch/{folder.name}", data={"courier_csv": (io_module.BytesIO(edited), open360)},
+               content_type="multipart/form-data", follow_redirects=True)
+    assert "Choose the courier label PDF" in r.data.decode()  # no labels yet; the CSV is kept all the same
+    kept = [n for n in set(os.listdir(folder)) - before if n.endswith(".csv")]
+    assert len(kept) == 1 and (folder / open360).read_bytes() == original
+    labelmap = json.load(open(folder / next(n for n in os.listdir(folder) if n.endswith(".labelmap.json"))))
+    assert labelmap["files"]["service_csv"] == kept[0] and kept[0] in labelmap["files"]["courier_csvs"]
+    assert set(app_module.pack_services(str(folder), labelmap, kept[0]).values()) == {"TNTN"}
+    other = b"Receiver Name,Service,Item Reference\r\nSomeone,TNTN,99T9P9 Elsewhere\r\n"
+    r = c.post(f"/stitch/{folder.name}", data={"courier_csv": (io_module.BytesIO(other), "other.csv")},
+               content_type="multipart/form-data", follow_redirects=True)
+    assert "this job" in r.data.decode() and not (folder / "other.csv").exists()
+
+
+def test_two_label_runs_in_one_project_are_stitched_apart(client, files):
+    """Labels made twice in one Packing Sheets project (e.g. the Final file, then a Stage file): the first run's
+    stitching (a session from before runs were kept apart, its Complete Labels) stays the first run's; the Stitch page
+    lists both and stitches the one picked; the CSV buttons follow the newest run's own CSVs."""
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = _sheets_project(projects, final, sig)
+    _, gen = _into_project_form(c, app_module, folder, final)
+    assert "Labels Successfully Generated" in c.post("/packing-labels/horizontal", data=gen, follow_redirects=True).data.decode()
+    first = app_module._label_maps(str(folder))[0]
+    (folder / "stitch_session.json").write_text('{"marker": "first run"}', encoding="utf-8")  # as an older stitch left it
+    (folder / "Complete Labels 1 - first.pdf").write_bytes(b"%PDF-1.4")
+    lm = json.load(open(folder / first, encoding="utf-8"))
+    lm["files"]["complete_labels"] = ["Complete Labels 1 - first.pdf"]
+    json.dump(lm, open(folder / first, "w", encoding="utf-8"))
+    import time
+    time.sleep(1.1)  # the second run's files are newer
+    _, gen = _into_project_form(c, app_module, folder, final)
+    assert "Labels Successfully Generated" in c.post("/packing-labels/horizontal",
+                                                     data={**gen, "courier_csv": ["openfreight"]}, follow_redirects=True).data.decode()
+    maps = app_module._label_maps(str(folder))
+    assert len(maps) == 2 and maps[1] == first and app_module._current_run(str(folder)) == maps[0]
+    earlier = folder / f"stitch_session - {first[:-len('.labelmap.json')]}.json"
+    assert earlier.exists() and not (folder / "stitch_session.json").exists()  # the first run's, by name
+    page = c.get(f"/stitch/{folder.name}").data.decode()
+    assert "This project has labels from 2 runs" in page and "stitching this one" in page
+    c.get(f"/stitch/{folder.name}?run={first}")
+    assert app_module._current_run(str(folder)) == first and app_module._run_file(str(folder), "session") == str(earlier)
+    assert app_module._remove_old_labels(str(folder), keep="new.pdf", only=set()) == []
+    assert (folder / "Complete Labels 1 - first.pdf").exists()  # another run's Complete Labels: never removed
+    kinds, _ = app_module._courier_csvs(str(folder), os.listdir(folder))
+    assert list(kinds) == ["openfreight"]  # the newest run made only OpenFreight: Open360 is offered for it
+
+
+
+def test_an_unexpected_failure_behind_the_overlay_lands_on_the_logs_page(client, files, monkeypatch):
+    """Generate (behind the loading overlay) failing for a reason that isn't a check: the browser goes to the Logs
+    page at that failure, with a way back to the page as it was. A check (an unknown service code) stays on the page."""
+    c, app_module, _ = client
+    final, sig, _ = files
+
+    def broken(*a, **k):
+        raise RuntimeError("the PDF couldn't be written")
+    monkeypatch.setattr(app_module, "generate_horizontal_labels", broken)
+    with pytest.raises(AssertionError):  # run_page expects success
+        run_page(client, final, sig, extra={"progress_id": "failing-run-0001"})
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+            "selected_tabs": ["Spring Sale", "Easter"], "header_row_Spring Sale": "8", "header_row_Easter": "8",
+            "generate": "1", "who_pays": "S", "service_code": app_module.SERVICE_STORE.services()[0]['code'],
+            "reference": "J476699", "project_name": "Broken run", "courier_csv": ["open360"], "progress_id": "failing-run-0002",
+            "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty"}
+    r = c.post("/packing-labels/horizontal", data=form)
+    assert r.status_code == 303 and r.headers["Location"].startswith("/logs?at=")
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(r.headers["Location"]).query)
+    assert q["find"][0].startswith("Generate FAILED") and q["back"][0].startswith("/packing-labels/horizontal?view=")
+    back = c.get(q["back"][0]).data.decode()
+    assert "the PDF couldn" in back and "What the app did before it stopped" in back  # the page as it was, to try again
+    page = c.post("/packing-labels/horizontal", data={**form, "service_code": "NOPE1"}, follow_redirects=True).data.decode()
+    assert "Unknown service code" in page  # a check: fixed on the page, no trip to the Logs page
+
+
+def test_a_script_task_behind_the_overlay_gets_the_logs_address_others_the_usual_error(client, monkeypatch):
+    c, app_module, _ = client
+
+    def broken(name):
+        raise RuntimeError("label map unreadable")
+    monkeypatch.setattr(app_module, "_stitch_project", broken)
+    r = c.post("/stitch/any/finalise", json={}, headers={"X-Progress-Id": "script-run-0001"})
+    assert r.status_code == 500 and r.headers["X-Log-Url"].startswith("/logs?at=") and r.get_json()["log_url"]
+    r = c.post("/stitch/any/finalise", json={})  # not behind the overlay: the usual error, nothing to follow
+    assert r.status_code == 500 and "X-Log-Url" not in r.headers
+
+
+def test_the_dashboard_shows_the_job_number_itself(client, tmp_path):
+    """J477130, never J477130-03 or J477130-001: from the Packing Sheet's name, the folder, the CSVs."""
+    from engine.core.core_math import job_series
+    for text, job in [("J476523-01", "J476523"), ("J476523-001", "J476523"), ("J476523", "J476523"),
+                      ("Final J476523 Spring", "J476523"), ("Spring_Job-J476523-01_261017_1000", "J476523"),
+                      ("j476523-01", "J476523"), ("UNKNOWN", "UNKNOWN"), ("", "")]:
+        assert job_series(text) == job, text
+    c, app_module, projects = client
+    folder = projects / "Spring_Job-J477130-03_261018_1000"
+    folder.mkdir()
+    (folder / "Packing Sheet_J477130-03.xlsx").write_bytes(b"")
+    assert app_module._project_job(str(folder), os.listdir(folder), "Spring") == "J477130"
+
+
+def test_a_new_label_shuffler_project_needs_its_job_number(client, files):
+    """Creating a project on the Label Shuffler asks for its job number (the dashboard shows it, J476523 kept as the
+    number itself); without one the page says so and keeps what was typed."""
+    from engine.core import project_record
+    c, app_module, projects = client
+    _, sig, _ = files
+    with open(sig, "rb") as f:
+        r = c.post("/pdf", data={"step": "1", "new_project": "Shuffle test", "excel_file": (f, sig.name)},
+                   content_type="multipart/form-data", follow_redirects=True)
+    page = r.data.decode()
+    assert "Type the job number of this project" in page and 'value="Shuffle test"' in page
+    assert not any(p.is_dir() for p in projects.iterdir())  # nothing made yet
+    with open(sig, "rb") as f:
+        c.post("/pdf", data={"step": "1", "new_project": "Shuffle test", "job_number": " j476523-01 ",
+                             "excel_file": (f, sig.name)}, content_type="multipart/form-data", follow_redirects=True)
+    folder = next(p for p in projects.iterdir() if p.is_dir())
+    assert project_record.job(str(folder)) == "J476523"
+    assert app_module._project_job(str(folder), os.listdir(folder), "Shuffle test") == "J476523"
+
+
+def test_a_stitch_puts_logos_only_beside_courier_labels(client, files):
+    """A packing label left without a courier label (Macpac Kent St in a real run) gets no courier logo: the logo is
+    on exactly the pages a courier label went on."""
+    import io as io_module
+    from PIL import Image
+    c, app_module, projects = client
+    final, sig, _ = files
+    buf = io_module.BytesIO()
+    Image.new('RGBA', (777, 123), (200, 0, 0, 255)).save(buf, 'PNG')  # a size nothing else on the labels has
+    code = app_module.SERVICE_STORE.services()[0]['code']
+    app_module.SERVICE_STORE.set_logo(app_module.SERVICE_STORE.group_of(code)['id'], buf.getvalue())
+    folder = run_page(client, final, sig)
+    lm = json.load(open(folder / next(n for n in os.listdir(folder) if n.endswith(".labelmap.json")), encoding="utf-8"))
+    packs = [pk for pks in lm["stores"].values() for pk in pks]
+    courier = fitz.open()
+    for pk in packs[1:]:  # every pack but the first gets its courier label
+        for _ in range(int(pk.get("boxes") or 1)):
+            courier.new_page(width=288, height=432).insert_text((20, 40), f"Item Ref: {pk['open360_item_reference']}")
+    data = courier.tobytes()
+    (folder / "courier.pdf").write_bytes(data)
+    out, result, _ = app_module._finalise(str(folder), app_module._stitch_project(folder.name)[2], [("courier.pdf", data)],
+                                          add_unmatched=False)
+    shift = result["report_pages"] - (lm.get("project") or {}).get("report_pages", 0)
+    with_logo = {n + 1 for n, page in enumerate(fitz.open(folder / out)) if any(img[2] == 777 for img in page.get_images())}
+    assert with_logo == {p["packing_page"] + shift for p in result["placed"]}
+    assert not with_logo & {p + shift for p in packs[0]["box_pages"]}
+
+
+def test_a_horizontal_code_on_another_stores_label_is_not_placed_by_it(client, files):
+    """Horizontal Item References carry this Generate's own code ('03T1P2QWXK Chadstone'), as vertical ones do: the
+    serial alone repeats in every job, the code doesn't. A courier label of another job (same serial, another code)
+    isn't placed; this job's labels are, the store written in full, cut short or not at all. A project made before
+    codes (bare '03T1P2') still checks the store written on the label."""
+    import copy as copy_module
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = run_page(client, final, sig)
+    lm = json.load(open(folder / next(n for n in os.listdir(folder) if n.endswith(".labelmap.json")), encoding="utf-8"))
+    packs = [(store, pk) for store, pks in lm["stores"].items() for pk in pks if int(pk.get("boxes") or 1) == 1]
+    (s1, right), (s2, cut), (s3, bare), (s4, other) = packs[:4]
+    address = "\n1 SAMPLE ST\nCORIO VIC 3214"  # the label's text runs on after the Item Ref: not part of the store
+    another_job = serial_of(other["open360_code"]) + ("ZZZZ" if not other["open360_code"].endswith("ZZZZ") else "YYYY")
+
+    def plan(label_map, texts):
+        courier = fitz.open()
+        for text in texts:
+            courier.new_page(width=288, height=432).insert_text((20, 40), text + address)
+        return app_module.plan_stitch(str(folder), label_map, [("c.pdf", courier.tobytes())])
+    got = plan(lm, [f"Item Ref: {right['open360_code']} {s1}", f"Item Ref: {cut['open360_code']} {s2[:6]}",
+                    f"Item Ref: {bare['open360_code']}", f"Item Ref: {another_job} {s4}"])
+    placed = {p["pack_reference"] for p in got["placed"]}
+    assert {right["item_reference"], cut["item_reference"], bare["item_reference"]} <= placed
+    assert other["item_reference"] not in placed and len(got["unmatched"]) == 1  # another job's: not placed
+    # A project generated before the codes: its bare serials, and the store on the label checked
+    old = copy_module.deepcopy(lm)
+    for pks in old["stores"].values():
+        for pk in pks:
+            pk["open360_code"] = serial_of(pk["open360_code"])
+    got = plan(old, [f"Item Ref: {serial_of(right['open360_code'])} {s1}",
+                     f"Item Ref: {serial_of(other['open360_code'])} Somewhere Else Entirely"])
+    assert {p["pack_reference"] for p in got["placed"]} == {right["item_reference"]}
+    (u,) = got["unmatched"]
+    assert f"is {s4}'s in this job, but the label is for Somewhere Else Entirely" in u["reason"]
+
+
+def test_a_background_stitch_stays_on_its_run_while_another_is_picked(client, files, monkeypatch):
+    """Two runs in one project; run A stitches in the background (the matching page's Finalise). Picking run B
+    meanwhile is refused, and even if B became the current run (another tab, a race), A's stitch writes only A's label
+    map and session: B's label map is left as it was."""
+    import threading
+    import time
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = _sheets_project(projects, final, sig)
+    for csv_kind in (["open360"], ["openfreight"]):
+        _, gen = _into_project_form(c, app_module, folder, final)
+        c.post("/packing-labels/horizontal", data={**gen, "courier_csv": csv_kind}, follow_redirects=True)
+        time.sleep(1.1)
+    run_b, run_a = app_module._label_maps(str(folder))  # newest first
+    c.get(f"/stitch/{folder.name}?run={run_a}")
+    found = app_module._stitch_project(folder.name)
+    assert found[1] == run_a
+    b_before = (folder / run_b).read_bytes()
+    lm = found[2]
+    pk = next(p for pks in lm["stores"].values() for p in pks)
+    courier = fitz.open()
+    courier.new_page(width=288, height=432).insert_text((20, 40), f"Item Ref: {pk['open360_item_reference']}")
+    data = courier.tobytes()
+    release, rendering = threading.Event(), threading.Event()
+    real = app_module.render_stitch
+
+    def slow(*a, **k):
+        rendering.set()
+        release.wait(10)
+        return real(*a, **k)
+    monkeypatch.setattr(app_module, "render_stitch", slow)
+    app_module._start_finalise(str(folder), lm, [("c.pdf", data)], True)
+    assert rendering.wait(10)
+    page = c.get(f"/stitch/{folder.name}?run={run_b}", follow_redirects=True).data.decode()
+    assert "Still stitching the other labels of this project" in page
+    assert app_module._current_run(str(folder)) == run_a  # the switch was refused
+    app_module._write_json(str(folder / app_module.CURRENT_RUN_FILE), {"label_map": run_b})  # as if it raced through
+    release.set()
+    assert app_module.STITCH_DONE[str(folder)].wait(30)
+    assert app_module.STITCH_JOBS[str(folder)]["state"] == "done"
+    assert (folder / run_b).read_bytes() == b_before  # B untouched
+    a_map = json.load(open(folder / run_a, encoding="utf-8"))
+    assert a_map["files"]["complete_labels"] == [app_module.STITCH_JOBS[str(folder)]["output"]]
+    stem = run_a[:-len(".labelmap.json")]
+    assert json.load(open(folder / f"stitch_session - {stem}.json", encoding="utf-8")).get("finalised")
+
+
+def test_sub_group_reads_packs_whose_names_have_quotes(client, monkeypatch):
+    """Tab and pack names come from the client's file ('12" Poster'): the page names its fields with them as they are
+    (built as elements, not HTML), and Sub-Group reads every range back; none is dropped."""
+    c, app_module, projects = client
+    folder = projects / "Quotes_Job-J1_261018_2200"
+    folder.mkdir()
+    tab, pack = 'Spring "Sale"', '12" Poster'
+    json.dump({"job_id": "J1", "file1_name": "Final x.xlsx", "tabs": {tab: {"packs": {pack: {"is_selected": True}}}}},
+              open(folder / "Final x.json", "w"))
+    got = {}
+    monkeypatch.setattr(app_module, "execute_subgroups", lambda d, meta, instructions: got.update(instructions))
+    r = c.post(f"/subgroup/{folder.name}", data={
+        "target_json": "Final x.json", "selected_tabs[]": [tab], f"item_row_{tab}": "9", f"target_pack_{tab}[]": [pack],
+        f"start_item_{tab}_{pack}[]": ["1", "4"], f"end_item_{tab}_{pack}[]": ["3", "6"]})
+    assert r.status_code == 302
+    assert got == {tab: {"item_row": 9, "packs": {pack: [[1, 3], [4, 6]]}}}

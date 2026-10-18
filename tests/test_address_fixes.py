@@ -37,3 +37,35 @@ def test_street_type_ending_the_line_is_not_a_name():
 def test_suffix_written_out():
     assert _street_title("HIGH STREET S") == "High Street South"
     assert fix("12 Hight St", "HIGH STREET S")[0] == "12 High Street South"
+
+
+def _places(*places):
+    """A small official-data database: (id, name, state, [postcodes])."""
+    import sqlite3
+    from engine.addresses.address_reference import SCHEMA, _key
+    db = sqlite3.connect(":memory:")
+    db.executescript(SCHEMA)
+    for i, name, state, pcs in places:
+        db.execute("INSERT INTO locality VALUES (?, ?, ?, ?, '')", (i, name, _key(name), state))
+        db.execute("INSERT INTO locality_name VALUES (?, ?)", (_key(name), i))
+        for pc in pcs:
+            db.execute("INSERT INTO locality_postcode VALUES (?, ?)", (pc, i))
+    return db
+
+
+def test_a_suburb_written_in_an_address_line_is_found_to_move_into_suburb():
+    """The suburb written in a street line instead of Suburb, from the official data: at the end of the line (with a
+    state and postcode after it, or nothing else filled in), or as a whole part between commas; a street that shares
+    a suburb's name isn't one."""
+    from engine.addresses.address_reference import _suburb_in_lines
+    db = _places((1, "BONDI JUNCTION", "NSW", ["2022"]), (2, "BONDI", "NSW", ["2026"]), (3, "SYDNEY", "NSW", ["2000"]),
+                 (4, "RICHMOND", "VIC", ["3121"]), (5, "RICHMOND", "NSW", ["2753"]))
+    find = lambda **a: (lambda r: r and (r[0]["name"], r[0]["state"], r[1], r[2], r[3]))(_suburb_in_lines(db, a))
+    assert find(line1="Shop 5012/500 Oxford St, Bondi Junction NSW 2022") == \
+        ("BONDI JUNCTION", "NSW", "line1", "Shop 5012/500 Oxford St", "2022")
+    assert find(line1="Shop 5012/500 Oxford St, Bondi Junction") == ("BONDI JUNCTION", "NSW", "line1", "Shop 5012/500 Oxford St", "")
+    assert find(line1="Shop 5012, Bondi Junction, 500 Oxford St") == ("BONDI JUNCTION", "NSW", "line1", "Shop 5012, 500 Oxford St", "")
+    assert find(line1="Level 2, 340 Kent St", line2="Sydney NSW 2000") == ("SYDNEY", "NSW", "line2", "", "2000")
+    assert find(line1="12 Bondi Rd") is None  # a street, not the suburb
+    assert find(line1="5 Swan St, Richmond 2753")[1] == "NSW"  # the postcode written with it picks the state
+    assert find(line1="5 Swan St, Richmond", state="VIC")[1] == "VIC"

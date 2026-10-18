@@ -265,3 +265,101 @@ def test_adding_a_code_from_another_group_moves_it_here(store):
         store.add_service('BORDERB', '', 'tnt-nsw-road-express', move=True)  # already here
     with pytest.raises(ServiceError):
         store.add_service('TNTN', 'X', 'dhl')  # without move (the preview's + Add service): a duplicate stays an error
+
+
+LABEL_MAP = {
+    'files': {'courier_csvs': ['o360.csv', 'of.csv']},
+    'consignments': [{'number': 1, 'service_code': 'STEPRM',
+                      'destination': {'receiver': 'Corio Village', 'line1': 'Shop K001', 'line2': '', 'suburb': 'Corio',
+                                      'state': 'VIC', 'postcode': '3214', 'country': ''}}],
+    'stores': {'Corio Village': [{'item_reference': 'Label 1 - Corio Village', 'open360_item_reference': '01T1P1 Corio Village',
+                                  'consignment': 1, 'box_pages': [2]}]},
+}
+
+
+def _write_csvs(folder, o360_service='STEPRM', of_service='TNTN', of_suburb='Corio'):
+    with open(folder / 'o360.csv', 'w', newline='', encoding='utf-8-sig') as f:
+        csv.writer(f).writerows([['Receiver Name', 'Receiver Suburb', 'Service', 'Item Reference'],
+                                 ['Corio Village', 'Corio', o360_service, '01T1P1 Corio Village']])
+    with open(folder / 'of.csv', 'w', newline='', encoding='cp1252') as f:  # saved by Excel
+        csv.writer(f).writerows([['Reference', 'Receiver Name', 'Receiver Address Line 1', 'Receiver Suburb', 'Receiver State',
+                                  'Receiver Postcode', 'Service Code', 'Reference'],
+                                 ['J1', 'Corio Village', 'Shop K001', of_suburb, 'VIC', '3214', of_service, '01T1P1 Corio Village']])
+
+
+def test_the_picked_csv_alone_decides_the_service_openfreight_too(tmp_path):
+    """The file picked on the Stitch page decides: an OpenFreight CSV is matched by its last Reference column (the
+    Open360 reference), and the Open360 one no longer overrides it."""
+    _write_csvs(tmp_path)
+    assert pack_services(str(tmp_path), LABEL_MAP, 'of.csv') == {'Label 1 - Corio Village': 'TNTN'}
+    assert pack_services(str(tmp_path), LABEL_MAP, 'o360.csv') == {'Label 1 - Corio Village': 'STEPRM'}
+
+
+def test_an_address_changed_in_the_csv_is_reported(tmp_path):
+    from engine.packing_labels.label_stitcher import address_changes
+    _write_csvs(tmp_path, of_suburb='Norlane')
+    (m,) = address_changes(str(tmp_path), LABEL_MAP, 'of.csv')
+    assert m['number'] == 1 and m['stores'] == ['Corio Village']
+    assert 'Corio, VIC, 3214' in m['labels'] and 'Norlane, VIC, 3214' in m['now']
+    _write_csvs(tmp_path)  # the same place, written differently (case, AU left blank): no change
+    assert address_changes(str(tmp_path), LABEL_MAP, 'of.csv') == []
+
+
+def _two_computers(tmp_path):
+    """PC A with changes made on it, PC B with nothing saved yet (its folder has the carriers' dhl.png, as a clone has)."""
+    from engine.addresses.address_book import AddressBook
+    from engine.courier.packing_specs import SpecStore
+    a, b = tmp_path / "pc A data", tmp_path / "pc B data"
+    for d in (a, b):
+        (d / "courier logos").mkdir(parents=True)
+        (d / "courier logos" / "dhl.png").write_bytes(png((255, 204, 0)))
+    store_a = ServiceStore(str(a / "courier_services.json"), str(a / "courier logos"))
+    store_a.update_service('TNTN', 'TNTN', 'TNT (NSW) ROAD EXPRESS', 'tnt-overnight')  # moved
+    store_a.rename_group('toll-priority', 'Toll Priority Express')
+    store_a.set_logo('toll-priority', png((0, 90, 0)))
+    store_a.add_group('Couriers Please')  # no services yet
+    store_a.delete_logo('fedex-international')  # removed on purpose
+    with open(a / "packing_specs.json", "w", encoding="utf-8") as f:
+        json.dump({'formula': {}, 'named': [{'name': 'A4 box', 'length': 32, 'width': 23, 'height': 19, 'weight': 1.2,
+                                             'item_type': 'Carton'}]}, f)
+    store_b = ServiceStore(str(b / "courier_services.json"), str(b / "courier logos"))
+    return (a, AddressBook(str(a / "book.db")), store_a), (b, AddressBook(str(b / "book.db")), store_b, SpecStore(str(b / "packing_specs.json")))
+
+
+def test_a_backup_merged_on_a_new_computer_brings_everything(tmp_path):
+    """Merge (the page's choice) on a computer with nothing saved yet takes the backup as it is: moved services, a
+    renamed group and its logo, an empty group, a removed logo and the packing specs all come across."""
+    (a, book_a, store_a), (b, book_b, store_b, specs_b) = _two_computers(tmp_path)
+    data, _ = data_transfer.export_zip(str(a), book_a, ['courier_services', 'packing_specs'], store_a)
+    result = data_transfer.import_zip(data, {'courier_services': 'merge', 'packing_specs': 'merge'}, str(b), book_b,
+                                      specs_b, store_b)
+    assert all('taken as' in what for _, what in result['done'])
+    assert store_b.group_of('TNTN')['id'] == 'tnt-overnight'
+    toll = store_b.group_of('20')
+    assert (toll['id'], toll['name']) == ('toll-priority', 'Toll Priority Express') and store_b.logo_for('21')
+    assert any(g['name'] == 'Couriers Please' for g in store_b.load()['groups'])
+    assert store_b.logo_for('FXIEOIE') is None  # removed on A, stays removed
+    assert store_b.logo_for('DHLWPXOD') == str(b / "courier logos" / "dhl.png")  # the same picture: left as it is
+    assert specs_b.load()['named'][0]['length'] == 32
+
+
+def test_two_imports_in_the_same_second_each_keep_a_backup(tmp_path):
+    (a, book_a, store_a), (b, book_b, store_b, specs_b) = _two_computers(tmp_path)
+    data, _ = data_transfer.export_zip(str(a), book_a, ['courier_services'], store_a)
+    first = data_transfer.import_zip(data, {'courier_services': 'replace'}, str(b), book_b, specs_b, store_b)
+    second = data_transfer.import_zip(data, {'courier_services': 'replace'}, str(b), book_b, specs_b, store_b)
+    assert first['backup'] != second['backup'] and os.path.isdir(second['backup'])
+
+
+def test_no_logo_on_a_packing_label_that_got_no_courier_label(tmp_path):
+    """The logo names the courier of the label beside it: a box the stitch left without a courier label (Macpac Kent
+    St in a real run) gets no logo, the others do."""
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(png(size=(1000, 159)))
+    doc = fitz.open()
+    for _ in range(3):
+        doc.new_page(width=842, height=595)
+    label_map = {'logo_region_mm': {'x': 67.9, 'y': 199.1, 'width': 43.1, 'height': 6.84},
+                 'stores': {'A': [{'item_reference': 'L1', 'box_pages': [1, 3]}], 'Kent St': [{'item_reference': 'L2', 'box_pages': [2]}]}}
+    assert draw_logos(doc, label_map, {'L1': str(logo), 'L2': str(logo)}, pages={1, 3}) == 2
+    assert doc[0].get_images() and doc[2].get_images() and not doc[1].get_images()

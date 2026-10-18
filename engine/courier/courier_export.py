@@ -931,8 +931,8 @@ def csv_from_recipe(project_dir, recipe_name, kind):
     with open(os.path.join(project_dir, os.path.basename(recipe_name)), encoding='utf-8') as f:
         r = json.load(f)
     name = f"{r['base_name']} - {CSV_KINDS[kind]}.csv"
-    from engine.core.core_math import free_name
-    name = free_name(project_dir, name)
+    from engine.core.core_math import unused_name
+    name = unused_name(project_dir, name)  # never over a file already there: the user may have edited it
     path = os.path.join(project_dir, name)
     if kind == 'open360':
         items = [{**i, 'size_cm': tuple(i['size_cm']) if i.get('size_cm') else None} for i in r['open360']['items']]

@@ -42,6 +42,18 @@ def label_plugin_rows(tab_name, tab_info, inputs, pack_summaries, file1_name):
                      "Y" if inputs.get("installer") else "N", file1_name or ""])
     return rows
 
+JOB_SERIES = re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{1,3}\d{4,8})(?:-\d{1,4})?(?![A-Za-z0-9])')
+JOB_NUMBER = re.compile(r'^[A-Za-z]{1,3}\d{4,8}(?:-\d{1,4})?$')
+
+
+def job_series(text):
+    """The job number itself, for the dashboard: 'J476523' from 'J476523-01', 'J476523-001', 'Final J476523 Spring' or
+    'Spring_Job-J476523-01_261017_1000'. Text with no job number in it comes back as it is ('' for nothing)."""
+    text = str(text or '').strip()
+    m = JOB_SERIES.search(text)
+    return m.group(1).upper() if m else text
+
+
 def clean_file_name(raw_string):
     """Cleans messy strings into safe file names."""
     if not raw_string:
@@ -439,7 +451,7 @@ def is_locked(file_path):
 
 
 # Names with two parts to their extension, kept whole when a number goes in ('… (2).labelmap.json')
-_MULTI_EXT = ('.labelmap.json',)
+_MULTI_EXT = ('.labelmap.json', '.courier.json')  # 'x (2).courier.json', so it's still found by its ending
 
 
 def free_name(folder, name):
@@ -450,6 +462,18 @@ def free_name(folder, name):
     stem = name[:len(name) - len(ext)] if ext else name
     candidate, n = name, 1
     while os.path.exists(os.path.join(folder, candidate)) and is_locked(os.path.join(folder, candidate)):
+        n += 1
+        candidate = f"{stem} ({n}){ext}"
+    return candidate
+
+
+def unused_name(folder, name):
+    """`name`, or 'name (2).ext', 'name (3).ext' …: the first no file has yet. For a file that must never replace one
+    already there (the other courier CSV, made later beside one the user may have edited)."""
+    ext = next((e for e in _MULTI_EXT if name.endswith(e)), os.path.splitext(name)[1])
+    stem = name[:len(name) - len(ext)] if ext else name
+    candidate, n = name, 1
+    while os.path.exists(os.path.join(folder, candidate)):
         n += 1
         candidate = f"{stem} ({n}){ext}"
     return candidate

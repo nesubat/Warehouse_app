@@ -903,8 +903,8 @@ def _none(country, message=''):
 
 def _assess(a):
     country = {'AUSTRALIA': 'AU', 'NEW ZEALAND': 'NZ', '': 'AU'}.get(_key(a['country']), _key(a['country']))
-    if not (a['suburb'] or a['postcode']):
-        return _none(country)
+    if not (a['suburb'] or a['postcode'] or a['line1'] or a['line2']):
+        return _none(country)  # an address line alone is enough: the suburb may be written in it (_suburb_in_lines)
     if country not in DB_PATHS:
         return _none(country, f"No official data for {country}.")
     db = _db(country)
@@ -983,28 +983,58 @@ def _street_option(a, street, types=()):
 LINE_NAMES = {'line1': 'Address Line 1', 'line2': 'Address Line 2'}
 
 
+# A state and / or postcode written after the suburb at the end of a line ('…, Bondi Junction NSW 2022'): taken off
+# before the suburb is looked for, and its postcode used for the fix
+_TAIL_STATE_POSTCODE = re.compile(r'[\s,]*(?:\b(VIC|NSW|QLD|SA|WA|TAS|NT|ACT|OT)\b\.?)?[\s,]*(\d{4})?\s*$', re.I)
+
+
 def _suburb_in_lines(db, a, candidates=None):
-    """(locality, line field, the line without it) for a suburb written at the end of an address line ('…, Everton
-    Park'), else None. The last part of Address Line 2, then Line 1, is tried as the last 3, 2, then 1 words, so
-    'Bondi Junction' wins over 'Junction'. candidates: only these localities count (the postcode's); None: any, those
-    in the address's state first."""
+    """(locality, line field, the line without it, postcode written with it or '') for a suburb written in an address
+    line instead of Suburb, else None. Looked for in Address Line 2, then Line 1:
+      - at the end of the line, after a state and postcode written there are taken off ('…, Bondi Junction NSW 2022'),
+        as the last 3, 2, then 1 words, so 'Bondi Junction' wins over 'Junction';
+      - else as a whole comma-separated part of the line ('Shop 5012, Bondi Junction, 500 Oxford St'), last part
+        first: only a part that is all of a suburb's name, so a street ('Bondi Rd') isn't taken for one.
+    candidates: only these localities count (the postcode's); None: any, those of the address's state (or the state
+    written in the line) first, and those with the postcode written in the line before others."""
     ids = {l['id'] for l in candidates} if candidates is not None else None
-    state = _key(a.get('state'))
+
+    def lookup(words, state, postcode):
+        key = _key(" ".join(words))
+        if not words or not key or any(ch.isdigit() for ch in key):
+            return None
+        found = [i for (i,) in db.execute("SELECT DISTINCT locality FROM locality_name WHERE key = ?", (key,))]
+        found = _localities(db, [i for i in found if ids is None or i in ids])
+        if postcode and any(postcode in l['postcodes'] for l in found):
+            found = [l for l in found if postcode in l['postcodes']]
+        found.sort(key=lambda l: l['state'] != state)
+        return found[0] if found else None
+
     for field in ('line2', 'line1'):
-        segments = (a.get(field) or '').split(',')
+        text = (a.get(field) or '').strip()
+        if not text:
+            continue
+        tail = _TAIL_STATE_POSTCODE.search(text)
+        written_state, written_pc = (tail.group(1) or '').upper(), tail.group(2) or ''
+        body = text[:tail.start()] if (written_state or written_pc) else text
+        state = _key(a.get('state')) or written_state
+        segments = body.split(',')
+        # 1. The end of the line
         last = segments[-1].split()
         for n in (3, 2, 1):
             words = last[-n:] if len(last) >= n else []
-            key = _key(" ".join(words))
-            if not words or not key or any(ch.isdigit() for ch in key):
-                continue
-            found = [i for (i,) in db.execute("SELECT DISTINCT locality FROM locality_name WHERE key = ?", (key,))]
-            found = _localities(db, [i for i in found if ids is None or i in ids])
-            found.sort(key=lambda l: l['state'] != state)
+            found = lookup(words, state, written_pc)
             if found:
                 rest = " ".join(last[:-n])
                 line = ",".join(segments[:-1] + ([" " + rest] if rest else [])).strip().strip(',').strip()
-                return found[0], field, line
+                return found, field, line, written_pc
+        # 2. A whole part of the line, between commas
+        for i in range(len(segments) - 2, -1, -1):
+            words = segments[i].split()
+            found = lookup(words, state, written_pc) if 0 < len(words) <= 3 else None
+            if found:
+                line = ",".join(segments[:i] + segments[i + 1:]).strip().strip(',').strip()
+                return found, field, " ".join(line.split()), written_pc
     return None
 
 
@@ -1143,8 +1173,8 @@ def _assess_in(country, db, a):
     if not suburb and any(x.strip() for x in lines):
         moved = _suburb_in_lines(db, a, at_postcode if (country == 'AU' and postcode) else None)
         if moved:
-            l, field, line = moved
-            o = _option(l, postcode if postcode in l['postcodes'] else None, country)
+            l, field, line, written_pc = moved
+            o = _option(l, postcode if postcode in l['postcodes'] else (written_pc if written_pc in l['postcodes'] else None), country)
             o['fields'][field] = line
             o['label'] += f" (out of {LINE_NAMES[field]})"
             options.insert(0, o)

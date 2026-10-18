@@ -1,3 +1,15 @@
+// A task behind the loading overlay that failed comes back with X-Log-Url (app.py _failed): the page goes to the Logs
+// page at what went wrong, as a form's failure does
+(() => {
+    const fetchFromPage = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+        const res = await fetchFromPage(...args);
+        const to = res.headers.get('X-Log-Url');
+        if (to && to.startsWith('/logs')) window.location.assign(to);
+        return res;
+    };
+})();
+
 /* =========================================
    WAREHOUSE AUTOMATION SUITE - MASTER SCRIPT
    Architecture: Event Delegation & State Management
@@ -158,6 +170,30 @@ document.addEventListener("DOMContentLoaded", function() {
     }
     const selectedTabsState = new Set(); // State tracker
     // Listen for Checkbox Toggles
+    // Sub-Group page (sub-group.html): the blocks it builds, by tab and pack name, and two helpers that only ever set
+    // text and properties (sgEl), so names from the client's file can't become HTML
+    const sgTabs = new Map();  // tab name -> {block, packs (its packs' container), packBlocks: pack name -> block}
+    function sgEl(tag, props, text) {
+        const n = Object.assign(document.createElement(tag), props || {});
+        if (props && props.style) n.style.cssText = props.style;
+        if (text !== undefined) n.textContent = text;
+        return n;
+    }
+    function sgRow(tabName, packName, removable) {
+        const row = sgEl('div', { className: 'input-group subgroup-row', style: 'margin-bottom: 15px; align-items: flex-end;' });
+        for (const [label, field] of [['Start Item #', 'start_item'], ['End Item #', 'end_item']]) {
+            const cell = sgEl('div', { className: 'input-field' });
+            cell.append(sgEl('label', {}, label), sgEl('input', { type: 'number', name: `${field}_${tabName}_${packName}[]`, required: true }));
+            row.append(cell);
+        }
+        if (removable) {
+            const remove = sgEl('button', { type: 'button', className: 'btn-file delete', style: 'height: 40px; min-width: 80px;' }, 'Remove');
+            remove.addEventListener('click', () => row.remove());
+            row.append(remove);
+        }
+        return row;
+    }
+
     document.body.addEventListener('change', function(e) {
         
         // --- RESTORED: Matrix "Select All Packs" Logic ---
@@ -186,125 +222,69 @@ document.addEventListener("DOMContentLoaded", function() {
         }
         // -------------------------------------------------
 
-        // Tab Selector (Existing code...)
+        // Tab Selector: a block per ticked tab, with its packs to pick. Tab and pack names come from the client's Excel
+        // file, so every one goes in as text or a property, never as HTML: a pack called 12" Poster keeps its quote in
+        // the field names app.py reads back (start_item_<tab>_<pack>[]), and nothing in a name can run as script
         if (e.target.matches('.tab-checkbox-grid input[type="checkbox"]:not([name^="target_pack"])')) {
             const tabName = e.target.value;
-            const safeTabId = tabName.replace(/[^a-zA-Z0-9]/g, '_');
             const container = document.getElementById('tab-blocks-container');
             const submitBtn = document.getElementById('submit-btn');
 
             if (e.target.checked && meta) {
                 selectedTabsState.add(tabName);
-                
-                let packOptions = '<div class="tab-checkbox-grid" style="margin-top: 5px;">';
-                const packs = meta.tabs[tabName].packs;
-                for (const [packName, packData] of Object.entries(packs)) {
-                    if (packData.is_selected) { 
-                        packOptions += `
-                            <label class="tab-checkbox-label">
-                                <!-- Notice: using data- attributes instead of onchange -->
-                                <input type="checkbox" name="target_pack_${tabName}[]" value="${packName}" data-tab="${tabName}" data-pack="${packName}">
-                                ${packName}
-                            </label>
-                        `;
-                    }
+                const block = sgEl('div', { className: 'tab-card', style: 'border-left: 5px solid #3498db;' });
+                const title = sgEl('h3', { className: 'tab-title' }, '⚙️ Setup for Tab: ');
+                title.append(sgEl('span', { style: 'color: #3498db;' }, tabName));
+                const rowField = sgEl('div', { className: 'input-field', style: 'width: 50%; min-width: 200px; margin-bottom: 20px;' });
+                rowField.append(sgEl('label', {}, 'Item Number Row (e.g. 9)'),
+                    sgEl('input', { type: 'number', name: `item_row_${tabName}`, required: true,
+                                   style: 'width: 100%; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; box-sizing: border-box;' }));
+                const grid = sgEl('div', { className: 'tab-checkbox-grid', style: 'margin-top: 5px;' });
+                for (const [packName, packData] of Object.entries(meta.tabs[tabName].packs)) {
+                    if (!packData.is_selected) continue;
+                    const label = sgEl('label', { className: 'tab-checkbox-label' });
+                    const box = sgEl('input', { type: 'checkbox', name: `target_pack_${tabName}[]`, value: packName });
+                    box.dataset.tab = tabName;
+                    box.dataset.pack = packName;
+                    label.append(box, ' ', document.createTextNode(packName));
+                    grid.append(label);
                 }
-                packOptions += '</div>';
-
-                const blockHTML = `
-                    <div class="tab-card" id="block_${safeTabId}" style="border-left: 5px solid #3498db;">
-                        <h3 class="tab-title">⚙️ Setup for Tab: <span style="color: #3498db;">${tabName}</span></h3>
-                        <input type="hidden" name="selected_tabs[]" value="${tabName}">
-
-                        <div class="input-field" style="width: 50%; min-width: 200px; margin-bottom: 20px;">
-                            <label>Item Number Row (e.g. 9)</label>
-                            <input type="number" name="item_row_${tabName}" style="width: 100%; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; box-sizing: border-box;" required>
-                        </div>
-
-                        <div class="input-field" style="margin-bottom: 20px;">
-                            <label>Parent Pack(s) to Sub-Group</label>
-                            ${packOptions}
-                        </div>
-                        
-                        <div id="pack_blocks_container_${safeTabId}"></div>
-                    </div>
-                `;
-                container.insertAdjacentHTML('beforeend', blockHTML);
+                const packField = sgEl('div', { className: 'input-field', style: 'margin-bottom: 20px;' });
+                packField.append(sgEl('label', {}, 'Parent Pack(s) to Sub-Group'), grid);
+                const packs = sgEl('div');
+                block.append(title, sgEl('input', { type: 'hidden', name: 'selected_tabs[]', value: tabName }), rowField, packField, packs);
+                sgTabs.set(tabName, { block, packs, packBlocks: new Map() });
+                container.append(block);
             } else {
                 selectedTabsState.delete(tabName);
-                const block = document.getElementById(`block_${safeTabId}`);
-                if (block) block.remove();
+                const tab = sgTabs.get(tabName);
+                if (tab) { tab.block.remove(); sgTabs.delete(tabName); }
             }
             if (submitBtn) submitBtn.style.display = selectedTabsState.size > 0 ? 'block' : 'none';
         }
-        
-        // Pack Selector
+
+        // Pack Selector: a block per ticked pack, with its sub-group rows
         if (e.target.matches('input[name^="target_pack_"]')) {
-            const tabName = e.target.dataset.tab;
+            const tab = sgTabs.get(e.target.dataset.tab);
             const packName = e.target.dataset.pack;
-            const safeTabId = tabName.replace(/[^a-zA-Z0-9]/g, '_');
-            const safePackId = packName.replace(/[^a-zA-Z0-9]/g, '_');
-            const container = document.getElementById(`pack_blocks_container_${safeTabId}`);
-
+            if (!tab) return;
             if (e.target.checked) {
-                const blockHTML = `
-                    <div class="blueprint-card" id="block_${safeTabId}_${safePackId}" style="margin-top: 15px;">
-                        <h4 style="color: #2c3e50; font-size: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; margin-bottom: 15px;">
-                            Define Sub-Groups for: <span style="color: #e67e22;">${packName}</span>
-                        </h4>
-                        
-                        <div id="sg_container_${safeTabId}_${safePackId}">
-                            <div class="input-group subgroup-row" style="margin-bottom: 15px; align-items: flex-end;">
-                                <div class="input-field">
-                                    <label>Start Item #</label>
-                                    <input type="number" name="start_item_${tabName}_${packName}[]" required>
-                                </div>
-                                <div class="input-field">
-                                    <label>End Item #</label>
-                                    <input type="number" name="end_item_${tabName}_${packName}[]" required>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Notice: using data- attributes instead of onclick -->
-                        <button type="button" class="btn-file open add-subgroup-btn" data-tab="${tabName}" data-pack="${packName}" data-safetab="${safeTabId}" data-safepack="${safePackId}" style="margin-top: 5px;">
-                            + Add Another Sub-Group for ${packName}
-                        </button>
-                    </div>
-                `;
-                container.insertAdjacentHTML('beforeend', blockHTML);
+                const block = sgEl('div', { className: 'blueprint-card', style: 'margin-top: 15px;' });
+                const head = sgEl('h4', { style: 'color: #2c3e50; font-size: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; margin-bottom: 15px;' },
+                                  'Define Sub-Groups for: ');
+                head.append(sgEl('span', { style: 'color: #e67e22;' }, packName));
+                const rows = sgEl('div');
+                rows.append(sgRow(e.target.dataset.tab, packName, false));
+                const add = sgEl('button', { type: 'button', className: 'btn-file open', style: 'margin-top: 5px;' },
+                                 `+ Add Another Sub-Group for ${packName}`);
+                add.addEventListener('click', () => rows.append(sgRow(e.target.dataset.tab, packName, true)));
+                block.append(head, rows, add);
+                tab.packBlocks.set(packName, block);
+                tab.packs.append(block);
             } else {
-                const block = document.getElementById(`block_${safeTabId}_${safePackId}`);
-                if (block) block.remove();
+                const block = tab.packBlocks.get(packName);
+                if (block) { block.remove(); tab.packBlocks.delete(packName); }
             }
-        }
-    });
-
-    // Listen for Dynamic Button Clicks (Add/Remove Rows)
-    document.body.addEventListener('click', function(e) {
-        if (e.target.matches('.add-subgroup-btn')) {
-            const tabName = e.target.dataset.tab;
-            const packName = e.target.dataset.pack;
-            const container = document.getElementById(`sg_container_${e.target.dataset.safetab}_${e.target.dataset.safepack}`);
-            
-            const rowHTML = `
-                <div class="input-group subgroup-row" style="margin-bottom: 15px; align-items: flex-end;">
-                    <div class="input-field">
-                        <label>Start Item #</label>
-                        <input type="number" name="start_item_${tabName}_${packName}[]" required>
-                    </div>
-                    <div class="input-field">
-                        <label>End Item #</label>
-                        <input type="number" name="end_item_${tabName}_${packName}[]" required>
-                    </div>
-                    <button type="button" class="btn-file delete remove-subgroup-btn" style="height: 40px; min-width: 80px;">Remove</button>
-                </div>
-            `;
-            container.insertAdjacentHTML('beforeend', rowHTML);
-        }
-        
-        if (e.target.matches('.remove-subgroup-btn')) {
-            const row = e.target.closest('.subgroup-row');
-            if (row) row.remove();
         }
     });
 
@@ -321,9 +301,15 @@ document.addEventListener("DOMContentLoaded", function() {
         const fileInput = document.getElementById('excel_file_input');
         const helperText = document.getElementById('file-helper-text');
 
+        const jobField = document.getElementById('job-number-field');
+        const jobInput = document.getElementById('job_number_input');
+        const JOB = /^[A-Za-z]{1,3}\d{4,8}(-\d{1,4})?$/;  // as app.py checks it (JOB_NUMBER)
+
         function validateForm() {
             let isValid = false;
-            
+            // A new project asks for its job number (the dashboard shows it)
+            if (jobField) jobField.hidden = !(textInput && textInput.value.trim() !== "");
+
             if (textInput && textInput.value.trim() !== "") {
                 if (dropdown) {
                     dropdown.value = "";
@@ -331,7 +317,7 @@ document.addEventListener("DOMContentLoaded", function() {
                     dropdown.style.backgroundColor = "#e9ecef";
                 }
                 if (helperText) helperText.innerHTML = "Required: Please upload the signature links Excel file for your new project.";
-                if (fileInput && fileInput.files.length > 0) isValid = true;
+                if (fileInput && fileInput.files.length > 0) isValid = !jobInput || JOB.test(jobInput.value.replace(/\s+/g, ''));
             } 
             else if (dropdown && dropdown.value !== "") {
                 if (textInput) {
@@ -340,7 +326,12 @@ document.addEventListener("DOMContentLoaded", function() {
                     textInput.style.backgroundColor = "#e9ecef";
                 }
                 if (projectData[dropdown.value]) {
-                    if (helperText) helperText.innerHTML = `📂 <strong>Found:</strong> Upload another file otherwise system will use '<strong>${projectData[dropdown.value]}</strong>'.`;
+                    if (helperText) {  // the file's name goes in as text
+                        const name = document.createElement('strong');
+                        name.textContent = projectData[dropdown.value];
+                        helperText.replaceChildren('📂 ', Object.assign(document.createElement('strong'), { textContent: 'Found:' }),
+                            " Upload another file otherwise system will use '", name, "'.");
+                    }
                     isValid = true; 
                 } else {
                     if (helperText) helperText.innerHTML = "⚠️ No signature file found in this project. You MUST upload one below.";
@@ -373,6 +364,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
         if (dropdown) dropdown.addEventListener('change', validateForm);
         if (textInput) textInput.addEventListener('input', validateForm);
+        if (jobInput) jobInput.addEventListener('input', validateForm);
         if (fileInput) fileInput.addEventListener('change', validateForm);
         validateForm();
     }
@@ -625,10 +617,121 @@ document.addEventListener("DOMContentLoaded", function() {
         const overlay = document.getElementById('loading-overlay');
         if (overlay) {
             const text = document.getElementById('loading-text');
+            if (text && !text.dataset.idle) text.dataset.idle = text.textContent;
             if (text && e.target.action && e.target.action.includes('/courier-csv')) text.textContent = 'Making the courier CSV…';
+            // A form in a pop-up (Generate Labels from …): the pop-up closes, or it would sit over the loading screen
+            // and its button could be pressed again
+            const dialog = e.target.closest('dialog');
+            if (dialog && dialog.open && !e.defaultPrevented) dialog.close();
             overlay.style.display = 'flex';
+            if (!e.defaultPrevented) followProgress(e.target, overlay);
         }
     });
+
+    // Back to this page with the browser's Back button: it comes back as it was left, loading screen and all. The
+    // work it was waiting for is long done, so the screen goes and its progress checks stop
+    window.addEventListener('pageshow', (e) => {
+        if (!e.persisted) return;
+        const overlay = document.getElementById('loading-overlay');
+        if (!overlay) return;
+        clearTimeout(progressTimer);
+        overlay.style.display = 'none';
+        const text = document.getElementById('loading-text');
+        if (text && text.dataset.idle) text.textContent = text.dataset.idle;
+        const box = overlay.querySelector('.lp-box');
+        if (box) box.remove();
+    });
+
+    // Live progress on the overlay (progress.py): the form carries a progress_id, and until the next page arrives the
+    // overlay asks the app twice a second how far it is: the step, a bar when the step counts its work (label 12 of
+    // 40), the time so far and the last lines of the log that run wrote
+    let progressTimer = null;
+    const newProgressId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID()
+        : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12)).replace(/[^A-Za-z0-9-]/g, '');
+    function followProgress(form, overlay) {
+        if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
+        const id = newProgressId();
+        let input = form.querySelector('input[name="progress_id"]');
+        if (!input) {
+            input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'progress_id';
+            form.append(input);
+        }
+        input.value = id;  // the browser builds what it sends after this handler, so it goes with the form
+        watchProgress(overlay, id);
+    }
+    // Pages that send their work by script (the matching page's Finalise) use the same overlay: a new id, sent as the
+    // X-Progress-Id header, then followed here
+    window.whProgress = { newId: newProgressId, watch: (overlay, id) => watchProgress(overlay, id),
+                          stop: () => clearTimeout(progressTimer) };
+
+    function watchProgress(overlay, id) {
+        let box = overlay.querySelector('.lp-box');
+        if (!box) {
+            const make = (tag, cls) => { const n = document.createElement(tag); n.className = cls; return n; };
+            box = make('div', 'lp-box');
+            const track = make('div', 'lp-bar');
+            track.setAttribute('role', 'progressbar');
+            track.setAttribute('aria-valuemin', '0');
+            track.setAttribute('aria-valuemax', '100');
+            track.setAttribute('aria-label', 'Progress');
+            track.append(make('div', 'lp-fill'));
+            const meta = make('div', 'lp-meta');
+            meta.append(make('span', 'lp-step'), make('span', 'lp-pct'));
+            const log = make('ol', 'lp-lines');
+            log.setAttribute('aria-live', 'polite');
+            box.append(track, meta, log);
+            overlay.append(box);
+        }
+        const bar = box.querySelector('.lp-bar'), fill = box.querySelector('.lp-fill');
+        const step = box.querySelector('.lp-step'), pct = box.querySelector('.lp-pct'), lines = box.querySelector('.lp-lines');
+        box.classList.add('lp-waiting');
+        fill.style.width = '0%';
+        bar.removeAttribute('aria-valuenow');
+        step.textContent = 'Sending the file to the app…';
+        pct.textContent = '';
+        lines.replaceChildren();
+
+        const started = Date.now();
+        clearTimeout(progressTimer);
+        const poll = async () => {
+            let finished = false;
+            try {
+                const res = await fetch(`/api/progress/${id}`, { cache: 'no-store' });
+                if (res.ok) {
+                    const d = await res.json();
+                    finished = d.finished;
+                    box.classList.toggle('lp-waiting', !d.counted);
+                    if (d.counted) {
+                        fill.style.width = `${d.percent}%`;
+                        bar.setAttribute('aria-valuenow', Math.round(d.percent));
+                    }
+                    step.textContent = d.step;
+                    pct.textContent = (d.counted ? `${Math.round(d.percent)}% · ` : '') + `${Math.round(d.seconds)}s`;
+                    // Every line of the run so far, the fine detail too; kept at the newest unless scrolled up to read
+                    const atEnd = lines.scrollHeight - lines.scrollTop - lines.clientHeight < 24;
+                    lines.replaceChildren(...d.lines.map(x => {
+                        const li = document.createElement('li');
+                        li.className = `lp-line lv-${x.level}`;
+                        li.style.paddingLeft = `${Math.min(x.depth, 4) * 12}px`;
+                        const t = document.createElement('span');
+                        t.className = 'lp-line-time';
+                        t.textContent = x.clock || x.time;
+                        li.append(t, document.createTextNode(x.text));
+                        return li;
+                    }));
+                    if (atEnd) lines.scrollTop = lines.scrollHeight;
+                } else {
+                    pct.textContent = `${Math.round((Date.now() - started) / 1000)}s`;  // still sending, or not followed
+                }
+            } catch (err) {
+                // the app is busy or the next page is on its way: try again
+            }
+            if (!finished && Date.now() - started < 30 * 60 * 1000) progressTimer = setTimeout(poll, 500);
+        };
+        progressTimer = setTimeout(poll, 300);
+    }
 
 }); 
 // =========================================
@@ -1063,11 +1166,16 @@ document.addEventListener('DOMContentLoaded', function () {
             row.querySelector('input[data-field="line1"]').focus({ preventScroll: true });
         });
 
+        // What an edit carries over from before: the service picked, Keep separate (same-name groups) and the
+        // Keep as is choices (they name the exact address they're for, so a changed address simply doesn't match)
+        const carried = (key) => Object.fromEntries(['service_code', 'separate', 'ref_keep', 'book_keep']
+            .filter((k) => edits[key] && edits[key][k]).map((k) => [k, edits[key][k]]));
+
         row.querySelector('.pl-edit-save').addEventListener('click', () => {
             const d = read(row);
             const changed = ADDRESS.some((k) => (d[k] || '') !== (original[k] || '')) ||
                             d.authority_to_leave !== !!original.authority_to_leave;
-            const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
+            const keep = carried(id);
             // Saving counts as checked, so a row that isn't in the address book stops being flagged
             // (kept through Update Previews; the address is saved to the book on Generate)
             const checked = row.classList.contains('pl-needs-check') || (edits[id] && edits[id].checked) ? { checked: true } : {};
@@ -1088,7 +1196,7 @@ document.addEventListener('DOMContentLoaded', function () {
         row.addEventListener('pl-ref-use', (e) => {
             const d = { ...current(), ...e.detail.fields };
             if ('suburb' in e.detail.fields) d.suburb = (d.suburb || '').toUpperCase();
-            const keep = edits[id] && edits[id].service_code ? { service_code: edits[id].service_code } : {};
+            const keep = carried(id);
             // From the address book: tagged as such (and its options are done with); else an edit
             const fromBook = e.detail.source === 'book';
             edits[id] = { ...keep, checked: true, ...d, ...(fromBook ? { source: 'book' } : {}) };
@@ -1195,13 +1303,34 @@ document.addEventListener('DOMContentLoaded', function () {
             `${left} consignment${left === 1 ? ' has' : 's have'} no address`;
     }
 
+    // The text a row shows: not the ✏️ editor's labels, other receivers' saved addresses offered as options, or
+    // anything hidden, so a search (and "Apply to N shown") finds the consignments it names and no others
+    // A drop-down (the service) shows only what's chosen, not its whole list
+    const SEARCH_SKIP = '.pl-editor, .pl-book-opts, .pl-ref, [hidden], select';
+    function searchText(row) {
+        const parts = [];
+        const shown = (el) => {
+            const skip = el.closest(SEARCH_SKIP);
+            return !skip || skip === row || !row.contains(skip);  // the row itself may be hidden by this filter
+        };
+        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+            if (n.parentElement && shown(n.parentElement)) parts.push(n.nodeValue);
+        }
+        row.querySelectorAll('select').forEach((select) => {
+            const holder = select.parentElement;
+            if (holder && shown(holder)) parts.push(...[...select.selectedOptions].map((o) => o.textContent));
+        });
+        return parts.join(' ').toLowerCase();
+    }
+
     function applyFilters() {
         const state = stateFilter.value;
         const text = textFilter.value.trim().toLowerCase();
         let shown = 0;
         rows.forEach((row) => {
             const visible = (!state || row.dataset.state === state) &&
-                            (!text || row.textContent.toLowerCase().includes(text));
+                            (!text || searchText(row).includes(text));
             row.hidden = !visible;
             if (visible) shown += 1;
         });
@@ -1814,7 +1943,14 @@ document.addEventListener('DOMContentLoaded', function () {
         if (sub) document.getElementById('loading-sub').textContent = sub;
         overlay.style.display = 'flex';
     };
-    const idle = () => { overlay.style.display = 'none'; };
+    // The overlay shows the work's progress and log lines, as Generate's does: an id sent with the request (header)
+    const watch = () => {
+        if (!window.whProgress) return '';
+        const id = window.whProgress.newId();
+        window.whProgress.watch(overlay, id);
+        return id;
+    };
+    const idle = () => { overlay.style.display = 'none'; if (window.whProgress) window.whProgress.stop(); };
     const imageUrl = (i, size) => root.dataset.imageUrl.replace(/0\.png$/, `${i}.png`) + (size ? `?size=${size}` : '');
     const packs = Object.fromEntries((session.waiting || []).map((w) => [w.item_reference, w]));
     const indexOf = Object.fromEntries(session.unmatched.map((u, i) => [u.key, i]));
@@ -2192,8 +2328,9 @@ document.addEventListener('DOMContentLoaded', function () {
         ask.showModal();
     });
     // Save changes: the pairs are kept (stitch_matches.json); nothing is stitched until Finalise
-    const post = async (url, body) => {
-        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const post = async (url, body, progressId) => {
+        const headers = { 'Content-Type': 'application/json', ...(progressId ? { 'X-Progress-Id': progressId } : {}) };
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Could not save.');
         return data;
@@ -2223,9 +2360,10 @@ document.addEventListener('DOMContentLoaded', function () {
         if (root.dataset.running === '1') return;
         root.dataset.running = '1'; render();
         busy('Stitching the Complete Labels…', 'Rendering each courier label sharp enough to scan - a large job can take a minute.');
+        const progressId = watch();
         say('Stitching the Complete Labels…');
         try {
-            await post(root.dataset.finaliseUrl, { matches: pairs, add_unmatched: addUnmatched });
+            await post(root.dataset.finaliseUrl, { matches: pairs, add_unmatched: addUnmatched }, progressId);
             saved = true;
             poll();
         } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
@@ -2265,7 +2403,10 @@ document.addEventListener('DOMContentLoaded', function () {
             if (data.state === 'running') { setTimeout(poll, 100); return; }
             root.dataset.running = '';
             idle();
-            if (data.state === 'error') { render(); say(data.error || 'Stitching failed.', true); return; }
+            if (data.state === 'error') {
+                if (data.log_url) { window.location.assign(data.log_url); return; }  // the Logs page, at what failed
+                render(); say(data.error || 'Stitching failed.', true); return;
+            }
             showResult(data);
         } catch (e) { setTimeout(poll, 2500); }
     }
@@ -2279,8 +2420,10 @@ document.addEventListener('DOMContentLoaded', function () {
         files.forEach((f) => form.append('labels', f));
         root.dataset.running = '1'; render();
         busy(`Adding ${plural(files.length, 'PDF')} and matching again…`, 'Every courier label is read again with the new ones.');
+        const progressId = watch();
         try {
-            const res = await fetch(root.dataset.addUrl, { method: 'POST', body: form });
+            const res = await fetch(root.dataset.addUrl, { method: 'POST', body: form,
+                                                          headers: progressId ? { 'X-Progress-Id': progressId } : {} });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || 'Could not add the PDFs.');
             saved = true;
@@ -3703,4 +3846,259 @@ document.addEventListener('DOMContentLoaded', () => {
             : 'No Signature Links file in this project: the codes are worked out from the quantities.';
         load.disabled = !pick.value;
     });
+});
+
+
+// =========================================
+// LOGS: what the app is doing and has done (log_view.py), newest first, live
+// =========================================
+document.addEventListener('DOMContentLoaded', function () {
+    const root = document.getElementById('logs-page');
+    if (!root) return;
+    const $ = id => document.getElementById(id);
+    const list = $('lg-list'), more = $('lg-more'), empty = $('lg-empty'), live = $('lg-live');
+    const search = $('lg-search'), area = $('lg-area'), show = $('lg-show'), day = $('lg-day');
+    const open = new Set();       // runs opened by the user stay open when the list refreshes
+    let version = '', shown = 0, timer = null, busy = false, lastData = null;
+    // Sent here by a page that failed (/logs?at=…&find=…&back=…): that run opened and marked, live paused so it stays put
+    const sent = new URLSearchParams(window.location.search);
+    let focusAt = sent.get('at'), focusFind = sent.get('find') || '';
+    if (focusAt) {
+        $('lg-focus-note').hidden = false;
+        const back = sent.get('back') || '';
+        if (back.startsWith('/') && !back.startsWith('//')) {
+            $('lg-focus-back').href = back;
+            $('lg-focus-back').hidden = false;
+        }
+        day.value = 'all';
+        live.setAttribute('aria-pressed', 'false');
+        live.textContent = '▶ Live';
+        root.classList.add('lg-paused');
+    }
+
+    const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+    };
+    const ago = since => {
+        const s = Math.max(0, Math.round((Date.now() - new Date(since.replace(' ', 'T'))) / 1000));
+        return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
+    };
+    const today = () => new Date().toLocaleDateString('en-CA');  // YYYY-MM-DD, as the log writes it
+    const t12 = hms => {  // '16:23:44' (as the log writes it) -> '4:23:44 PM'
+        const [h, m, sec] = hms.split(':');
+        const hour = Number(h);
+        return `${hour % 12 || 12}:${m}:${sec} ${hour < 12 ? 'AM' : 'PM'}`;
+    };
+
+    function params(extra) {
+        const p = new URLSearchParams({ area: area.value, show: show.value, day: day.value, q: search.value.trim() });
+        if (focusAt) { p.set('at', focusAt); p.set('find', focusFind); }
+        Object.entries(extra || {}).forEach(([k, v]) => p.set(k, v));
+        return p;
+    }
+
+    function tech(lines) {
+        // A traceback, for whoever fixes the app: one click away, so the page stays readable
+        const box = el('details', 'lg-tech');
+        box.append(el('summary', '', 'Technical detail (the full trace)'), el('pre', 'lg-trace', lines.join('\n')));
+        return box;
+    }
+
+    function line(x) {
+        const row = el('div', `lg-line lv-${x.level}`);
+        row.style.paddingLeft = `${Math.min(x.depth, 6) * 14 + 8}px`;
+        row.append(el('span', 'lg-line-time', t12(x.time)));
+        if (x.level === 'WARNING' || x.level === 'ERROR' || x.level === 'CRITICAL') row.append(el('span', 'lg-tag', x.level_label));
+        row.append(el('span', 'lg-line-text', x.text));
+        if (x.more && x.more.length) row.append(x.more.some(t => t.startsWith('Traceback')) ? tech(x.more) : el('pre', 'lg-trace', x.more.join('\n')));
+        return row;
+    }
+
+    function section(title, cls) {
+        const s = el('section', `lg-sec${cls ? ' ' + cls : ''}`);
+        s.append(el('h4', 'lg-sec-title', title));
+        return s;
+    }
+
+    const longDay = day => new Date(`${day}T00:00:00`).toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+    function item(a) {
+        const li = el('li', `lg-item lv-${a.level}`);
+        li.dataset.id = a.id;
+        const head = el('button', 'lg-head');
+        head.type = 'button';
+        head.setAttribute('aria-expanded', open.has(a.id) ? 'true' : 'false');
+        const when = el('span', 'lg-time', a.day === today() ? t12(a.clock) : `${a.day.slice(8)}/${a.day.slice(5, 7)} ${t12(a.clock)}`);
+        const body = el('span', 'lg-body');
+        const top = el('span', 'lg-top');
+        top.append(el('span', `lg-area lg-area-${a.area}`, a.area_label));
+        if (a.background) top.append(el('span', 'lg-bg', 'in the background'));
+        if (a.level !== 'INFO' && a.level !== 'DEBUG') top.append(el('span', 'lg-tag', a.level_label + (a.issues > 1 ? ` (${a.issues})` : '')));
+        body.append(top, el('span', 'lg-title', a.title));
+        if (a.result) body.append(el('span', 'lg-result', a.result));
+        const steps = a.details.filter(x => x.level !== 'DEBUG').length;
+        const fine = a.details.length - steps;
+        const count = steps || a.details.length;
+        head.append(when, body, el('span', 'lg-count', count ? `${count} ${count === 1 ? 'step' : 'steps'} ▾` : 'Details ▾'));
+        li.append(head);
+
+        const box = el('div', 'lg-details');
+        box.hidden = !open.has(a.id);
+
+        // When, where and how it ran
+        const facts = el('dl', 'lg-facts');
+        const fact = (k, v) => { facts.append(el('dt', '', k), el('dd', '', v)); };
+        fact('When', `${longDay(a.day)}, ${t12(a.clock)}${a.end && a.end !== a.clock ? ` to ${t12(a.end)}` : ''}`);
+        fact('Part of the app', a.area_label);
+        fact('How it ran', a.background ? 'In the background: the page carried on while it worked' : 'While the page waited for it');
+        fact('Outcome', a.failure ? 'It stopped with an error (below)'
+            : a.level === 'WARNING' ? `Done, with ${a.issues > 1 ? a.issues + ' things' : 'something'} to look at (marked below)`
+            : a.result || 'Done');
+        box.append(facts);
+
+        // A failure: the error in its own words, and where in the app it stopped
+        if (a.failure) {
+            const f = section('Where it stopped', 'lg-sec-fail');
+            const err = el('p', 'lg-fail-error');
+            err.append(el('strong', '', 'The error: '), document.createTextNode(a.failure.error || 'not written in the log'));
+            f.append(err);
+            if (a.failure.where) {
+                const at = el('p', 'lg-fail-where');
+                at.append(el('strong', '', 'In the app: '), document.createTextNode(a.failure.where));
+                f.append(at);
+                if (a.failure.code) f.append(el('pre', 'lg-fail-code', a.failure.code));
+            }
+            if (a.failure.inside) {
+                const inside = el('p', 'lg-fail-where');
+                inside.append(el('strong', '', 'Inside: '), document.createTextNode(a.failure.inside));
+                f.append(inside);
+            }
+            if (a.title_more.length) f.append(tech(a.title_more));
+            box.append(f);
+        } else if (a.title_more.length) {
+            box.append(el('pre', 'lg-trace', a.title_more.join('\n')));
+        }
+
+        // Every step, the fine detail too (each label, each address lookup), which can be hidden
+        if (a.details.length) {
+            const s = section('What it did, step by step');
+            if (fine && steps) {
+                const label = `Hide the fine detail (${fine} line${fine === 1 ? '' : 's'})`;
+                const toggle = el('button', 'ab-btn ab-btn-plain ab-btn-small lg-detail-toggle', label);
+                toggle.type = 'button';
+                toggle.addEventListener('click', () => {
+                    const hidden = s.classList.toggle('lg-hide-detail');
+                    toggle.textContent = hidden ? `Show the fine detail (${fine} line${fine === 1 ? '' : 's'})` : label;
+                });
+                s.append(toggle);
+            }
+            a.details.forEach(x => s.append(line(x)));
+            box.append(s);
+        }
+
+        // What the app was doing just before: the lines that led up to this
+        if (a.before.length) {
+            const s = section('Just before, the app was', 'lg-sec-before');
+            a.before.forEach(x => s.append(line(x)));
+            box.append(s);
+        }
+
+        head.addEventListener('click', () => {
+            box.hidden = !box.hidden;
+            head.setAttribute('aria-expanded', String(!box.hidden));
+            if (box.hidden) open.delete(a.id); else open.add(a.id);
+        });
+        li.append(box);
+        return li;
+    }
+
+    function status(d) {
+        const text = $('lg-now-text');
+        $('lg-now').classList.toggle('lg-running', d.running.length > 0);
+        if (d.running.length) {
+            const r = d.running[0];
+            text.textContent = `Running: ${r.what.trim()} (${r.area_label}${r.background ? ', in the background' : ''}), for ${ago(r.since)}` +
+                (d.running.length > 1 ? ` · and ${d.running.length - 1} more` : '');
+        } else {
+            text.textContent = d.last ? `Nothing running. Last activity at ${t12(d.last.slice(11))} (${ago(d.last)} ago).` : 'Nothing in the log yet.';
+        }
+        $('lg-count').textContent = d.today.activities;
+        $('lg-count-issues').querySelector('strong').textContent = d.today.issues;
+        $('lg-count-problems').querySelector('strong').textContent = d.today.problems;
+        $('lg-kept').textContent = d.kept_from ? `Kept since ${d.kept_from.slice(0, 10)}` : '';
+        const chosen = area.value;
+        if (area.options.length - 1 !== d.areas.length) {
+            area.replaceChildren(new Option('Every part of the app', ''));
+            d.areas.forEach(k => area.append(new Option(d.area_labels[k], k)));
+            area.value = d.areas.includes(chosen) ? chosen : '';
+        }
+    }
+
+    async function load({ older = false, quiet = false } = {}) {
+        if (busy) return;
+        busy = true;
+        try {
+            const extra = older ? { before: more.dataset.before } : { limit: Math.max(150, Math.min(shown, 500)) };
+            if (quiet && version) extra.since = version;
+            const res = await fetch(`${root.dataset.url}?${params(extra)}`);
+            if (!res.ok) throw new Error(res.status);
+            const d = await res.json();
+            if (d.unchanged) { if (lastData) status(lastData); return; }  // still updates "for 12s" / "3 min ago"
+            lastData = d;
+            version = d.version;
+            status(d);
+            const focused = focusAt ? d.focus : null;
+            if (focused !== null && focused !== undefined) open.add(focused);
+            if (!older) list.replaceChildren();
+            d.activities.forEach(a => list.append(item(a)));
+            if (focusAt) {  // once: the failed run marked and in view; the page is an ordinary log page after that
+                const target = focused !== null && focused !== undefined && list.querySelector(`[data-id="${focused}"]`);
+                if (target) {
+                    target.classList.add('lg-focus');
+                    target.scrollIntoView({ block: 'start' });
+                } else {
+                    $('lg-focus-text').textContent = "What failed isn't in the log any more (it may have been cleared). The newest runs are below.";
+                }
+                focusAt = null;
+            }
+            shown = list.children.length;
+            more.hidden = !d.more;
+            if (d.oldest_shown !== null) more.dataset.before = d.oldest_shown;
+            empty.hidden = shown > 0;
+            $('lg-summary').textContent = shown ? `${shown} run${shown === 1 ? '' : 's'} shown, newest first` : '';
+        } catch (e) {
+            $('lg-now-text').textContent = "Couldn't read the log just now. It tries again in a few seconds.";
+        } finally {
+            busy = false;
+        }
+    }
+
+    function tick() {
+        clearTimeout(timer);
+        if (live.getAttribute('aria-pressed') !== 'true') return;
+        timer = setTimeout(async () => {
+            if (!document.hidden) await load({ quiet: true });
+            tick();
+        }, 3000);
+    }
+
+    const reload = () => { version = ''; focusAt = null; load(); };
+    let typing;
+    search.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(reload, 250); });
+    [area, show, day].forEach(s => s.addEventListener('change', reload));
+    $('lg-count-issues').addEventListener('click', () => { show.value = 'issues'; day.value = 'today'; reload(); });
+    $('lg-count-problems').addEventListener('click', () => { show.value = 'problems'; day.value = 'today'; reload(); });
+    more.addEventListener('click', () => load({ older: true }));
+    live.addEventListener('click', () => {
+        const on = live.getAttribute('aria-pressed') !== 'true';
+        live.setAttribute('aria-pressed', String(on));
+        live.textContent = on ? '⏸ Pause' : '▶ Live';
+        root.classList.toggle('lg-paused', !on);
+        if (on) load({ quiet: true });
+        tick();
+    });
+    load().then(tick);
 });

@@ -25,10 +25,11 @@ INK = (0.2, 0.2, 0.2)  # the divider caption
 
 
 def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=None, addresses=None, report=None,
-                               serials=None, add_dividers=True, notes=None, group_by_code=True):
+                               serials=None, add_dividers=True, notes=None, group_by_code=True, on_progress=None):
     """pack_groups: every selected tab's groups, combined in tab order, each tab already in packing-sheet order
     (horizontal_distribution.read_horizontal). notes: {(tab_no, pack_no): [issue dicts]} shown on the audit page.
-    Returns generate_packing_labels()'s page info, with the page numbers of the final PDF."""
+    Returns generate_packing_labels()'s page info, with the page numbers of the final PDF.
+    on_progress(done, total, step): as generate_packing_labels; drawing is most of the work, the reordering the rest."""
     notes = notes or {}
     if not group_by_code:
         # Not grouped by allocation: each pack's labels in the sheet's store order, and no packing-sheet code on them
@@ -42,7 +43,9 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
     tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
     tmp.close()
     try:
-        info = generate_packing_labels(pack_groups, tmp.name, attribute_order, addresses, None, serials, None)
+        drawn = (lambda d, t, step: on_progress(0.85 * d / max(t, 1), 1, step)) if on_progress else None
+        info = generate_packing_labels(pack_groups, tmp.name, attribute_order, addresses, None, serials, None,
+                                       on_progress=drawn)
         labels = fitz.open(tmp.name)
         out = fitz.open()
         report_pages = draw_report_pages(out, report, at=0) if report else 0
@@ -78,6 +81,8 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
         labels.close()
         new_page = {x[1]: i for i, x in enumerate(order) if isinstance(x, tuple)}
         out.select([base + x[1] if isinstance(x, tuple) else x for x in order])
+        if on_progress:
+            on_progress(0.95, 1, f"Saving the PDF in packing-sheet order ({len(order)} pages)")
         out.save(output_pdf_path, garbage=1, deflate=True)  # garbage=1 drops what select() left out; images are shared already
         out.close()
     finally:

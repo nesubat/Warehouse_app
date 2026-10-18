@@ -1,8 +1,9 @@
 from engine.core import paths
 import time
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, send_file, abort
+from flask import has_request_context, Flask, render_template, request, redirect, url_for, send_file, abort
 import os
+import filecmp
 import shutil
 import json
 import pymupdf as fitz
@@ -12,16 +13,17 @@ import sys
 import stat
 import socket
 import subprocess
-import pprint
 import pandas as pd
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import HTTPException, InternalServerError
+from urllib.parse import urlencode, urlsplit
 from engine.label_shuffler.pdf_engine import process_and_shuffle_pdf
 from engine.packing_sheets.matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
-from engine.core.core_math import clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes, \
+from engine.core.core_math import job_series, JOB_NUMBER, unused_name, clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes, \
     free_name
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
 from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
-                                     group_issues, issue_where, _row_ranges,
+                                     group_issues, issue_where, issue_text, _row_ranges,
                                      detect_columns, header_columns, similar_addresses, cell_preview)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from engine.addresses.address_book import AddressBook, AddressBookError
@@ -33,12 +35,12 @@ from engine.courier.courier_import import read_allocation, scan_columns, mapping
 from engine.addresses import address_reference
 from engine.core import data_transfer
 from engine.addresses.address_book import one_line as address_one_line
-from engine.packing_labels.label_stitcher import (plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label,
+from engine.packing_labels.label_stitcher import (read_courier_csv, courier_csv_names, address_changes, plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label,
                                                  pack_services, csv_kind)
 import threading
 from collections import Counter
 import secrets
-from engine.courier.courier_export import (build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
+from engine.courier.courier_export import (unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
@@ -46,7 +48,7 @@ from engine.courier.courier_export import (build_consignments, detect_series, wr
                             write_csv_recipe, csv_from_recipe, RECIPE_SUFFIX, CSV_KINDS)
 from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES, LOGO_DIR_NAME, LEGACY_LOGO_DIR_NAME
 import openpyxl
-from engine.core import app_log, project_record
+from engine.core import app_log, project_record, log_view, progress, env_file
 from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file
 from engine.packing_labels.horizontal_labels import generate_horizontal_labels
 import logging
@@ -56,13 +58,17 @@ import logging
 
 
 BASE_DIR = paths.BASE_DIR  # the app folder (next to the .exe when built)
+env_file.load(os.path.join(BASE_DIR, '.env'))  # this computer's settings (env_file.py), before anything reads them
 
         
 
 app_log.setup(BASE_DIR)  # terminal + logs/warehouse.log (app_log.py)
+LOG_DIR = app_log.log_dir(BASE_DIR)  # read back by the Logs page (log_view.py)
 log_pack, log_stitch, log_book = app_log.get('packing'), app_log.get('stitch'), app_log.get('book')
 log_specs = app_log.get('specs')
 log_import = app_log.get('import')
+log_sheets, log_subgroup, log_shuffler = app_log.get('sheets'), app_log.get('subgroup'), app_log.get('shuffler')
+log_app = app_log.get('app')  # anything that failed without its own handling (_failed)
 # The matching page's "finished yet?" checks and label pictures aren't worth a terminal line each
 logging.getLogger('werkzeug').addFilter(lambda r: not re.search(r'"GET /stitch/[^ ]*/(status|label/)', r.getMessage()))
 
@@ -153,9 +159,24 @@ os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 # Uploads are Excel files and courier label PDFs: anything far bigger is a mistake (or an attack), refused early
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('WAREHOUSE_MAX_UPLOAD_MB', '500')) * 1024 * 1024
 
+def _help_url(url):
+    """WAREHOUSE_HELP_URL from .env: only a web address (http or https) becomes the nav's Help link."""
+    url = str(url or '').strip()
+    return url if re.match(r'https?://[^\s"<>]+$', url, re.I) else ''
+
+
+HELP_URL = _help_url(os.environ.get('WAREHOUSE_HELP_URL'))
+
+
+@app.context_processor
+def nav_settings():
+    """What the nav bar on every page needs: the Help link (none when .env doesn't set one)."""
+    return {'help_url': HELP_URL}
+
+
 # Routes that do something (every POST, and the GET links that open a file in Windows). Any web page open in the
 # same browser could otherwise make the browser call them on 127.0.0.1 (cross-site request forgery).
-ACTION_GETS = {'open_local_file', 'open_upload_file'}
+ACTION_GETS = {'open_local_file', 'open_upload_file', 'stitch_page'}  # stitch_page: ?run= picks the run
 
 
 def script_json(value):
@@ -177,6 +198,70 @@ def same_origin_only():
     if not site and origin and origin != 'null' and origin.split('://', 1)[-1] != request.host:
         return 'Refused: this request came from another website.', 403
     return None
+
+
+# Live progress for the loading overlay (progress.py): a form posted with a progress_id is followed by
+# /api/progress/<id> while it runs. Only form posts: a JSON body is left for the route to read.
+logging.getLogger(app_log.ROOT).addHandler(progress.Handler())
+
+
+def _logs_for_error(back=None, error=None):
+    """Where a failed action lands: the Logs page opened at what went wrong (the last error this thread logged, or
+    `error` = (time, message)), with a link back to the page (`back`: this app's own address only)."""
+    error = error or app_log.last_error()
+    args = {'at': error[0], 'find': error[1][:120]} if error else {}
+    if back:
+        parts = urlsplit(back)
+        if not parts.netloc or (has_request_context() and parts.netloc == request.host):
+            local = parts.path + (f"?{parts.query}" if parts.query else '')
+            if local.startswith('/') and not local.startswith('//'):
+                args['back'] = local
+    return '/logs' + (f"?{urlencode(args)}" if args else '')
+
+
+def _wants_json():
+    """A page's script asked (fetch), not the browser for a page."""
+    return (request.path.startswith('/api/') or request.is_json or 'X-Progress-Id' in request.headers
+            or 'application/json' in request.headers.get('Accept', ''))
+
+
+@app.errorhandler(Exception)
+def _failed(e):
+    """A task behind the loading overlay (it carries a progress id) that failed without its own handling: logged with
+    its traceback, then the browser lands on the Logs page at it (a script gets the address in X-Log-Url and goes
+    there itself). Anything else keeps the usual error page (it's in the log too); 404s and the like stay as they are."""
+    if isinstance(e, HTTPException):
+        return e
+    log_app.exception("%s %s FAILED: %s", request.method, request.path, e)
+    if not progress.current():
+        return InternalServerError(original_exception=e)
+    url = _logs_for_error(back=request.referrer if request.method == 'POST' else None)
+    if _wants_json():
+        return {'error': f"That didn't work: {e}. What happened is on the Logs page.", 'log_url': url}, 500, {'X-Log-Url': url}
+    return redirect(url, code=303)
+
+
+@app.before_request
+def follow_progress():
+    app_log.forget_error()  # each request's own errors (_logs_for_error)
+    if request.method != 'POST':
+        return
+    # A page's script (the matching page's Finalise) sends it in a header; a form, as a field
+    run_id = request.headers.get('X-Progress-Id', '')
+    if not run_id and request.mimetype in ('multipart/form-data', 'application/x-www-form-urlencoded'):
+        run_id = request.form.get('progress_id', '')
+    progress.start(run_id)
+
+
+@app.teardown_request
+def end_progress(_error=None):
+    progress.finish()
+
+
+@app.route('/api/progress/<run_id>')
+def api_progress(run_id):
+    run = progress.get(run_id)
+    return run if run is not None else ({'unknown': True}, 404)
 
 # Project names go into the folder name and every file name: kept short enough that every file of a project still
 # opens in Excel (whose limit is about 218 characters for a file's full path)
@@ -296,7 +381,8 @@ def matrix():
             filename = os.path.basename(filepath)
 
             tabs = scan_excel_tabs(filepath)
-            
+            log_sheets.info("Upload %s: %d tab(s) %s", filename, len(tabs or []), tabs)
+
     return _show('matrix.html', tabs=tabs, filename=filename)
 
 @app.route('/preview', methods=['POST'])
@@ -310,7 +396,9 @@ def preview():
     previews = []
     user_inputs = {}
     blueprints = {}
-    
+    log_sheets.info("Preview %s: tabs %s", filename, selected_tabs)
+    started = time.perf_counter()
+
     for tab in all_tabs:
         safe_tab = tab.replace(" ", "_")
         
@@ -331,14 +419,20 @@ def preview():
                 # Extract the raw backend data into our dictionary, removing it from the frontend view
                 blueprints[tab] = blueprint.pop("backend_data")
                 previews.append(blueprint)
+                log_sheets.info("  tab %s (start %s, job %s, stores in %s): %d pack(s), stores to row %s", tab, start_cell,
+                                job_id_cell, store_col, len(blueprints[tab].get("pack_ranges") or []),
+                                blueprints[tab].get("last_row"))
             except Exception as e:
+                log_sheets.warning("  tab %s could not be mapped (start %s, job %s, stores in %s): %s", tab, start_cell,
+                                   job_id_cell, store_col, e)
                 previews.append({
                     "sheet_name": tab,
                     "error": f"Failed to map. Check your coordinates! ({str(e)})"
                 })
                 
     blueprints_json = json.dumps(blueprints)
-            
+    log_sheets.info("Preview ready in %.2fs", time.perf_counter() - started)
+
     return _show('matrix.html', _at='/matrix', tabs=all_tabs, previews=previews, filename=filename, user_inputs=user_inputs, blueprints_json=blueprints_json)
 
 @app.route('/generate', methods=['POST'])
@@ -375,7 +469,8 @@ def generate():
     first_tab = selected_tabs[0] if selected_tabs else None
     job_id = "UNKNOWN"
     if first_tab and first_tab in blueprints:
-        job_id = clean_file_name(blueprints[first_tab].get("raw_job_id", "UNKNOWN"))
+        # The job number itself (J476523, not J476523-01 or -001): the folder name the dashboard reads it from
+        job_id = clean_file_name(job_series(blueprints[first_tab].get("raw_job_id", "UNKNOWN")) or "UNKNOWN")
         
     # 3. Create a clean, readable timestamp (YYMMDD_HHMM)
     time_stamp = datetime.now().strftime("%y%m%d_%H%M")
@@ -397,9 +492,17 @@ def generate():
         shutil.move(filepath, new_filepath)
     
     # 6. Pass the NEW filepath and project_dir to the engine
-    file1_name, file2_name, file3_name, shared_job_warnings = generate_all_outputs(
-        new_filepath, filename, selected_tabs, user_inputs, blueprints, project_dir
-    )
+    started = time.perf_counter()
+    log_sheets.info("Packing Sheets %s: tabs %s, project '%s', packs %s", filename, selected_tabs, raw_project_name,
+                    {t: user_inputs.get(t, {}).get("selected_packs") for t in selected_tabs})
+    try:
+        file1_name, file2_name, file3_name, shared_job_warnings = generate_all_outputs(
+            new_filepath, filename, selected_tabs, user_inputs, blueprints, project_dir
+        )
+    except Exception:
+        log_sheets.exception("Packing Sheets FAILED after %.2fs", time.perf_counter() - started)
+        raise
+    log_sheets.info("Packing Sheets done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
     raw_files = [file1_name, file2_name, file3_name]
 
     # Filter the list to ONLY keep actual file names (removes None/Empty strings)
@@ -422,9 +525,17 @@ def numbered_name(folder, kind, *parts, ext=".pdf"):
 
 
 def _project_job(folder, files, project):
-    """A project's job number for the dashboard: the Packing Sheet's ('Packing Sheet_J477130-03.xlsx'), else the
-    Consignment Reference Generate Labels / Courier Import put in front of its files' names ('J477130 - Macpac -
-    Open360.csv', 'J477130 - Macpac.labelmap.json'), else the label map's own record of it. '' when there's none."""
+    """A project's job number for the dashboard, the number itself (J477130, not J477130-03: job_series)."""
+    return job_series(_project_job_text(folder, files, project))
+
+
+def _project_job_text(folder, files, project):
+    """Where the dashboard finds a project's job: the one its record keeps (a Label Shuffler project), else the Packing
+    Sheet's ('Packing Sheet_J477130-03.xlsx'), else the Consignment Reference Generate Labels / Courier Import put in
+    front of its files' names ('J477130 - Macpac - Open360.csv'), else the label map's own record of it. '' when none."""
+    kept = project_record.job(folder)
+    if kept:
+        return kept
     for f in files:
         if f.startswith("Packing Sheet_"):
             return re.sub(r' \(\d+\)$', '', f[len("Packing Sheet_"):].rsplit(".", 1)[0])
@@ -496,17 +607,67 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
             'when': "Generated " + datetime.now().strftime("%d/%m/%Y %H:%M"), 'facts': facts, 'sections': sections}
 
 
+def _label_maps(folder):
+    """The project's label maps, newest first: one per Generate run (a Packing Sheets project can have one per Final
+    file, Stage files included)."""
+    return newest_first(folder, [f for f in os.listdir(folder) if f.endswith('.labelmap.json')]) if os.path.isdir(folder) else []
+
+
+def _current_run(folder):
+    """The run (label map) the Stitch pages are on: the one picked on the Stitch page, else the newest."""
+    maps = _label_maps(folder)
+    chosen = _read_json(os.path.join(folder, CURRENT_RUN_FILE), {}).get('label_map')
+    return chosen if chosen in maps else (maps[0] if maps else None)
+
+
 def _stitch_project(project_name):
-    """(project folder, label map file name, label map) for a project that has a label map, else None."""
+    """(project folder, label map file name, label map) of the run being stitched (_current_run), else None."""
     folder = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(project_name))
-    maps = newest_first(folder, [f for f in os.listdir(folder) if f.endswith('.labelmap.json')]) if os.path.isdir(folder) else []
-    if not maps:
+    run = _current_run(folder)
+    if not run:
         return None
-    with open(os.path.join(folder, maps[0]), encoding='utf-8') as f:
-        return folder, maps[0], json.load(f)
+    with open(os.path.join(folder, run), encoding='utf-8') as f:
+        label_map = json.load(f)
+    # The run this stitch is of, kept with it to the end: picking another run meanwhile (another tab) doesn't move it
+    label_map['_run'] = run
+    return folder, run, label_map
 
 
-SESSION_FILE, MATCHES_FILE = "stitch_session.json", "stitch_matches.json"
+def _run_file(folder, kind, run=None):
+    """This run's stitching file: its session ('stitch_session - <label map>.json') or its hand matches
+    ('stitch_matches - …'), so each run of a project is stitched on its own. A project stitched before runs were kept
+    apart has one 'stitch_session.json': it belongs to the run that was newest then (_keep_earlier_session)."""
+    run = run or _current_run(folder)
+    legacy = os.path.join(folder, f"stitch_{kind}.json")
+    if not run:
+        return legacy
+    path = os.path.join(folder, f"stitch_{kind} - {run[:-len('.labelmap.json')]}.json")
+    if not os.path.exists(path) and os.path.exists(legacy) and run == _label_maps(folder)[0]:
+        return legacy
+    return path
+
+
+def _keep_earlier_session(folder, new_map):
+    """A new run in a project: the stitching files of before (one per project then) are the earlier run's, so they
+    take its name, and the Stitch pages move on to the new run."""
+    earlier = [m for m in _label_maps(folder) if m != new_map]
+    for kind in ('session', 'matches'):
+        legacy = os.path.join(folder, f"stitch_{kind}.json")
+        if os.path.exists(legacy):
+            if earlier:
+                os.replace(legacy, os.path.join(folder, f"stitch_{kind} - {earlier[0][:-len('.labelmap.json')]}.json"))
+            else:
+                os.remove(legacy)
+    if os.path.exists(os.path.join(folder, CURRENT_RUN_FILE)):
+        os.remove(os.path.join(folder, CURRENT_RUN_FILE))
+
+
+def _stitch_file(name):
+    """The app's own stitching files, kept out of the project's file lists."""
+    return name == CURRENT_RUN_FILE or (name.startswith(('stitch_session', 'stitch_matches')) and name.endswith('.json'))
+
+
+CURRENT_RUN_FILE = "stitch_run.json"  # the run picked on the Stitch page
 STITCH_JOBS = {}  # project folder -> {'state': 'running' | 'done' | 'error', ...} for the matching page's Save
 STITCH_DONE = {}  # project folder -> threading.Event, set when its background stitch finishes (status waits on it)
 
@@ -541,27 +702,29 @@ def _plan(folder, label_map, pdfs, add_unmatched=None):
     """Matches every courier label to its packing label from the labels' text and the matches saved by hand (fast:
     nothing is drawn) and keeps the result for the matching page. Returns (plan, session)."""
     started = time.perf_counter()
-    manual = _read_json(os.path.join(folder, MATCHES_FILE), {})
+    progress.stage("Reading the courier labels and matching them", 2, 10)
+    manual = _read_json(_run_file(folder, 'matches', label_map.get('_run')), {})
     log_stitch.info("Match %s: %s, %d saved hand match(es)", os.path.basename(folder),
                     ", ".join(f"{n} ({len(d) // 1024} KB)" for n, d in pdfs), len(manual))
     plan = plan_stitch(folder, label_map, pdfs, manual)
     session = match_session(label_map, plan)
-    old = _read_json(os.path.join(folder, SESSION_FILE), {})
+    old = _read_json(_run_file(folder, 'session', label_map.get('_run')), {})
     session['added_unmatched'] = old.get('added_unmatched', True) if add_unmatched is None else add_unmatched
     session['output'] = old.get('output') if old.get('output') and os.path.isfile(os.path.join(folder, old['output'])) else None
-    _write_json(os.path.join(folder, SESSION_FILE), session)
+    _write_json(_run_file(folder, 'session', label_map.get('_run')), session)
     log_stitch.info("  matched in %.2fs: %d placed, %d courier label(s) unmatched, %d packing label(s) waiting%s",
                     time.perf_counter() - started, len(plan['placed']), len(plan['unmatched']), len(plan['missing']),
                     " - complete" if plan['complete'] else '')
     return plan, session
 
 
-def _remove_old_labels(folder, keep=None):
-    """Deletes the earlier Complete Labels PDFs of a project (a new one replaces them), so the folder holds one.
+def _remove_old_labels(folder, keep=None, only=None):
+    """Deletes the earlier Complete Labels PDFs (a new one replaces them), so the folder holds one per run. only: the
+    names of this run's earlier ones, when the project has several runs (another run's are never touched).
     Returns the ones that couldn't be deleted (open in a PDF viewer)."""
     locked = []
     for f in os.listdir(folder):
-        if f.startswith("Complete Labels") and f.endswith(".pdf") and f != keep:
+        if f.startswith("Complete Labels") and f.endswith(".pdf") and f != keep and (only is None or f in only):
             try:
                 os.remove(os.path.join(folder, f))
                 log_stitch.info("  removed the earlier %s", f)
@@ -573,43 +736,83 @@ def _remove_old_labels(folder, keep=None):
 
 def _stitch_logos(folder, label_map):
     """{pack item reference: (service code, its group's logo or None)}: the service each label books, read from the
-    project's courier CSVs as saved."""
-    return {ref: (code, SERVICE_STORE.logo_for(code) if code else None) for ref, code in pack_services(folder, label_map).items()}
+    courier CSV picked on the Stitch page (_service_csv)."""
+    source = _service_csv(folder, label_map)
+    return {ref: (code, SERVICE_STORE.logo_for(code) if code else None)
+            for ref, code in pack_services(folder, label_map, source).items()}
 
 
-def _replace_courier_csv(folder, map_name, label_map, upload):
-    """Takes the courier CSV dropped on the Stitch page in place of the project's copy of the same kind (Open360 or
-    OpenFreight), so a change made outside the app shows on the labels. Returns (saved name, None) or (None, problem)."""
-    import csv as csv_module
-    raw = upload.read(20 * 1024 * 1024)
-    try:
-        text = raw.decode('utf-8-sig')
-    except UnicodeDecodeError:
-        return None, f"{upload.filename} can't be read as a CSV (save it from Excel as CSV UTF-8)."
-    rows = list(csv_module.reader(io.StringIO(text)))
-    kind = csv_kind(rows[0]) if rows else None
+CSV_UPLOAD_MAX = 20 * 1024 * 1024
+
+
+def _keep_courier_csv(folder, map_name, label_map, upload):
+    """The courier CSV attached on the Stitch page (changed after Generate, e.g. in the courier portal's file): checked
+    to be an Open360 or OpenFreight CSV with rows of this job, then kept in the project beside the others under its own
+    name (never over the project's copy) and listed in the label map. Returns (saved name, None) or (None, problem)."""
+    raw = upload.read(CSV_UPLOAD_MAX + 1)
+    if len(raw) > CSV_UPLOAD_MAX:
+        return None, f"{upload.filename} is over 20 MB: that isn't a courier CSV of one job."
+    name = unused_name(folder, secure_filename(upload.filename) or "courier.csv")
+    path = os.path.join(folder, name)
+    with open(path, 'wb') as f:  # as attached, byte for byte
+        f.write(raw)
+    kind, rows = read_courier_csv(path)
+    problem = None
     if not kind:
-        return None, f"{upload.filename} isn't an Open360 or OpenFreight courier CSV (its header row isn't one)."
+        problem = f"{upload.filename} isn't an Open360 or OpenFreight courier CSV (its header row isn't one)."
+    elif not any(pack_services(folder, {**label_map, 'consignments': []}, name).values()):
+        problem = (f"None of the rows in {upload.filename} are this job's labels (their Item References don't match): "
+                   f"attach the courier CSV of this job.")
+    if problem:
+        os.remove(path)
+        return None, problem
     files = label_map.setdefault('files', {})
-    names = list(dict.fromkeys(n for n in [files.get('courier_csv')] + list(files.get('courier_csvs') or []) + [files.get('open360_csv')] if n))
-    same = None
-    for name in names:
-        try:
-            with open(os.path.join(folder, os.path.basename(name)), encoding='utf-8-sig', newline='') as f:
-                head = next(csv_module.reader(f), [])
-        except OSError:
-            continue
-        if csv_kind(head) == kind:
-            same = os.path.basename(name)
-            break
-    if not same:  # this job had no CSV of that kind: kept beside the others and listed in the label map
-        same = secure_filename(upload.filename) or f"courier-{kind}.csv"
-        files['courier_csvs'] = list(files.get('courier_csvs') or []) + [same]
-        _write_json(os.path.join(folder, map_name), label_map)
-    with open(os.path.join(folder, same), 'w', encoding='utf-8-sig', newline='') as f:
-        f.write(text)
-    log_stitch.info("Stitch %s: courier CSV replaced by %s (%s, %d rows)", os.path.basename(folder), upload.filename, same, len(rows) - 1)
-    return same, None
+    files['courier_csvs'] = list(dict.fromkeys(list(files.get('courier_csvs') or []) + [name]))
+    _write_json(os.path.join(folder, map_name), label_map)
+    log_stitch.info("Stitch %s: courier CSV attached: %s, kept as %s (%s, %d rows)", os.path.basename(folder),
+                    upload.filename, name, CSV_KINDS[kind], len(rows) - 1)
+    return name, None
+
+
+def _run_choices(folder, current):
+    """The project's runs for the Stitch page when it has more than one: [{'map', 'pdf', 'when', 'current',
+    'stitched'}], newest first ([] for one run)."""
+    maps = _label_maps(folder)
+    if len(maps) < 2:
+        return []
+    out = []
+    for m in maps:
+        lm = _read_json(os.path.join(folder, m), {}) or {}
+        files = lm.get('files') or {}
+        out.append({'map': m, 'pdf': files.get('packing_labels_pdf') or m, 'current': m == current,
+                    'when': datetime.fromtimestamp(os.path.getmtime(os.path.join(folder, m))).strftime('%d/%m/%Y %I:%M %p').replace(' 0', ' '),
+                    'stitched': [f for f in files.get('complete_labels') or [] if os.path.isfile(os.path.join(folder, f))]})
+    return out
+
+
+def _courier_csv_choices(folder, label_map):
+    """The job's courier CSVs in the project, newest first, for 'which file has the current services' on the Stitch
+    page: [{'name', 'kind', 'saved', 'changed'}]. changed: saved after the labels were generated (edited since)."""
+    files = label_map.get('files') or {}
+    pdf = os.path.join(folder, os.path.basename(files.get('packing_labels_pdf') or ''))
+    generated = os.path.getmtime(pdf) if os.path.isfile(pdf) else None
+    out = []
+    for name in newest_first(folder, [n for n in courier_csv_names(label_map) if os.path.isfile(os.path.join(folder, n))]):
+        kind, _ = read_courier_csv(os.path.join(folder, name))
+        if kind:
+            when = os.path.getmtime(os.path.join(folder, name))
+            out.append({'name': name, 'kind': CSV_KINDS[kind],
+                        'saved': datetime.fromtimestamp(when).strftime('%d/%m/%Y %I:%M %p').replace(' 0', ' '),
+                        'changed': generated is not None and when > generated + 60})
+    return out
+
+
+def _service_csv(folder, label_map):
+    """The courier CSV whose services go on the labels: the one picked on the Stitch page (kept in the label map),
+    else the newest of the job's."""
+    names = [c['name'] for c in _courier_csv_choices(folder, label_map)]
+    chosen = (label_map.get('files') or {}).get('service_csv')
+    return chosen if chosen in names else (names[0] if names else None)
 
 
 def _finalise(folder, label_map, pdfs, add_unmatched=True):
@@ -626,10 +829,22 @@ def _finalise(folder, label_map, pdfs, add_unmatched=True):
     except Exception:
         log_stitch.exception("Stitch FAILED after %.2fs", time.perf_counter() - started)
         raise
-    locked = _remove_old_labels(folder, keep=output_name)
+    run = label_map.get('_run') or _current_run(folder)  # the run it started on, not one picked since
+    files = label_map.setdefault('files', {})
+    mine = set(files.get('complete_labels') or [])
+    locked = _remove_old_labels(folder, keep=output_name, only=None if len(_label_maps(folder)) == 1 else mine)
+    files['complete_labels'] = [output_name] + [f for f in locked if f in mine]
+    if run:
+        _write_json(os.path.join(folder, run), label_map)
+    source = _service_csv(folder, label_map)
+    moved = address_changes(folder, label_map, source) if source else []
+    for m in moved:  # the courier label is printed from the CSV, the packing label from Generate
+        log_stitch.warning("  #%s %s: the address in %s isn't the one on its packing labels. Labels: %s. CSV: %s",
+                           m['number'], ', '.join(m['stores']), source, m['labels'], m['now'])
+    result = {**result, 'service_csv': source, 'address_changes': moved}
     _record(folder, 'stitch', [output_name])
     session.update(output=output_name, added_unmatched=add_unmatched, finalised=True)
-    _write_json(os.path.join(folder, SESSION_FILE), session)
+    _write_json(_run_file(folder, 'session', run), session)
     log_stitch.info("Stitched in %.2fs -> %s: %d placed, %d courier label(s) unmatched, %d packing label(s) without one, %d duplicate(s)",
                     time.perf_counter() - started, output_name, len(result['placed']), len(result['unmatched']),
                     len(result['without_label']), len(result['duplicates']))
@@ -651,8 +866,10 @@ def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
     """_finalise in the background; the page asks /status (which waits for it)."""
     STITCH_JOBS[folder] = {'state': 'running', **extra}
     STITCH_DONE[folder] = finished = threading.Event()
+    run_id = progress.detach()  # the overlay keeps following the stitch in its thread, not this request
 
     def work():
+        progress.attach(run_id)
         try:
             output_name, result, locked = _finalise(folder, label_map, pdfs, add_unmatched)
             STITCH_JOBS[folder] = {'state': 'done', 'output': output_name, 'placed': len(result['placed']),
@@ -662,9 +879,10 @@ def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
                                    # each packing label still without a courier label, with its page in the new file
                                    'without': [m for m in result.get('missing_pages', []) if not m['not_in_csv']],
                                    'not_in_csv': [m for m in result.get('missing_pages', []) if m['not_in_csv']]}
-        except Exception as e:  # shown on the page; the traceback is in the log (_finalise)
-            STITCH_JOBS[folder] = {'state': 'error', 'error': str(e)}
+        except Exception as e:  # the page goes to the Logs page at it; the traceback is in the log (_finalise)
+            STITCH_JOBS[folder] = {'state': 'error', 'error': str(e), 'log_url': _logs_for_error()}
         finally:
+            progress.finish()
             finished.set()
     threading.Thread(target=work, daemon=True, name="stitch").start()
 
@@ -677,6 +895,15 @@ def stitch_page(project_name):
     kept = _kept_view()
     if kept:
         return kept
+    picked = os.path.basename(request.args.get('run', ''))
+    if picked:  # a run picked from the list (a project with labels from more than one Final file)
+        here = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(project_name))
+        if (STITCH_JOBS.get(here) or {}).get('state') == 'running':
+            return _show('stitch.html', project=os.path.basename(project_name),
+                         error="Still stitching the other labels of this project: pick another run when it's done.")
+        if picked in _label_maps(here):
+            _write_json(os.path.join(here, CURRENT_RUN_FILE), {'label_map': picked})
+        return redirect(url_for('stitch_page', project_name=os.path.basename(project_name)))
     found = _stitch_project(project_name)
     if not found:
         return _show('stitch.html', project=project_name, error="This project has no label map, so there's nothing to stitch to.")
@@ -685,25 +912,37 @@ def stitch_page(project_name):
     own = {(label_map.get('files') or {}).get('packing_labels_pdf')} | set(stitched)
     candidates = newest_first(folder, [f for f in os.listdir(folder) if f.lower().endswith('.pdf') and f not in own])
     slots = packing_slots(label_map)
-    session = _read_json(os.path.join(folder, SESSION_FILE), None)
+    session = _read_json(_run_file(folder, 'session'), None)
     info = {'packs': sum(1 for sl in slots if not sl['not_in_csv']),
             'boxed': sum(1 for sl in slots if sl['boxes'] > 1 and sl['box'] == 1),
             'with_code': sum(1 for pk in (p for ps in label_map.get('stores', {}).values() for p in ps) if pk.get('open360_code')),
             'left_out': len(label_map.get('not_in_courier_csv') or []),
             'latest': stitched[0] if stitched else None, 'stitched': stitched, 'candidates': candidates,
             'matching': bool(session and not session.get('complete') and (session.get('unmatched') or session.get('waiting'))
-                             and not session.get('finalised'))}
+                             and not session.get('finalised')),
+            'csvs': _courier_csv_choices(folder, label_map), 'service_csv': _service_csv(folder, label_map),
+            'runs': _run_choices(folder, map_name)}
     if request.method == 'GET':
         return _show('stitch.html', project=os.path.basename(folder), info=info)
 
+    if (STITCH_JOBS.get(folder) or {}).get('state') == 'running':  # one stitch of a project at a time
+        return _show('stitch.html', project=os.path.basename(folder), info=info,
+                     error="Still stitching this project in the background: stitch again when it's done.")
     csv_upload = request.files.get('courier_csv')
     if csv_upload and csv_upload.filename:
         if not secure_filename(csv_upload.filename).lower().endswith('.csv'):
             return _show('stitch.html', project=os.path.basename(folder), info=info,
                          error=f"{csv_upload.filename} isn't a CSV. Drop the Open360 or OpenFreight CSV of this job.")
-        _, problem = _replace_courier_csv(folder, map_name, label_map, csv_upload)
+        source, problem = _keep_courier_csv(folder, map_name, label_map, csv_upload)
         if problem:
             return _show('stitch.html', project=os.path.basename(folder), info=info, error=problem)
+    else:  # the file picked on the page as the one with the current services
+        source = os.path.basename(request.form.get('service_csv', ''))
+        source = source if source in {c['name'] for c in info['csvs']} else info['service_csv']
+    if source and source != (label_map.get('files') or {}).get('service_csv'):
+        label_map.setdefault('files', {})['service_csv'] = source  # kept: Finalise on the matching page uses it too
+        _write_json(os.path.join(folder, map_name), label_map)
+        log_stitch.info("Stitch %s: services and addresses from %s", os.path.basename(folder), source)
     pdfs = []
     for upload in request.files.getlist('labels'):
         if upload and upload.filename:
@@ -749,7 +988,7 @@ def stitch_match_page(project_name):
     if not found:
         return redirect(url_for('stitch_page', project_name=project_name))
     folder, _, label_map = found
-    session = _read_json(os.path.join(folder, SESSION_FILE), None)
+    session = _read_json(_run_file(folder, 'session'), None)
     if not session:
         return redirect(url_for('stitch_page', project_name=project_name))
     return render_template('stitch_match.html', project=os.path.basename(folder), session=session,
@@ -767,7 +1006,7 @@ def stitch_label_image(project_name, index):
     if not found:
         return "Not found", 404
     folder = found[0]
-    session = _read_json(os.path.join(folder, SESSION_FILE), {})
+    session = _read_json(_run_file(folder, 'session'), {})
     rows = session.get('unmatched') or []
     if not 0 <= index < len(rows):
         return "Not found", 404
@@ -792,7 +1031,7 @@ def stitch_label_image(project_name, index):
 
 def _valid_matches(folder, matches):
     """The hand-made matches ({courier page key: slot}) that still fit what's on the matching page."""
-    session = _read_json(os.path.join(folder, SESSION_FILE), {})
+    session = _read_json(_run_file(folder, 'session'), {})
     known_keys = {u['key'] for u in session.get('unmatched') or []}
     known_slots = {w['item_reference'] for w in session.get('waiting') or []}
     return {k: v for k, v in (matches or {}).items() if k in known_keys and v in known_slots}, session, known_keys
@@ -800,9 +1039,9 @@ def _valid_matches(folder, matches):
 
 def _save_matches(folder, matches, known_keys):
     """The page's pairs replace what was saved for its courier labels (a pair undone there is dropped too)."""
-    saved = {k: v for k, v in _read_json(os.path.join(folder, MATCHES_FILE), {}).items() if k not in known_keys}
+    saved = {k: v for k, v in _read_json(_run_file(folder, 'matches'), {}).items() if k not in known_keys}
     saved.update(matches)
-    _write_json(os.path.join(folder, MATCHES_FILE), saved)
+    _write_json(_run_file(folder, 'matches'), saved)
     for k, v in matches.items():
         log_stitch.debug("  pair %s -> %s", k, v)
 
@@ -867,7 +1106,7 @@ def stitch_add_pdfs(project_name):
     folder, _, label_map = found
     if (STITCH_JOBS.get(folder) or {}).get('state') == 'running':
         return {'error': "Still stitching - wait for it to finish."}, 409
-    session = _read_json(os.path.join(folder, SESSION_FILE), {})
+    session = _read_json(_run_file(folder, 'session'), {})
     own = {(label_map.get('files') or {}).get('packing_labels_pdf')}
     names = [os.path.basename(n) for n in session.get('files') or []]
     added = []
@@ -940,6 +1179,34 @@ def _sheet_outputs(folder_path, files=None):
     return finals, signature
 
 
+def _keep_used_copy(filepath, project_dir, filename, time_stamp, log):
+    """After Generate into a Packing Sheets project: the page's copy of the Final file goes when it's the same as the
+    project's own; when it was changed (Open Excel on the page), it's kept in the project as 'Used for labels - <Final
+    file> - <time>.xlsx', so the edits aren't lost and the project shows what the labels came from. Returns that name,
+    or None. 'Used ...' isn't read as a Final file (_sheet_outputs)."""
+    if not os.path.exists(filepath):
+        return None
+    finals, _ = _sheet_outputs(project_dir)
+    original = next((f for f in finals if secure_filename(f) == filename), None)
+    if original and filecmp.cmp(filepath, os.path.join(project_dir, original), shallow=False):
+        os.remove(filepath)
+        return None
+    name = free_name(project_dir, f"Used for labels - {os.path.splitext(original or filename)[0]} - {time_stamp}.xlsx")
+    shutil.move(filepath, os.path.join(project_dir, name))
+    log.info("  the Final file was changed on this page: kept as %s", name)
+    return name
+
+
+def _sheet_project(name):
+    """name when it's one of the Packing Sheets projects with a Final file (_sheet_projects), else '': a project name
+    sent by a form is only ever one of those, never '.', '..' or another folder, so Generate can't write into (or,
+    on a failure, clear) anything else."""
+    name = os.path.basename(str(name or '').strip())
+    if not name or name.startswith('.'):
+        return ''
+    return name if any(p['name'] == name for p in _sheet_projects()) else ''
+
+
 def _sheet_projects():
     """The Packing Sheets projects that have a Final file, newest first, for 'use a project' on Generate Labels:
     [{'name', 'label', 'finals', 'signature'}]."""
@@ -964,15 +1231,28 @@ def _courier_csvs(folder_path, files):
     kinds = {}
     for f in files:
         if f.lower().endswith('.csv'):
-            try:
-                with open(os.path.join(folder_path, f), encoding='utf-8-sig', newline='') as fh:
-                    kind = csv_kind(next(csv_module.reader(fh), []))
-            except (OSError, UnicodeDecodeError):
-                kind = None
+            kind = None
+            # The app writes UTF-8; Excel's "CSV (Comma delimited)" saves in Windows' own code page, so a CSV
+            # edited and saved in Excel is still known for what it is
+            for encoding in ('utf-8-sig', 'cp1252'):
+                try:
+                    with open(os.path.join(folder_path, f), encoding=encoding, newline='') as fh:
+                        kind = csv_kind(next(csv_module.reader(fh), []))
+                    break
+                except UnicodeDecodeError:
+                    continue
+                except OSError:
+                    break
             if kind and kind not in kinds:
                 kinds[kind] = f
     recipes = newest_first(folder_path, [f for f in files if f.endswith(RECIPE_SUFFIX)])
-    return kinds, (recipes[0] if recipes else None)
+    recipe = recipes[0] if recipes else None
+    # Several runs in a project: the newest run's own CSVs (named in its recipe), so another run's file isn't taken
+    # for this run's
+    made = (_read_json(os.path.join(folder_path, recipe), {}) or {}).get('made') if recipe else None
+    if made:
+        kinds = {k: n for k, n in made.items() if k in CSV_KINDS and n in files}
+    return kinds, recipe
 
 
 @app.route('/project/<folder_name>/courier-csv', methods=['POST'])
@@ -989,6 +1269,12 @@ def make_other_csv(folder_name):
         return "This project has no courier CSV details saved (it was made before they were kept). Generate it again.", 400
     if kind in kinds:
         return redirect(url_for('dashboard', open=os.path.basename(folder), new=kinds[kind]) + '#dashboard-section')
+    # The new CSV is made from what Generate saved. A courier CSV changed since (edited in Excel, or replaced on the
+    # Stitch page) has changes the new one won't: say so on the card first, and make it only when asked again
+    recipe_time = os.path.getmtime(os.path.join(folder, recipe))
+    changed = [f for f in kinds.values() if os.path.getmtime(os.path.join(folder, f)) > recipe_time + 2]
+    if changed and request.form.get('confirm') != '1':
+        return redirect(url_for('dashboard', open=os.path.basename(folder), stale=changed[0]) + '#dashboard-section')
     started = time.perf_counter()
     name = csv_from_recipe(folder, recipe, kind)
     # The label map lists every courier CSV, so Stitch Labels and the Open360 codes know the new one too
@@ -1056,7 +1342,7 @@ def dashboard():
                 display_files = [f for f in files if not f.endswith('.json')]
                 # Sort JSON files by creation time (newest first)
                 json_files = sorted([f for f in files if f.endswith('.json') and not f.endswith(('.labelmap.json', RECIPE_SUFFIX))
-                                     and f not in (SESSION_FILE, MATCHES_FILE, project_record.RECORD_FILE)], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
+                                     and not _stitch_file(f) and f != project_record.RECORD_FILE], key=lambda x: os.path.getctime(os.path.join(folder_path, x)), reverse=True )
 
                 
                 excel_files = [f for f in display_files if f.lower().endswith(('.xlsx', '.xls'))]
@@ -1110,7 +1396,8 @@ def dashboard():
     projects.sort(key=lambda x: x['timestamp'], reverse=True)
     
     return render_template('index.html', projects=projects, csv_kinds=CSV_KINDS,
-                           open_project=request.args.get('open', ''), new_file=request.args.get('new', ''))
+                           open_project=request.args.get('open', ''), new_file=request.args.get('new', ''),
+                           stale_csv=request.args.get('stale', ''))
 
 @app.route('/delete/<folder_name>', methods=['POST'])
 def delete_project(folder_name):
@@ -1215,9 +1502,9 @@ def setup_subgroup(project_name):
     # 2. Dynamic Fallback: If target_json is missing, grab the first available .json file in the project folder
     if not target_json or target_json == 'default':
         json_files = [f for f in os.listdir(project_dir) if f.endswith('.json') and not f.endswith(('.labelmap.json', RECIPE_SUFFIX))
-                      and f not in (SESSION_FILE, MATCHES_FILE, project_record.RECORD_FILE)]
+                      and not _stitch_file(f) and f != project_record.RECORD_FILE]
         target_json = json_files[0] if json_files else f"{safe_project}.json"
-        print(f"[DEBUG] No target_json specified. Defaulting to: {target_json}")
+        log_subgroup.debug("Sub-Group %s: no details file chosen, using %s", safe_project, target_json)
     metadata_path = os.path.join(project_dir, target_json)
     
     
@@ -1259,18 +1546,22 @@ def setup_subgroup(project_name):
             if tab_instructions["packs"]:
                 subgroup_instructions[tab] = tab_instructions
                 
-        # --- DEBUG PRINT ---
-        print("\n--- SUBGROUP INSTRUCTIONS ---")
-        pprint.pprint(subgroup_instructions)
-        print("-----------------------------\n")
+        started = time.perf_counter()
+        log_subgroup.info("Sub-Group %s from %s: %s", safe_project, target_json,
+                          "; ".join(f"tab {t} (item row {i['item_row']}): " +
+                                    ", ".join(f"pack {p} items {' '.join(f'{a}-{b}' for a, b in r)}" for p, r in i['packs'].items())
+                                    for t, i in subgroup_instructions.items()) or "nothing chosen")
 
-        # 3. Trigger the Engine (We will build this function next!)
+        # 3. Trigger the Engine
         try:
             before = set(os.listdir(project_dir))
             execute_subgroups(project_dir, metadata, subgroup_instructions)
-            _record(project_dir, 'sub_group', sorted(set(os.listdir(project_dir)) - before),
+            made = sorted(set(os.listdir(project_dir)) - before)
+            _record(project_dir, 'sub_group', made,
                                   tabs=sorted(subgroup_instructions) if isinstance(subgroup_instructions, dict) else None)
+            log_subgroup.info("Sub-Group done in %.2fs: %s", time.perf_counter() - started, ", ".join(made) or "no new files")
         except SubgroupValidationError as e:
+            log_subgroup.warning("Sub-Group stopped: %s", e)
             return render_template('sub-group.html', project_name=project_name, metadata=metadata,
                                    metadata_json=json.dumps(metadata), target_json=target_json,
                                    error=str(e))
@@ -1295,6 +1586,11 @@ def pdf_engine():
             excel_file = request.files.get('excel_file')
             existing_project = request.form.get('existing_project')
             new_project = _project_name(request.form.get('new_project'), '') or None
+            job_number = re.sub(r'\s+', '', request.form.get('job_number', '')).upper()
+            if new_project and not JOB_NUMBER.match(job_number):
+                # The dashboard shows each project's job number: a new project has nothing else to read it from
+                return _show('pdf.html', **_shuffler_step1(), new_project=new_project, job_number=job_number,
+                             error="Type the job number of this project, e.g. J476523.")
             time_stamp = datetime.now().strftime("%y%m%d_%H%M")
             safe_project_name = clean_file_name(new_project)
             final_folder_name = f"{safe_project_name}_{time_stamp}"
@@ -1308,7 +1604,10 @@ def pdf_engine():
             # --- THE FIX: Point directly to the final Project Folder ---
             project_folder = os.path.join(PROJECTS_FOLDER, os.path.basename(project_name))
             os.makedirs(project_folder, exist_ok=True)
-            
+            if new_project:
+                project_record.set_job(project_folder, job_series(job_number))
+                log_shuffler.info("New project %s, job %s", os.path.basename(project_folder), job_series(job_number))
+
             excel_path = None
             
             # Scenario A: User uploaded a new file (Save it directly to the project folder)
@@ -1384,6 +1683,8 @@ def pdf_engine():
 
                 projects_json = script_json(projects_info)
 
+                log_shuffler.warning("Signature Links %s: duplicate store names: %s", os.path.basename(excel_path),
+                                     "; ".join(map(str, duplicate_errors)))
                 # Re-render Step 1 with duplicate errors, plus enough context for the
                 # "Open Excel File" / "Recheck File" buttons to target the exact file.
                 return _show('pdf.html',
@@ -1394,6 +1695,8 @@ def pdf_engine():
                                        duplicate_project_name=os.path.basename(project_folder),
                                        duplicate_excel_filename=os.path.basename(excel_path))
                 
+            log_shuffler.info("Signature Links %s for %s: %s", os.path.basename(excel_path), project_name,
+                              {t: len(p) for t, p in tabs_data.items()})
             return _show('pdf.html', step=2, tabs_data=tabs_data, excel_path=excel_path, project_name=project_name, installer_tabs=installer_tabs)
             
         # STEP 2: Process the PDFs and Go to Success Screen
@@ -1421,13 +1724,15 @@ def pdf_engine():
                 return f"Could not load Excel file for mapping: {e}", 500
 
             generated_files = []
-
-            
-                # Loop through ONLY the files that were actually uploaded
-            for key, file in request.files.items():
-                
-                # THE FIX: Look for the '---' separator
-                if key.startswith('pdf---') and file and file.filename != '':
+            # Only the PDFs actually attached; each is a step of the overlay's bar (progress.py)
+            uploads = [(k, f) for k, f in request.files.items() if k.startswith('pdf---') and f and f.filename]
+            started = time.perf_counter()
+            log_shuffler.info("Shuffle %s: %d PDF(s) with %s", os.path.basename(project_name), len(uploads),
+                              os.path.basename(excel_path or ''))
+            for done, (key, file) in enumerate(uploads):
+                progress.stage(f"Shuffling {file.filename} ({done + 1} of {len(uploads)})",
+                               5 + 90 * done / len(uploads), 5 + 90 * (done + 1) / len(uploads))
+                if key.count('---') == 2:  # pdf---<tab>---<pack>
                     parts = key.split('---')
                     
                     if len(parts) == 3:
@@ -1438,7 +1743,7 @@ def pdf_engine():
                         
                         # Failsafe: Prevent crashes if the tab name is completely invalid
                         if df is None:
-                            print(f"[ERROR] Could not find sheet '{tab_name}' in Excel data.")
+                            log_shuffler.warning("  %s: no tab '%s' in the Signature Links file: skipped", file.filename, tab_name)
                             continue 
                         
                         # 1. Build the mapping for THIS specific tab and pack
@@ -1446,7 +1751,8 @@ def pdf_engine():
                         
                         # Failsafe: Prevent KeyErrors if the pack name isn't found
                         if pack_name not in df.columns:
-                            print(f"[ERROR] Pack '{pack_name}' not found in Tab '{tab_name}'.")
+                            log_shuffler.warning("  %s: no pack '%s' in tab '%s' of the Signature Links file: skipped",
+                                                 file.filename, pack_name, tab_name)
                             continue
                             
                         for index, row in df.iterrows():
@@ -1483,6 +1789,8 @@ def pdf_engine():
                         
                         # Log it for the download screen
                         generated_files.append(final_filename)
+                        log_shuffler.info("  %s (tab %s, pack %s%s) -> %s", file.filename, tab_name, pack_name,
+                                          ", divider sheets" if add_dividers_flag else "", final_filename)
 
             try:
                 shutil.rmtree(temp_dir)
@@ -1491,9 +1799,17 @@ def pdf_engine():
 
             if generated_files:
                 _record(project_folder, 'shuffler', generated_files)
+            log_shuffler.info("Shuffle done in %.2fs: %d file(s) in %s", time.perf_counter() - started,
+                              len(generated_files), os.path.basename(project_folder))
             return _show('pdf.html', step=3, project_name=project_name, generated_files=generated_files)
 
-    # GET REQUEST: Fetch existing projects AND look for their Signature links files
+    chosen = os.path.basename(request.args.get('project', ''))  # from the dashboard's Label Shuffler button
+    step1 = _shuffler_step1()
+    return _show('pdf.html', **step1, chosen=chosen if chosen in step1['existing_projects'] else '')
+
+
+def _shuffler_step1():
+    """Step 1 of the Label Shuffler: the projects to pick from, with each one's Signature Links file."""
     projects_info = {}
     if os.path.exists(PROJECTS_FOLDER):
         for folder_name in os.listdir(PROJECTS_FOLDER):
@@ -1507,10 +1823,7 @@ def pdf_engine():
                         break
                 projects_info[folder_name] = sig_file
                 
-    projects_json = script_json(projects_info)
-    chosen = os.path.basename(request.args.get('project', ''))  # from the dashboard's Label Shuffler button
-    return _show('pdf.html', step=1, existing_projects=list(projects_info.keys()), projects_json=projects_json,
-                 chosen=chosen if chosen in projects_info else '')
+    return {'step': 1, 'existing_projects': list(projects_info.keys()), 'projects_json': script_json(projects_info)}
 
 
 # Make sure you have an upload folder configured in your app
@@ -1695,25 +2008,35 @@ def _import_csvs(project_dir, reference, project, csv_formats, cartons, consignm
     items = open360_items(cartons, consignments)
     export, _ = clean_export(_export_values(form))
     csv_files, made = [], {}
+    wanted = [k for k in ('open360', 'openfreight') if k in csv_formats]
+    # The overlay's bar (progress.py): each CSV a step of 20 % … 90 %, then the details for the other CSV
+    step = lambda kind, n: progress.stage(f"Writing the {CSV_KINDS[kind]} CSV ({len(cartons)} carton(s), "
+                                          f"{len(consignments)} consignment(s))", 20 + 70 * n / len(wanted), 20 + 70 * (n + 1) / len(wanted))
     if 'open360' in csv_formats:
-        name = free_name(project_dir, f"{base_name} - Open360.csv")
+        step('open360', wanted.index('open360'))
+        name = unused_name(project_dir, f"{base_name} - Open360.csv")
         with app_log.step(log, f"  Open360 CSV {name}"):
             write_open360_csv(os.path.join(project_dir, name), items, reference, item_refs=refs)
         log.info("    %d row(s), Shipment Reference %s", len(refs), reference)
         csv_files.append(name)
         made['open360'] = name
     if 'openfreight' in csv_formats:
-        name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
+        step('openfreight', wanted.index('openfreight'))
+        name = unused_name(project_dir, f"{base_name} - OpenFreight.csv")
         with app_log.step(log, f"  OpenFreight CSV {name}"):
             write_courier_csv(os.path.join(project_dir, name), cartons, consignments, reference, fixed, export=export)
             abroad = sum(1 for c in consignments if (c['destination'].get('country') or 'AU').upper() != 'AU')
             if abroad:
                 log.info("    export details on %d consignment(s) outside Australia: %s", abroad, export)
+        log.info("    %d row(s), Reference %s", len(cartons), reference)
         csv_files.append(name)
         made['openfreight'] = name
     # What both CSVs are made from, so the other one can be made later from the dashboard
-    write_csv_recipe(os.path.join(project_dir, free_name(project_dir, base_name + RECIPE_SUFFIX)), base_name, reference,
+    progress.stage("Saving the details for the other courier CSV", 90, 99)
+    recipe = unused_name(project_dir, base_name + RECIPE_SUFFIX)
+    write_csv_recipe(os.path.join(project_dir, recipe), base_name, reference,
                      reference, fixed, export, cartons, consignments, items, refs, None, made)
+    log.info("  details for the other courier CSV: %s", recipe)
     return csv_files
 
 
@@ -1958,7 +2281,7 @@ def _reference_for(dest, edit=None, here=None):
       kept      the user chose to keep this exact address as is (in this preview, or before in the book)
       ok / note / mismatch / none   address_reference.assess(), with 'soft' when the address is saved in the book
                 (not verified): the official data's view is then only a note, the book's address may well be right"""
-    if not address_reference.available() or not (dest.get('postcode') or dest.get('suburb')):
+    if not address_reference.available() or not any(dest.get(k) for k in ('postcode', 'suburb', 'line1', 'line2')):
         return {'level': 'none', 'message': '', 'fields': {}, 'options': []}
     try:
         here = ADDRESS_BOOK.at_address(dest) if here is None else here
@@ -2149,6 +2472,26 @@ def address_book_page():
 # --- BACK UP OR MOVE THE APP'S DATA (data_transfer.py) ---
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 TRANSFER_UPLOADS = os.path.join(DATA_DIR, 'transfer_uploads')
+
+
+# ---------- Logs: what the app is doing and has done, from its own log file (log_view.py) ----------
+# Read-only GETs: nothing here changes anything.
+
+@app.route('/logs')
+def logs_page():
+    return render_template('logs.html')
+
+
+@app.route('/api/logs')
+def api_logs():
+    a = request.args
+    if a.get('since') and a.get('since') == log_view.version(LOG_DIR):
+        return {'unchanged': True}  # the page asks every few seconds: nothing new, nothing read
+    before, limit = a.get('before', ''), a.get('limit', '')
+    return log_view.view(LOG_DIR, area=a.get('area', ''), show=a.get('show', 'all'), q=a.get('q', '')[:200],
+                         day=a.get('day', 'today'), limit=min(int(limit), 500) if limit.isdigit() else 150,
+                         before=int(before) if before.isdigit() else None,
+                         focus_at=a.get('at') or None, focus_text=a.get('find', '')[:200])
 
 
 @app.route('/data-transfer')
@@ -2675,11 +3018,13 @@ def _distribution_page(mode):
     horizontal_mode = mode == 'horizontal'
     log = log_import if courier_mode else log_pack
     # Started from a Packing Sheets project: every step keeps it, and Generate saves into it
-    into = os.path.basename(request.form.get('from_project', '')) if horizontal_mode and request.method == 'POST' else ''
-    into = into if into and os.path.isdir(os.path.join(app.config['UPLOAD_FOLDER'], into)) else ''
+    into = _sheet_project(request.form.get('from_project')) if horizontal_mode and request.method == 'POST' else ''
     into_label = (lambda p, _, j: f"{j} | {p}" if j else p)(*re.sub(r'_\d{6}_\d{4}$', '', into).partition('_Job-')) if into else ''
 
     def show(**context):
+        if context.get('page_error'):  # what the run did before it stopped, and where: shown under the message
+            context.setdefault('run_log', progress.lines_now())
+            context.setdefault('run_failure', next((f for f in (log_view.stopped_at(x.get('more')) for x in context['run_log']) if f), None))
         context.setdefault('from_project', into)
         context.setdefault('from_project_label', into_label if context['from_project'] == into else '')
         return _show('packing_labels.html', mode=mode, **context)
@@ -2690,9 +3035,12 @@ def _distribution_page(mode):
     # or 'Use a Packing Sheets project' on this page): copied in as the upload, so the project itself stays as it is
     if (horizontal_mode and request.form.get('from_project') and not request.form.get('filename')
             and not (request.files.get('file') and request.files['file'].filename)):
-        project = os.path.basename(request.form['from_project'])
+        project = _sheet_project(request.form['from_project'])
+        if not project:
+            return show(page_error="That Packing Sheets project isn't on the dashboard any more: pick one from the list.",
+                        sheet_projects=_sheet_projects())
         folder = os.path.join(app.config['UPLOAD_FOLDER'], project)
-        finals, signature = _sheet_outputs(folder) if os.path.isdir(folder) else ([], None)
+        finals, signature = _sheet_outputs(folder)
         final = os.path.basename(request.form.get('final_file', '')) or (finals[0] if len(finals) == 1 else '')
         if final not in finals:
             return show(page_error="Choose the project's Final file to make the labels from.", sheet_projects=_sheet_projects())
@@ -2800,8 +3148,8 @@ def _distribution_page(mode):
                 total_stores = len(set(g['store_name'] for g in pack_groups.values()))
                 log.info("  tab %s (header row %d): %d packs, %d stores, last row %s, %d warning(s)",
                               tab, header_row, total_packs, total_stores, last_row, len(warnings))
-                for w in warnings:
-                    log.debug("    warning: %s", w)
+                for w in warnings:  # each on its own line, where it is and what it is, for the Logs page
+                    (log.warning if w.get('major') else log.info)("    needs a look: %s", issue_text(w))
                 if first_tab_groups is None and pack_groups:
                     first_tab_groups = pack_groups
 
@@ -2816,8 +3164,12 @@ def _distribution_page(mode):
                     'error': None
                 })
             except PackCheckError as e:
-                log.warning("  tab %s: %d problem(s) stop it: %s", tab, len(e.issues),
-                                 "; ".join(f"{i.get('rows', '')} {i.get('col', '')} {i.get('text', '')}".strip() for i in e.issues[:5]))
+                log.warning("  tab %s: %d problem(s) stop it from generating; fix them in the Excel file, then Update Previews",
+                            tab, len(e.issues))
+                for i in e.issues:  # every one, where it is: the Logs page lists them under the preview
+                    log.warning("    %s", issue_text(i))
+                for w in e.warnings:
+                    log.info("    needs a look: %s", issue_text(w))
                 previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings, 'mapping': mapping})
             except ValueError as e:  # a column that can't be found: picked in the Column mapping
                 log.warning("  tab %s: %s", tab, e)
@@ -2956,6 +3308,7 @@ def _distribution_page(mode):
         close_if_open_elsewhere(filepath)
 
         project_dir = None
+        project_had = None  # into a Packing Sheets project: the files it had, so a failure takes back only this run's
         started = time.perf_counter()
         tab_of = {}  # pack key -> its tab's number among the selected tabs, for the Item Reference ('01T2QWXK Store')
         pack_notes = {}  # horizontal: (tab number, pack number) -> the warnings about that pack, for its audit page
@@ -2963,7 +3316,9 @@ def _distribution_page(mode):
         try:
             # 1. Parse Data
             sheet_warnings = []
+            progress.stage("Reading the Excel file", 2, 15)  # the loading overlay's bar (progress.py)
             for tab in selected_tabs:
+                progress.tick(selected_tabs.index(tab), len(selected_tabs), f"Reading tab {tab}")
                 header_row = int(user_inputs[tab]['header_row'])
                 pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode,
                                                             selected_tabs.index(tab) + 1)
@@ -2994,6 +3349,7 @@ def _distribution_page(mode):
                 serials = {key: g['serial'] for key, g in combined_pack_groups.items()}
 
             # 2. Courier consignments, checked before anything is written or moved
+            progress.stage("Checking the consignments and addresses", 15, 20)
             fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
             reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
             consignments, cartons, courier_warnings = build_consignments(combined_pack_groups, _consignment_edits(request.form),
@@ -3020,16 +3376,12 @@ def _distribution_page(mode):
             signature_used = _signature_for(filepath) if horizontal_mode else None
             if into:
                 # From a Packing Sheets project: everything goes into that project, which already has the Final file and
-                # its Signature Links (the copies made for this page go). A new label map starts a new stitching session.
+                # its Signature Links. Nothing of the project is changed until the run has worked (see the end), and a
+                # failure takes back only the files this run wrote: the project itself is never removed.
                 final_folder_name = into
                 project_dir = os.path.join(app.config['UPLOAD_FOLDER'], into)
+                project_had = set(os.listdir(project_dir))
                 safe_project_name = clean_file_name(re.sub(r'_\d{6}_\d{4}$', '', into).split('_Job-')[0])
-                for name in (SESSION_FILE, MATCHES_FILE):
-                    if os.path.exists(os.path.join(project_dir, name)):
-                        os.remove(os.path.join(project_dir, name))
-                for path in (filepath, _signature_path(filepath)):
-                    if os.path.exists(path):
-                        os.remove(path)
                 log.info("  into project %s", into)
             else:
                 final_folder_name = f"{safe_project_name}_{time_stamp}"
@@ -3051,7 +3403,7 @@ def _distribution_page(mode):
             else:
                 # 5. Generate the PDF with Custom Layout
                 # 'Packing Labels Only 1 - J477161 - Lux Test 30 - 261005_1732.pdf' (stitched: 'Complete Labels 1 - ...')
-                output_pdf_name = free_name(project_dir, numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp))
+                output_pdf_name = unused_name(project_dir, numbered_name(project_dir, "Packing Labels Only", reference, safe_project_name, time_stamp))
                 output_pdf = os.path.join(project_dir, output_pdf_name)
                 # Each label shows who and where its consignment goes (after address-book fills and ✏️ edits),
                 # exactly as in the preview, not the raw Excel text. Every pack gets its label, sent or not.
@@ -3084,39 +3436,46 @@ def _distribution_page(mode):
                 report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
                                             ref_issues)
+                progress.stage("Drawing the packing labels", 20, 90)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
                     if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
                         page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
                                                                report, serials, add_dividers=request.form.get('code_dividers') == '1',
                                                                group_by_code=request.form.get('label_grouping', 'code') != 'store',
-                                                               notes=pack_notes)
+                                                               notes=pack_notes, on_progress=progress.tick)
                     else:
                         page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
                                                             serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()},
-                                                            tab_notes=tab_notes)
+                                                            tab_notes=tab_notes, on_progress=progress.tick)
                 log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
 
                 # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
                 # match courier labels back to packing label pages. Both files carry the same Item References
                 # ('01T1QWXK Store': serial + the row's own code), so courier labels booked from either stitch by code.
+                progress.stage("Writing the courier CSVs and the label map", 90, 99)
                 base_name = f"{reference} - {safe_project_name}" if reference else safe_project_name
-                map_name = free_name(project_dir, f"{base_name}.labelmap.json")
+                map_name = unused_name(project_dir, f"{base_name}.labelmap.json")  # never over an earlier run's
                 items = open360_items(cartons, consignments, tab_of, serials)
-                if horizontal_mode:  # '03T1P2 Chadstone': the serial is the code Stitch Labels matches
-                    open360_refs = [(f"{serials[x['pack_key']]} {x['store']}", serials[x['pack_key']]) for x in cartons]
+                if horizontal_mode:
+                    # '03T1P2QWXK Chadstone': the serial printed on the packing label (store number, T + tab, P + pack)
+                    # and a random code of this Generate, as vertical files have: serial + code is what Stitch Labels
+                    # matches, so a courier label of another job (whose serials repeat) can't land on this one
+                    codes = unique_codes(len(cartons))
+                    open360_refs = [(f"{serials[x['pack_key']]}{code} {x['store']}", f"{serials[x['pack_key']]}{code}")
+                                    for x, code in zip(cartons, codes)]
                 else:
                     open360_refs = open360_item_references(items)
                 ref_of = {x['item_reference']: r[0] for x, r in zip(cartons, open360_refs)}
                 csv_files = []
                 export, export_problems = clean_export(_export_values(request.form))
                 if 'open360' in csv_formats:
-                    open360_name = free_name(project_dir, f"{base_name} - Open360.csv")
+                    open360_name = unused_name(project_dir, f"{base_name} - Open360.csv")
                     with app_log.step(log, f"  Open360 CSV {open360_name}"):
                         write_open360_csv(os.path.join(project_dir, open360_name), items, shipment_reference, item_refs=open360_refs)
                     csv_files.append(open360_name)
                     log.info("    %d row(s), Shipment Reference %s", len(open360_refs), shipment_reference)
                 if 'openfreight' in csv_formats:
-                    openfreight_name = free_name(project_dir, f"{base_name} - OpenFreight.csv")
+                    openfreight_name = unused_name(project_dir, f"{base_name} - OpenFreight.csv")
                     with app_log.step(log, f"  OpenFreight CSV {openfreight_name}"):
                         write_courier_csv(os.path.join(project_dir, openfreight_name), cartons, consignments, reference, fixed,
                                           item_refs=ref_of, export=export)
@@ -3127,7 +3486,7 @@ def _distribution_page(mode):
                 for x, r in zip(cartons, open360_refs):
                     log.debug("    %s -> %s", x['item_reference'], r)
                 # What both CSVs are made from, so the other one can be made later from the dashboard
-                write_csv_recipe(os.path.join(project_dir, free_name(project_dir, base_name + RECIPE_SUFFIX)), base_name,
+                write_csv_recipe(os.path.join(project_dir, unused_name(project_dir, base_name + RECIPE_SUFFIX)), base_name,
                                  reference, shipment_reference, fixed, export, cartons, consignments, items, open360_refs,
                                  ref_of, {k: n for k, n in zip([f for f in CSV_FORMATS if f in csv_formats], csv_files)})
                 left_out = [x for x in all_cartons if x not in cartons]
@@ -3140,8 +3499,17 @@ def _distribution_page(mode):
                                  'report_pages': page_info.get('report_pages', 0)})
                 log.info("  label map %s", map_name)
                 output_files = [output_pdf_name] + csv_files
+            used_copy = None
+            if into:
+                # It worked: a new label map starts a new stitching session, and the copy of the Final file the labels
+                # were made from stays with them when it was changed (edited with Open Excel on this page), so the
+                # project shows what the labels came from; an unchanged copy goes
+                _keep_earlier_session(project_dir, map_name)
+                used_copy = _keep_used_copy(filepath, project_dir, filename, time_stamp, log)
+                if used_copy:
+                    output_files.append(used_copy)
             _record(project_dir, 'courier_import' if courier_mode else 'labels',
-                                  output_files + ([map_name] if not courier_mode else []) + [filename],
+                                  output_files + ([map_name] if not courier_mode else []) + ([] if into else [filename]),
                                   **({} if courier_mode else {'layout': 'horizontal' if horizontal_mode else 'vertical',
                                                               'from_final_file': bool(into)}))
             record_service_usage(SERVICE_USAGE_FILE, consignments, SERVICE_STORE.codes())
@@ -3171,13 +3539,28 @@ def _distribution_page(mode):
 
         except Exception as e:
             log.exception("Generate FAILED after %.2fs (project folder undone)", time.perf_counter() - started)
+            for i in getattr(e, 'issues', None) or []:  # a check that stopped it: each problem, where it is
+                log.warning("    %s", issue_text(i))
+            failed_at = app_log.last_error()
             # Undo a half-made project so the upload is back where it was and Generate can be retried
-            if project_dir and os.path.isdir(project_dir):
+            if project_had is not None and os.path.isdir(project_dir):
+                # An existing Packing Sheets project: only what this run wrote goes; the project and the copy being
+                # worked on stay, so Generate can be retried
+                for name in set(os.listdir(project_dir)) - project_had:
+                    try:
+                        os.remove(os.path.join(project_dir, name))
+                    except OSError:
+                        log.warning("  could not take back %s from %s", name, into)
+            elif project_dir and os.path.isdir(project_dir):
                 moved = os.path.join(project_dir, filename)
                 if os.path.exists(moved) and not os.path.exists(filepath):
                     shutil.move(moved, filepath)
                 shutil.rmtree(project_dir, ignore_errors=True)
-            return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
+            page = show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, page_error=str(e))
+            if isinstance(e, (PackCheckError, ValueError)):
+                return page  # a check of the file or the choices (a service code, a column): fixed on this page
+            # Anything else lands on the Logs page at the failure; its Back link is this page as it was, to try again
+            return redirect(_logs_for_error(back=getattr(page, 'location', None), error=failed_at), code=303)
 
     return show()
 

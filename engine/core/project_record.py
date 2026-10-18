@@ -58,6 +58,27 @@ def record(folder, feature, files=(), seed=None, **details):
         pass
 
 
+def set_job(folder, job):
+    """The project's job number ('J476523'), when it can't be read from its files (a Label Shuffler project made
+    from a name): the dashboard shows it (app.py _project_job)."""
+    try:
+        with _lock:
+            data = read(folder) or {'version': 1, 'features': {}, 'history': []}
+            data['job'] = job
+            path = os.path.join(folder, RECORD_FILE)
+            with open(path + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+
+
+def job(folder):
+    """The job number the record keeps, or ''."""
+    data = read(folder)
+    return str((data or {}).get('job') or '')
+
+
 def features(folder):
     """The features the record names, or None when there's no record."""
     data = read(folder)

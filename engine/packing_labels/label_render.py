@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from collections import Counter
 
@@ -70,13 +71,20 @@ def compress_label(img):
     return zlib.compress(img.tobytes(), 6)
 
 
-def _render_pages(pdf_paths, jobs, region_wh):
-    """[(width, height, flate)] for jobs [(file name, 1-based page)], in order."""
+def _render_pages(pdf_paths, jobs, region_wh, progress_path=None):
+    """[(width, height, flate)] for jobs [(file name, 1-based page)], in order. progress_path: a worker writes how
+    many it has done there after each label, so the app can show the count on the loading overlay."""
     docs, out = {}, []
     for name, page in jobs:
         doc = docs.get(name) or docs.setdefault(name, fitz.open(pdf_paths[name]))
         img = turn_for(*region_wh, render_label(doc[page - 1]))
         out.append((img.width, img.height, compress_label(img)))
+        if progress_path:
+            try:
+                with open(progress_path, 'w') as f:
+                    f.write(str(len(out)))
+            except OSError:
+                pass
     for doc in docs.values():
         doc.close()
     return out
@@ -90,10 +98,19 @@ def worker_count(labels):
     return max(2, min(8, (os.cpu_count() or 2) - 1, math.ceil(labels / 16)))
 
 
-def render_many(courier_pdfs, jobs, region_wh, app_dir):
+def _count(path):
+    try:
+        with open(path) as f:
+            return int(f.read() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def render_many(courier_pdfs, jobs, region_wh, app_dir, on_progress=None):
     """Renders jobs [(file name, 1-based page)] of courier_pdfs [(name, bytes)] in worker processes: [(width, height,
     flate)] in the jobs' order, or None when that isn't possible (then render here). app_dir: the folder holding the
-    engine package, where the workers start."""
+    engine package, where the workers start. on_progress(done, total): the labels the workers have done so far, a few
+    times a second, for the loading overlay."""
     n = worker_count(len(jobs))
     if not n:
         return None
@@ -110,20 +127,25 @@ def render_many(courier_pdfs, jobs, region_wh, app_dir):
             spec = os.path.join(tmp, f"job_{i}.json")
             with open(spec, 'w', encoding='utf-8') as f:
                 json.dump({'pdfs': pdf_paths, 'jobs': chunk, 'region': list(region_wh),
-                           'out': os.path.join(tmp, f"out_{i}.bin")}, f)
+                           'out': os.path.join(tmp, f"out_{i}.bin"), 'progress': os.path.join(tmp, f"done_{i}.txt")}, f)
             procs.append(subprocess.Popen(
                 [sys.executable, "-m", "engine.packing_labels.label_render", spec], cwd=app_dir,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)))
+        # While they work: their counts added up for the overlay, until all are done or the time is up
+        deadline = time.time() + WORKER_TIMEOUT
+        while any(p.poll() is None for p in procs) and time.time() < deadline:
+            if on_progress:
+                on_progress(sum(_count(os.path.join(tmp, f"done_{i}.txt")) for i in range(len(procs))), len(jobs))
+            time.sleep(0.3)
         results, failed = [], []
         for i, (proc, chunk) in enumerate(zip(procs, chunks)):
-            try:
-                _, err = proc.communicate(timeout=WORKER_TIMEOUT)
-            except subprocess.TimeoutExpired:
+            if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
                 failed.append(f"worker {i + 1} took too long")
                 continue
+            _, err = proc.communicate()
             if proc.returncode != 0:
                 failed.append(f"worker {i + 1}: {err.decode(errors='replace').strip().splitlines()[-1:]}")
                 continue
@@ -158,4 +180,5 @@ def _read_results(path):
 if __name__ == '__main__':  # a worker: python -m engine.packing_labels.label_render JOBFILE
     with open(sys.argv[1], encoding='utf-8') as f:
         spec = json.load(f)
-    _write_results(spec['out'], _render_pages(spec['pdfs'], [tuple(j) for j in spec['jobs']], spec['region']))
+    _write_results(spec['out'], _render_pages(spec['pdfs'], [tuple(j) for j in spec['jobs']], spec['region'],
+                                              spec.get('progress')))

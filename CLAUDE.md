@@ -10,19 +10,23 @@ Full plain-language guide to every file: `docs/CODE_GUIDE.md`. Feature list: `RE
 - `python app.py` → http://127.0.0.1:5001 (`set WAREHOUSE_DEBUG=1` for Flask's reloader/debugger; never in production)
 - `pip install -r requirements.txt -r requirements-dev.txt`, then `python -m pytest -q` (runs without Excel)
 - `python tests/fixtures.py OUT_DIR` writes a sample horizontal Final file + Signature Links file to try by hand
+- `autostart.py`: Windows logon task that pulls main (only when on main, clean, fast-forward), pip installs when
+  requirements.txt changed, and runs app.py in the background (`install` / `status` / `restart` / `stop` / `uninstall`)
 - The hook in `.claude/settings.json` lints each edited `.py` and runs the tests; fix what it reports before moving on
 
 ## Where things are
 Code is grouped by feature under `engine/`; `app.py` (routes) stays at the top and imports from it
 (`from engine.courier.courier_export import …`). Paths to `data/` and the app folder come from `engine/core/paths.py`.
-- `engine/core/` shared: `core_math.py`, `app_log.py`, `paths.py`, `data_transfer.py` (Back up & Move).
+- `engine/core/` shared: `core_math.py`, `app_log.py`, `paths.py`, `data_transfer.py` (Back up & Move), `log_view.py`
+  (the Logs page reads `logs/warehouse.log` as runs), `progress.py` (the loading overlay's bar: `progress.stage` / `tick`),
+  `env_file.py` (loads `.env`: `WAREHOUSE_HELP_URL` -> nav Help link), `project_record.py` (`project_record.json`: tools used, job).
 - `engine/packing_sheets/matrix_engine.py` Packing Sheets (xlwings). Writes Final file (a "Code for Pack <name>" column at the start of
   each selected pack), Packing Sheet, and Signature Links (a tab of store codes per tab, `Divider Barcodes`,
   `Label Plugin`). `engine/packing_sheets/subgroup_engine.py` adds "Code for pack <name>: 1-5" columns.
 - `engine/label_shuffler/pdf_engine.py` Label Shuffler (codes A, B … Z, AA order, divider sheets, audit report).
 - `engine/packing_labels/packing_label_generator.py` vertical files → packing labels (`parse_packing_data`, `generate_packing_labels`).
 - `engine/packing_labels/horizontal_distribution.py` + `horizontal_labels.py` horizontal files → the same pack groups → labels in
-  packing-sheet order (audit page per pack, divider per code). Item Reference `03T1P2 Store`. Each label starts
+  packing-sheet order (audit page per pack, divider per code). Item Reference `03T1P2QWXK Store` (serial + this Generate's code). Each label starts
   with a box per packing-sheet code (`code_cells`: header in the job number's place, code in the quantity's).
 - `engine/courier/`: `courier_import.py`, `courier_export.py` consignments and the Open360 / OpenFreight CSVs;
   `packing_specs.py` sizes and weights per Packing Spec.

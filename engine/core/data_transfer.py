@@ -177,8 +177,11 @@ def describe_zip(data):
 
 def _backup(data_dir, book, keys, services=None):
     """Copies of everything an import is about to change, in data/backups/before-import-<time>/."""
-    folder = os.path.join(data_dir, 'backups', f"before-import-{datetime.now():%Y%m%d-%H%M%S}")
-    os.makedirs(folder, exist_ok=True)
+    base = os.path.join(data_dir, 'backups', f"before-import-{datetime.now():%Y%m%d-%H%M%S}")
+    folder, n = base, 2
+    while os.path.exists(folder):  # two imports in the same second: each keeps its own copies
+        folder, n = f"{base}-{n}", n + 1
+    os.makedirs(folder)
     for key in keys:
         name = ITEMS[key][2]
         if key == 'address_book':
@@ -247,9 +250,13 @@ def _import_book(book, raw, mode):
 
 def _import_specs(spec_store, raw, mode):
     incoming = json.loads(raw.decode('utf-8'))
-    if mode == 'replace':
+    # Nothing saved here yet (a new computer): what this copy shows is the app's starting list, so merging would keep
+    # that and lose the edits being brought over. Taken as it is instead
+    fresh = mode == 'merge' and not (spec_store.path and os.path.exists(spec_store.path))
+    if mode == 'replace' or fresh:
         spec_store._write({'formula': incoming.get('formula') or {}, 'named': incoming.get('named') or []})
-        return f"replaced: {len(incoming.get('named') or [])} named specs and the formulas"
+        what = f"{len(incoming.get('named') or [])} named specs and the formulas"
+        return f"taken as they are (nothing was saved here yet): {what}" if fresh else f"replaced: {what}"
     current = spec_store.load()
     have = {str(s.get('name', '')).strip().lower() for s in current['named']}
     new = [s for s in incoming.get('named') or [] if str(s.get('name', '')).strip().lower() not in have]

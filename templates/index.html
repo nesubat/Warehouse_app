@@ -150,6 +150,18 @@
                         <input type="hidden" name="kind" value="{{ project.csv_missing }}">
                         <button type="submit" class="btn-action btn-csv" title="Make the {{ csv_kinds[project.csv_missing] }} CSV of this job, with the same rows and Item References, in this project">🚚 Create {{ csv_kinds[project.csv_missing] }} CSV</button>
                     </form>
+                    {% if stale_csv and project.name == open_project %}
+                    {# The project's courier CSV was changed after Generate: the new one won't have those changes #}
+                    <div class="project-csv-stale" role="alert">
+                        <p><strong>{{ stale_csv }}</strong> was changed after the labels were generated. The {{ csv_kinds[project.csv_missing] }} CSV is made from what Generate saved, so those changes won't be in it. Make the same changes in the new file too, or generate the job again.</p>
+                        <form action="{{ url_for('make_other_csv', folder_name=project.name) }}" method="POST" class="project-action-form">
+                            <input type="hidden" name="kind" value="{{ project.csv_missing }}">
+                            <input type="hidden" name="confirm" value="1">
+                            <button type="submit" class="btn btn-primary">Make it anyway</button>
+                            <a href="{{ url_for('dashboard', open=project.name) }}#dashboard-section" class="btn btn-secondary">Cancel</a>
+                        </form>
+                    </div>
+                    {% endif %}
                     {% endif %}
                     {% if project.courier_only %}
                     <span class="project-kind" title="Made with Courier Import: the courier CSV only">🚚 Courier Import</span>

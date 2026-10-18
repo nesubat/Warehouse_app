@@ -405,7 +405,8 @@ class ServiceStore:
 
     def export_files(self):
         """{name in the zip: bytes}: the list, and only the logos a group (or a service on its own) uses, the
-        <group id>.png ones too, each file once however many groups share it, named by its content."""
+        <group id>.png ones too, each file once however many groups share it, named by its content. A logo removed on
+        purpose stays removed where the list is taken in ("logo_removed")."""
         data = self.load()
         files = {}
         for g in data['groups']:
@@ -416,36 +417,65 @@ class ServiceStore:
                     raw = f.read()
                 g['logo'] = f"logo-{hashlib.sha1(raw).hexdigest()[:16]}.png"
                 files[f"courier_logos/{g['logo']}"] = raw
-            g.pop('logo_removed', None)
+            if not g.get('logo_removed'):
+                g.pop('logo_removed', None)
         files['courier_services.json'] = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
         return files
 
     def import_files(self, files, mode):
-        """Takes an exported list and its logos. merge: adds the services and groups missing here, and logos for
-        groups that have none; replace: the zip's list and logos only."""
+        """Takes an exported list and its logos. merge: adds the groups and services missing here, and logos for
+        groups that have none; replace: the zip's list and logos only, each group under its own id where it's free.
+        Merge on a computer with nothing saved yet takes the zip as it is: merging into the starting list would keep
+        that list's groups and lose the ones being brought over."""
         incoming = json.loads(files['courier_services.json'].decode('utf-8'))
         logos = {os.path.basename(k): v for k, v in files.items() if k.startswith('courier_logos/') and k.endswith('.png')}
         groups = [g for g in incoming.get('groups') or [] if isinstance(g, dict) and g.get('id')]
-        if mode == 'replace':  # the logos here go as the list empties (_prune_logos); the zip's come in after
-            self._change(lambda data: data['groups'].clear())
-            added = 0
-            for g in groups:
-                for s in g.get('services') or []:
-                    try:
-                        self.add_service(s.get('code'), s.get('name'), new_group=g.get('name') or s.get('name'))
-                        added += 1
-                    except ServiceError:
-                        pass
+        fresh = mode == 'merge' and not os.path.exists(self.path)
+        if mode == 'replace' or fresh:
+            skipped = []
+
+            def go(data):  # the logos here go as the list is replaced (_prune_logos); the zip's come in after
+                data['groups'], taken = [], set()
+                for g in groups:
+                    name = re.sub(r'\s+', ' ', str(g.get('name') or '')).strip() or str(g['id'])
+                    gid = str(g['id'])
+                    gid = gid if re.fullmatch(r'[a-z0-9-]{1,40}', gid) and gid not in taken else _slug(name, taken)
+                    taken.add(gid)
+                    group = {'id': gid, 'name': name, 'logo': '', 'services': []}
+                    if g.get('logo_removed'):
+                        group['logo_removed'] = True
+                    data['groups'].append(group)
+                    for x in g.get('services') or []:
+                        if not isinstance(x, dict):
+                            skipped.append(str(x))
+                            continue
+                        try:
+                            code, sname = self._check(data, x.get('code'), x.get('name'))
+                        except ServiceError:
+                            skipped.append(str(x.get('code') or '?'))
+                            continue
+                        group['services'].append({'code': code, 'name': sname})
+            self._change(go)
             self._import_logos(groups, logos, only_missing=False)
-            return f"replaced: {self.summary()}"
+            note = f" ({len(skipped)} left out, not a usable code: {', '.join(skipped[:5])})" if skipped else ''
+            return (f"taken as it is (nothing was saved here yet): {self.summary()}{note}" if fresh
+                    else f"replaced: {self.summary()}{note}")
         have = self.codes()
+        names_here = {g['name'].lower() for g in self.load()['groups']}
         added = 0
         for g in groups:
-            for s in g.get('services') or []:
-                if clean_code(s.get('code')) in have:
+            name = str(g.get('name') or '').strip()
+            if name and name.lower() not in names_here:  # a group missing here, even one with no services yet
+                try:
+                    self.add_group(name)
+                    names_here.add(name.lower())
+                except ServiceError:
+                    pass
+            for x in g.get('services') or []:
+                if not isinstance(x, dict) or clean_code(x.get('code')) in have:
                     continue
                 try:
-                    self.add_service(s.get('code'), s.get('name'), new_group=g.get('name') or s.get('name'))
+                    self.add_service(x.get('code'), x.get('name'), new_group=name or x.get('name'))
                     added += 1
                 except ServiceError:
                     pass
@@ -454,13 +484,20 @@ class ServiceStore:
                 f"added (the ones here kept as they are)")
 
     def _import_logos(self, groups, logos, only_missing):
-        here = {g['name'].lower(): g for g in self.load()['groups']}
+        """Each incoming group's logo onto the group here with its id, else its name."""
+        here = self.load()['groups']
+        by_id, by_name = {g['id']: g for g in here}, {g['name'].lower(): g for g in here}
         n = 0
         for g in groups:
             raw = logos.get(os.path.basename(g.get('logo') or ''))
-            target = here.get(str(g.get('name') or '').lower())
+            target = by_id.get(str(g.get('id') or '')) or by_name.get(str(g.get('name') or '').lower())
             if not raw or not target or (only_missing and self.logo_path(target)):
                 continue
+            current = self.logo_path(target)
+            if current:  # the same picture it shows already (the carrier's own <group id>.png): nothing to change
+                with open(current, 'rb') as f:
+                    if f.read() == raw:
+                        continue
             try:
                 self.set_logo(target['id'], raw)
                 n += 1

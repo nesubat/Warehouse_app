@@ -81,6 +81,7 @@
 
         <!-- STEP 1: Upload Excel & Select Project -->
         {% if step == 1 %}
+        {% if error %}<p class="ps-error-banner" role="alert">{{ error }}</p>{% endif %}
         <div class="tab-card">
             <h3 class="tab-title">Step 1: Setup Project & Excel Link</h3>
             <form method="POST" enctype="multipart/form-data">
@@ -101,7 +102,13 @@
                     
                     <div class="input-field">
                         <label class="project-name-label">Create New Project</label>
-                        <input type="text" name="new_project" id="new_project_input" class="project-name-input" placeholder="e.g., Summer_Campaign_2026" maxlength="50" data-count>
+                        <input type="text" name="new_project" id="new_project_input" class="project-name-input" placeholder="e.g., Summer_Campaign_2026" maxlength="50" data-count{% if new_project %} value="{{ new_project }}"{% endif %}>
+                    </div>
+                    {# A new project's job number: the dashboard shows it (there's no Packing Sheet to read it from) #}
+                    <div class="input-field" id="job-number-field"{% if not new_project %} hidden{% endif %}>
+                        <label class="project-name-label" for="job_number_input">Job Number</label>
+                        <input type="text" name="job_number" id="job_number_input" class="project-name-input" placeholder="e.g., J476523" maxlength="20" autocomplete="off"{% if job_number %} value="{{ job_number }}"{% endif %}>
+                        <p class="dropzone-subtext" style="margin-top: 4px;">Shown on the dashboard for this project. Just the number: J476523-01 is kept as J476523.</p>
                     </div>
                 </div>
 

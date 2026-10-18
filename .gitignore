@@ -24,10 +24,12 @@ __pycache__/
 # Local runtime data: address book database, packing specs, senders, service code usage, logs
 # data/* (not data/): git can't re-include files inside an ignored folder, so ignore its contents instead
 data/*
-# ...except the courier logos: ship with the app so a fresh clone has them too
+# ...except the carriers' logos, <group id>.png: they ship with the app so a fresh clone has them. Logos dropped in the
+# Address Book (logo-<hash>.png) stay on this computer: only its own services list points at them
 !data/courier logos/
 data/courier logos/*
 !data/courier logos/*.png
+data/courier logos/logo-*.png
 logs/
 
 # Claude Code: personal settings stay on each computer (the shared ones are .claude/settings.json)

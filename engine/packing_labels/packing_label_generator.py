@@ -183,6 +183,57 @@ NOT_A_NAME = {'type', 'size', 'code', 'number', 'no', 'num', 'id', 'format', 'gr
               'channel', 'owner', 'brand', 'area', 'zone', 'hours', 'open', 'opening'}
 
 
+# A dimension split over several columns (vertical) or rows (horizontal): which part a header or row label is, and the
+# letter it's printed with. Whole words (misspellings too) anywhere in the label; a bare letter or 'wide' / 'long' …
+# only when that's all the label says once a unit and 'size' / 'dimension' are taken off ('Size W (mm)' is W).
+DIM_PARTS = (  # letter, words that name it anywhere, words that name it only on their own
+    ('W', r'width|widht|wdth', r'w|wide'),
+    ('B', r'breadth|bredth|breath', r'b'),
+    ('L', r'length|lenght|lengh|lgth', r'l|long'),
+    ('H', r'height|hight|heigth|hgt', r'h|high|tall'),
+    ('D', r'depth|dept', r'd|deep'),
+)
+DIM_UNIT = re.compile(r'\b(mm|cm|m|in|inch|inches)\b', re.I)
+
+
+def dim_part(label):
+    """'W', 'B', 'L', 'H' or 'D' for a header or row label that names one part of a dimension, else None:
+    'Width', 'Item Length (mm)', 'Bredth', 'Size W', 'L' … but not 'Description' or 'Long sleeve tee'."""
+    text = " ".join(str(label or '').lower().replace('_', ' ').split())
+    if not text:
+        return None
+    for letter, words, alone in DIM_PARTS:
+        if re.search(rf'\b(?:{words})\b', text):
+            return letter
+    bare = re.sub(r'[()\[\]:.,/\-]', ' ', DIM_UNIT.sub(' ', text))
+    bare = re.sub(r'\b(size|sizes|dim|dims|dimension|dimensions|item|in)\b', ' ', bare).strip()
+    for letter, _, alone in DIM_PARTS:
+        if re.fullmatch(alone, bare):
+            return letter
+    return None
+
+
+def dim_unit(label):
+    """The unit a header or row label gives its values ('Width (mm)' -> 'mm'), or ''."""
+    m = DIM_UNIT.search(str(label or ''))
+    return m.group(1).lower() if m else ''
+
+
+def join_dimensions(parts):
+    """One line for the label from the parts found: {'W': ('600', 'mm'), 'L': ('900', 'mm')} -> 'W 600mm × L 900mm',
+    in the order W, B, L, H, D. A unit from the label goes onto a plain number; a value that has its own stays as is."""
+    out = []
+    for letter, _, _ in DIM_PARTS:
+        value, unit = parts.get(letter, ('', ''))
+        value = str(value or '').strip()
+        if not value:
+            continue
+        if unit and re.fullmatch(r'\d+(?:[.,]\d+)?', value):
+            value += unit
+        out.append(f"{letter} {value}")
+    return " × ".join(out)
+
+
 def _header_field(header):
     """Which column a header is. Three names: 'Store Name' / 'Store' / 'Retailer' is the store (it names the label
     and starts the Item Reference); 'Receiver Name' / 'Receiver' / 'Consignee' / 'Ship To' is who the courier
@@ -201,8 +252,8 @@ def _header_field(header):
     if 'desc' in h: return 'desc'
     if 'thumb' in h or 'image' in h or 'picture' in h or 'art' in words or 'artwork' in words: return 'thumbnail'
     if 'dimension' in h: return 'dim_combined'
-    if 'width' in h or h == 'w': return 'dim_w'
-    if 'height' in h or h == 'h': return 'dim_h'
+    part = dim_part(h)
+    if part: return f"dim_{part.lower()}"  # Width / Breadth / Length / Height / Depth (dim_part)
     if place_ok and ('address' in h or 'street' in h):
         return 'address_2' if re.search(r'(line|address|addr)\s*2\b', h) else 'address_1'
     if place_ok and ('suburb' in h or 'town' in words or 'city' in words or 'locality' in words): return 'suburb'
@@ -224,7 +275,7 @@ MAPPABLE_FIELDS = (
     ('store_name', 'Store Name', False), ('receiver_name', 'Receiver Name', False), ('contact', 'Attn', False),
     ('qty', 'Quantity', False), ('desc', 'Description', False),
     ('thumbnail', 'Thumbnail', False), ('dim_combined', 'Dimensions', False), ('dim_w', 'Width', False),
-    ('dim_h', 'Height', False), ('address_1', 'Address Line 1', False), ('address_2', 'Address Line 2', False),
+    ('dim_b', 'Breadth', False), ('dim_l', 'Length', False), ('dim_h', 'Height', False), ('dim_d', 'Depth', False), ('address_1', 'Address Line 1', False), ('address_2', 'Address Line 2', False),
     ('suburb', 'Suburb', False), ('state', 'State', False), ('postcode', 'Postcode', False),
     ('country', 'Country', False), ('material', 'Material', False), ('notes', 'Notes', False),
 )
@@ -360,6 +411,14 @@ def issue_where(i, limit=6):
 
 def _issue_line(i):
     return " · ".join(x for x in (issue_where(i), i['col'], i['text']) if x)
+
+
+def issue_text(i):
+    """One problem as one readable line for the log (and the Logs page): where (rows and stores), the column, what's
+    wrong, then the detail: 'Row 52 Corio Village · Pack 1 · marked x but has quantities — 4 units in L52'."""
+    main = " · ".join(str(x) for x in (issue_where(i), i.get('col'), i.get('text')) if x)
+    detail = str(i.get('detail') or '').strip()
+    return f"{main} — {detail}" if detail else main
 
 
 def _span(rows):
@@ -554,7 +613,7 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
         'Quantity': 'qty' in cols,
         'Description': 'desc' in cols,
         'Thumbnail': 'thumbnail' in cols,
-        'Dimensions': 'dim_combined' in cols or 'dim_w' in cols or 'dim_h' in cols,
+        'Dimensions': any(f in cols for f in ('dim_combined', 'dim_w', 'dim_b', 'dim_l', 'dim_h', 'dim_d')),
         'Address Info': any(k in cols for k in ADDRESS_FIELDS),
         'Material': 'material' in cols,
         'Notes': 'notes' in cols,
@@ -642,15 +701,11 @@ def parse_packing_data(excel_path, header_row, sheet_name=None, columns=None):
             'crosses_pack': crosses_pack,
         })
 
-        dim_w = get_val('dim_w')
-        dim_h = get_val('dim_h')
-        dim_combined = get_val('dim_combined')
-
-        if dim_combined: dimension = dim_combined
-        elif dim_w and dim_h: dimension = f"{dim_w} x {dim_h}"
-        elif dim_w: dimension = dim_w
-        elif dim_h: dimension = dim_h
-        else: dimension = ""
+        # One Dimensions column as written; else the parts in their own columns, each with its letter and the unit
+        # its header gives: 'W 600mm × H 900mm' (join_dimensions, the same as horizontal files' rows)
+        dimension = get_val('dim_combined') or join_dimensions({
+            f[4:].upper(): (get_val(f), dim_unit(ws.cell(row=header_row, column=cols[f]).value))
+            for f in ('dim_w', 'dim_b', 'dim_l', 'dim_h', 'dim_d') if f in cols})
 
         thumbnails = []
         if 'thumbnail' in cols:
@@ -1309,7 +1364,7 @@ def cell_preview(pack_groups, max_px=360):
 
 
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
-                            report=None, serials=None, tabs=None, tab_notes=None):
+                            report=None, serials=None, tabs=None, tab_notes=None, on_progress=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
 
     addresses: {pack_key: {'address', 'receiver', 'contact', 'sent'}} as finalised in the consignment preview
@@ -1325,7 +1380,8 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     serials: {pack_key: '01T1'}, the label's serial in its tab, written before the store name ('01T1. Blue Star
     Moorabbin') on every page of the pack. tabs: {pack_key: (tab number, tab name)}; a divider page goes between
     the labels of one tab and the next (none before the first tab). tab_notes: {tab number: [issues]} (vertical files):
-    a PACK AUDIT page goes before each tab's labels instead (tab_audit), the tab's problems on it."""
+    a PACK AUDIT page goes before each tab's labels instead (tab_audit), the tab's problems on it.
+    on_progress(done, total, step): called after each pack's labels and before saving, for the loading overlay's bar."""
     from engine.courier.packing_specs import split_count
     addresses = addresses or {}
     doc = fitz.open()
@@ -1388,7 +1444,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
             page.insert_text(start, text, fontname="hebo", fontsize=size, color=(0.78, 0.08, 0.08),
                              fill_opacity=0.22, morph=(centre, fitz.Matrix(-angle)), overlay=True)
 
-    for pack_key, group_data in pack_groups.items():
+    for done, (pack_key, group_data) in enumerate(pack_groups.items()):
+        if on_progress:
+            on_progress(done, len(pack_groups), f"Drawing the packing labels: {done + 1} of {len(pack_groups)}")
         tab_no, tab_name = tabs.get(pack_key, (None, ''))
         if tab_notes is not None and tab_no is not None and tab_no != previous_tab:
             tab_audit(tab_no, tab_name)
@@ -1515,6 +1573,8 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     if report_pages:
         page_map = {k: [p + report_pages for p in v] for k, v in page_map.items()}
         copies = {k: [[p + report_pages for p in box] for box in v] for k, v in copies.items()}
+    if on_progress:
+        on_progress(len(pack_groups), len(pack_groups), f"Saving the PDF ({len(doc)} pages)")
     doc.save(output_pdf_path, garbage=1, deflate=True)  # artwork is shared already: no duplicate search needed
     doc.close()
     return {

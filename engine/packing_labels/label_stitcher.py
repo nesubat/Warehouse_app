@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pymupdf as fitz
 
-from engine.core import app_log, paths
+from engine.core import app_log, paths, progress
 from engine.packing_labels.packing_label_generator import _norm, draw_report_pages
 # Rendering the courier labels lives in label_render (light enough for worker processes); render_label is used by
 # the matching page too
@@ -41,7 +41,8 @@ _STOP = re.compile(r'item\s*desc|description|powered by', re.I)
 _CODE_IN_REF = re.compile(r'\d+(?:\.\d+)?-([A-Z]{4,8})-L-')        # older Item References: '01-QWXK-L-1-Store'
 _CODE_ANYWHERE = re.compile(r'(?<![A-Z])-?([A-Z]{4,8})-L-\d')
 _CODE_TAB = re.compile(r'(?<![A-Za-z0-9])\d{1,4}T\d{1,2}([A-Z]{4,})')  # '01T1QWXK Store': count, T + tab, code
-_CODE_TP = re.compile(r'(?<![A-Za-z0-9])(\d{1,4}T\d{1,2}P\d{1,3})(?!\d)')  # horizontal files: '03T1P2 Store'
+_CODE_TP = re.compile(r'(?<![A-Za-z0-9])(\d{1,4}T\d{1,2}P\d{1,3})(?!\d)')  # horizontal files before codes: '03T1P2 Store'
+_CODE_TPX = re.compile(r'(?<![A-Za-z0-9])(\d{1,4}T\d{1,2}P\d{1,3})([A-Z]{4,})')  # horizontal files: '03T1P2QWXK Store'
 
 
 class StitchError(ValueError):
@@ -87,7 +88,13 @@ def find_code(text, known):
     of all layouts: '01T1QWXK Provision Clayton', the older '01-QWXK-L-1-Provision Clayton', and horizontal
     files' '03T1P2 Chadstone' (store number in the tab, T + tab, P + pack)."""
     known = {k.upper() for k in known}
-    for ref in _item_ref_texts(text) + [text]:  # horizontal files: store number, T + tab, P + pack ('03T1P2')
+    for ref in _item_ref_texts(text) + [text]:  # horizontal files: serial + this Generate's code ('03T1P2QWXK')
+        for m in list(_CODE_TPX.finditer(ref)) + list(_CODE_TPX.finditer(ref.replace(' ', ''))):
+            serial, run = m.group(1), m.group(2)
+            for n in range(len(run), 3, -1):  # longest first: a store name the portal ran on doesn't get in
+                if (serial + run[:n]).upper() in known:
+                    return (serial + run[:n]).upper()
+    for ref in _item_ref_texts(text) + [text]:  # horizontal files made before codes: the serial alone ('03T1P2')
         for candidate in _CODE_TP.findall(ref) + _CODE_TP.findall(ref.replace(' ', '')):
             if candidate.upper() in known:
                 return candidate.upper()
@@ -100,6 +107,30 @@ def find_code(text, known):
         if candidate.upper() in known:
             return candidate.upper()
     return None
+
+
+def store_after_code(text, code):
+    """The store written after a horizontal code on the label, on the code's own line ('Item Ref: 03T1P2 Chadstone'
+    -> 'Chadstone'): the Item Ref value runs on over the next lines (the address), which aren't the store. '' when
+    nothing follows the code on its line (a store the portal wrapped onto the next line: the code decides)."""
+    pattern = re.compile(rf'(?<![A-Za-z0-9]){re.escape(code)}(?!\d)\s*(.*)$', re.I)
+    for line in text.splitlines():
+        m = pattern.search(line)
+        if m:
+            return m.group(1).strip()
+    return ''
+
+
+def same_store(written, store):
+    """Whether the store written on a courier label is this packing label's store: the same once spacing, capitals
+    and punctuation are set aside, or the start of it (a portal that cuts the Item Reference short), or close enough
+    for a typo. A horizontal code is only the store's place in the file ('03T1P2'), the same in every job, so a label
+    from another job or an earlier Generate would carry it too: its store name is what tells them apart."""
+    from difflib import SequenceMatcher
+    a, b = _norm(written).replace(' ', ''), _norm(store).replace(' ', '')
+    if not a or not b:
+        return True  # nothing written to compare: the code decides, as before
+    return a == b or (len(a) >= 4 and b.startswith(a)) or SequenceMatcher(None, a, b).ratio() >= 0.85
 
 
 def _ref_key(text):
@@ -250,7 +281,7 @@ def address_score(text, pack):
     return round(score, 2)
 
 
-_OPEN360_CODE = re.compile(r'^\s*\d+(?:\s*-\s*([A-Z]{4,})\s*-\s*L\s*-|T\d{1,2}([A-Z]{4,}))')
+_OPEN360_CODE = re.compile(r'^\s*\d+(?:\s*-\s*([A-Z]{4,})\s*-\s*L\s*-|T\d{1,2}([A-Z]{4,})|T\d{1,2}P\d{1,3}([A-Z]{4,}))')
 
 
 def codes_elsewhere(project_dir):
@@ -281,7 +312,7 @@ def codes_elsewhere(project_dir):
                     if pk.get('open360_code'):
                         code = pk['open360_code'].upper()
                         found.setdefault(code, name)
-                        job = re.match(r'^\d+T\d+([A-Z]{4,})$', code)  # '01T1QWXK': QWXK (one code per job in older projects)
+                        job = re.match(r'^\d+T\d+(?:P\d+)?([A-Z]{4,})$', code)  # '01T1QWXK' / '03T1P2QWXK': QWXK
                         if job:
                             found.setdefault(job.group(1), name)
     return found
@@ -289,13 +320,13 @@ def codes_elsewhere(project_dir):
 
 def ref_parts(ref):
     """What a courier label's Item Ref says about its packing label, whichever job it's from:
-    '42T1LCQK Blue Star Moorabbin' -> serial 42T1, store 'Blue Star Moorabbin';
+    '42T1LCQK Blue Star Moorabbin' -> serial 42T1, store 'Blue Star Moorabbin' ('03T1P2QWXK Chadstone' -> 03T1P2);
     '01-QWXK-L-1-Provision Clayton' -> label 1, store; '10 Label 2 - Q Eyewear' -> label 2, store."""
     ref = " ".join(str(ref or '').split())
-    m = re.match(r'^(\d{1,4}T\d{1,2})\s*[A-Z]{4,}\s+(.+)$', ref)
+    m = re.match(r'^(\d{1,4}T\d{1,2}(?:P\d{1,3})?)\s*[A-Z]{4,}\s+(.+)$', ref)  # horizontal: '03T1P2QWXK Store'
     if m:  # 'tail': all after the serial, for a store name the portal may have run into the code
         return {'serial': m.group(1), 'label': None, 'store': m.group(2), 'tail': ref[m.end(1):]}
-    m = re.match(r'^(\d{1,4}T\d{1,2})\s*([A-Z]{4,}.*)$', ref)  # the store run straight on: the code is in front of it
+    m = re.match(r'^(\d{1,4}T\d{1,2}(?:P\d{1,3})?)\s*([A-Z]{4,}.*)$', ref)  # the store run straight on: the code is in front of it
     if m:
         return {'serial': m.group(1), 'label': None, 'store': m.group(2), 'tail': m.group(2)}
     m = re.match(r'^\d+(?:\.\d+)?-[A-Z]{4,}-L-(\d+)-(.+)$', ref)
@@ -448,40 +479,104 @@ def csv_kind(header):
     return None
 
 
-def pack_services(project_dir, label_map):
-    """{pack item reference: service code}: the service each pack is booked with, from the project's courier CSVs as
-    saved (a change made in the CSV outside the app counts), else the one chosen in the preview (the label map).
-    Open360 rows are found by their Item Reference ('04T1P1 Store'), OpenFreight rows by their last Reference column."""
+def read_courier_csv(path):
+    """(kind, rows) of a courier CSV: 'open360' / 'openfreight' and its rows; (None, []) when it isn't one or can't be
+    read. The app writes UTF-8; Excel's "CSV (Comma delimited)" saves in Windows' own code page, read as well."""
     import csv
+    for encoding in ('utf-8-sig', 'cp1252'):
+        try:
+            with open(path, encoding=encoding, newline='') as f:
+                rows = list(csv.reader(f))
+            break
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return None, []
+    else:
+        return None, []
+    kind = csv_kind(rows[0]) if rows else None
+    return (kind, rows) if kind else (None, [])
+
+
+def courier_csv_names(label_map):
+    """The courier CSVs the label map lists for the job (Generate's, the other one made later, ones attached at
+    stitching), each once."""
+    files = label_map.get('files') or {}
+    return list(dict.fromkeys(os.path.basename(n) for n in [files.get('courier_csv')] + list(files.get('courier_csvs') or [])
+                              + [files.get('open360_csv')] if n))
+
+
+def _key(header):
+    return re.sub(r'\s+', '', str(header)).lower()
+
+
+def _rows_by_pack(kind, rows, label_map):
+    """{pack item reference: {column key: value}} for the rows of a courier CSV that belong to a pack of this job.
+    Open360 rows by their Item Reference ('04T1P1 Store'); OpenFreight rows by their last Reference column, which
+    holds the same Open360 reference (or, in older jobs, the pack's own item reference)."""
+    packs = [pk for pks in (label_map.get('stores') or {}).values() for pk in pks]
+    pack_of = {pk['item_reference']: pk['item_reference'] for pk in packs}
+    pack_of.update({pk['open360_item_reference']: pk['item_reference'] for pk in packs if pk.get('open360_item_reference')})
+    head = [_key(h) for h in rows[0]]
+    ref = head.index('itemreference') if kind == 'open360' else len(head) - 1 - head[::-1].index('reference')
+    out = {}
+    for r in rows[1:]:
+        if len(r) > ref and r[ref].strip() in pack_of:
+            out.setdefault(pack_of[r[ref].strip()], dict(zip(head, (v.strip() for v in r))))
+    return out
+
+
+def pack_services(project_dir, label_map, source=None):
+    """{pack item reference: service code}: the service each pack is booked with. source: the courier CSV the user
+    picked (or attached) on the Stitch page as the one with the current services: it alone decides. Without one,
+    every courier CSV of the job is read (Open360, what's booked, last). A pack the file doesn't have keeps the service
+    chosen in the preview (the label map)."""
     packs = [pk for pks in (label_map.get('stores') or {}).values() for pk in pks]
     service_of = {c['number']: c.get('service_code') or '' for c in label_map.get('consignments') or []}
     out = {pk['item_reference']: service_of.get(pk.get('consignment'), '') for pk in packs}
-    by_o360 = {pk['open360_item_reference']: pk['item_reference'] for pk in packs if pk.get('open360_item_reference')}
-    files = label_map.get('files') or {}
-    names = list(dict.fromkeys(n for n in [files.get('courier_csv')] + list(files.get('courier_csvs') or []) + [files.get('open360_csv')] if n))
-    read = []
-    for name in names:
-        try:
-            with open(os.path.join(project_dir, os.path.basename(name)), encoding='utf-8-sig', newline='') as f:
-                rows = list(csv.reader(f))
-        except OSError:
+    names = [os.path.basename(source)] if source else courier_csv_names(label_map)
+    read = [kr for kr in (read_courier_csv(os.path.join(project_dir, n)) for n in names) if kr[0]]
+    for kind, rows in sorted(read, key=lambda kr: kr[0] == 'open360'):
+        column = 'service' if kind == 'open360' else 'servicecode'
+        for pack, row in _rows_by_pack(kind, rows, label_map).items():
+            if row.get(column):
+                out[pack] = row[column].upper()
+    return out
+
+
+ADDRESS_FIELDS = (('receiver', ('receivername',)), ('line1', ('receiveraddressline1',)),
+                  ('line2', ('receiveraddressline2',)), ('suburb', ('receiversuburb',)), ('state', ('receiverstate',)),
+                  ('postcode', ('receiverpostcode',)), ('country', ('receivercountry',)))
+
+
+def _plain(value):
+    return re.sub(r'[\s,.]+', ' ', str(value or '')).strip().casefold()
+
+
+def address_changes(project_dir, label_map, source):
+    """The consignments whose address in the courier CSV `source` isn't the one on their packing labels (the CSV was
+    changed after Generate): [{'number', 'stores', 'labels': '…', 'now': '…'}]. The courier label is printed from the
+    CSV, the packing label from Generate, so a change here means the two labels name different places."""
+    kind, rows = read_courier_csv(os.path.join(project_dir, os.path.basename(source or '')))
+    if not kind:
+        return []
+    by_pack = _rows_by_pack(kind, rows, label_map)
+    packs = [(store, pk) for store, pks in (label_map.get('stores') or {}).items() for pk in pks]
+    out = []
+    for c in label_map.get('consignments') or []:
+        dest = c.get('destination') or {}
+        mine = [(store, pk) for store, pk in packs if pk.get('consignment') == c['number']]
+        row = next((by_pack[pk['item_reference']] for _, pk in mine if pk['item_reference'] in by_pack), None)
+        if not dest or row is None:
             continue
-        kind = csv_kind(rows[0]) if rows else None
-        if kind:
-            read.append((kind, rows))
-    for kind, rows in sorted(read, key=lambda kr: kr[0] == 'open360'):  # the Open360 CSV (what's booked) has the last word
-        head = [h.strip().lower() for h in rows[0]]
-        if kind == 'open360':
-            svc, ref = head.index('service'), head.index('item reference')
-            for r in rows[1:]:
-                pack = by_o360.get(r[ref].strip()) if len(r) > max(svc, ref) else None
-                if pack and r[svc].strip():
-                    out[pack] = r[svc].strip().upper()
-        else:
-            svc, ref = head.index('service code'), len(head) - 1 - head[::-1].index('reference')
-            for r in rows[1:]:
-                if len(r) > max(svc, ref) and r[ref].strip() in out and r[svc].strip():
-                    out[r[ref].strip()] = r[svc].strip().upper()
+        now = {f: next((row[k] for k in keys if k in row), '') for f, keys in ADDRESS_FIELDS}
+        was = {f: dest.get(f, '') for f, _ in ADDRESS_FIELDS}
+        was['country'], now['country'] = was['country'] or 'AU', now['country'] or 'AU'
+        if any(_plain(was[f]) != _plain(now[f]) for f, _ in ADDRESS_FIELDS):
+            line = lambda d: ', '.join(x for x in (d['receiver'], d['line1'], d['line2'], d['suburb'], d['state'],
+                                                   d['postcode'], d['country']) if x)
+            out.append({'number': c['number'], 'stores': sorted({store for store, _ in mine}),
+                        'labels': line(was), 'now': line(now)})
     return out
 
 
@@ -493,9 +588,11 @@ def logo_region(label_map):
     return fitz.Rect(mm['x'] * MM, mm['y'] * MM, (mm['x'] + mm['width']) * MM, (mm['y'] + mm['height']) * MM)
 
 
-def draw_logos(doc, label_map, logos):
+def draw_logos(doc, label_map, logos, pages=None):
     """Puts each pack's service logo on the first page of each of its boxes. logos: {pack item reference: PNG path or
-    None}. Each logo image goes into the PDF once and is reused on every page. Returns the number of pages done."""
+    None}. pages: the packing label pages that got a courier label (render_stitch): a box without one gets no logo,
+    since the logo names the courier of the label beside it. Each logo image goes into the PDF once and is reused on
+    every page. Returns the number of pages done."""
     region = logo_region(label_map)
     if region is None:
         return 0
@@ -517,7 +614,7 @@ def draw_logos(doc, label_map, logos):
         where = fitz.Rect(region.x1 - w * scale, region.y0 + (region.height - h * scale) / 2, region.x1,
                           region.y0 + (region.height + h * scale) / 2)  # right edge of the slot, centred in the row
         for page_no in pk.get('box_pages') or []:
-            if not 1 <= page_no <= len(doc):
+            if not 1 <= page_no <= len(doc) or (pages is not None and page_no not in pages):
                 continue
             if path in xrefs:
                 doc[page_no - 1].insert_image(where, xref=xrefs[path])
@@ -567,18 +664,27 @@ def plan_stitch(project_dir, label_map, courier_pdfs, manual=None):
             continue
         log.info("  %s: %d page(s)", name, len(src))
         for i, page in enumerate(src):
+            progress.tick(i, len(src), f"Reading {name}: page {i + 1} of {len(src)}")
             text = page.get_text()
             base_key = page_key(page, text)
             seen_keys[base_key] += 1
             key = base_key if seen_keys[base_key] == 1 else f"{base_key}-{seen_keys[base_key]}"  # identical pages
             code = find_code(text, by_code.keys())
             pack, method = (by_code[code], 'code') if code else (None, None)
+            other_store = ''
+            if pack is not None and _CODE_TP.fullmatch(code or '') and not same_store(store_after_code(text, code), pack.get('store', '')):
+                # A horizontal code with another store's name: not this label, whatever the code says (matched by hand)
+                other_store = store_after_code(text, code)
+                log.info("    %s p%d: code %s is %s's here, but the label is for %s - not placed by its code",
+                         name, i + 1, code, pack.get('store', ''), other_store)
+                pack, method = None, None
             if pack is None and not by_code:  # older project without codes: match the Item Ref text
                 pack = next((by_ref[_ref_key(r)] for r in _item_ref_texts(text) if _ref_key(r) in by_ref), None)
                 method = 'item reference' if pack else None
             pages.append({'file': name, 'page': i + 1, 'key': key, 'text': text, 'code': code,
                           'pack': pack['item_reference'] if pack else None, 'store': pack.get('store', '') if pack else '',
-                          'method': method})
+                          'method': method, 'other_store': other_store,
+                          'code_store': by_code[code].get('store', '') if other_store else ''})
         src.close()
 
     def take(p, sl, method):
@@ -642,9 +748,16 @@ def _why_not(p, project_dir, by_code, elsewhere):
     code_seen = _OPEN360_CODE.match(refs[-1]) if refs and by_code else None
     other = None
     if code_seen and elsewhere:
-        run = (code_seen.group(1) or code_seen.group(2)).upper()
+        run = (code_seen.group(1) or code_seen.group(2) or code_seen.group(3)).upper()
         # the old layout's code stands alone; in '01T1QWXK Store' the capitals may run into the store name
         other = elsewhere.get(run) or next((elsewhere[run[:n]] for n in range(len(run), 3, -1) if run[:n] in elsewhere), None)
+    if p.get('other_store'):  # a horizontal code of this job, on another store's label
+        reason = (f"Item Ref '{refs[-1][:60]}': its code {p['code']} is {p['code_store']}'s in this job, but the label is "
+                  f"for {p['other_store']} - from another job, or an earlier Generate?")
+        log.debug("    %s p%d: not placed - %s", p['file'], p['page'], reason)
+        return {'file': p['file'], 'page': p['page'], 'reason': reason, 'key': p['key'], 'text': text,
+                'item_ref': refs[-1][:80] if refs else '', 'why': f"code {p['code']} is {p['code_store']}'s, label is for "
+                f"{p['other_store']}", 'other_project': None}
     reason = ("no text on the page (a scanned image?)" if not text.strip() else
               "no Item Ref / Item Reference on the label" if not refs else
               f"Item Ref '{refs[-1][:60]}' is project {other}'s - booked from that project's Open360 CSV, "
@@ -687,8 +800,10 @@ def _rendered(placed, courier_pdfs, sources, region):
     next one renders (rendering holds Python, zlib doesn't). The same pixels either way."""
     jobs = [(p['file'], p['page']) for p in placed]
     started = time.perf_counter()
+    tick = lambda n, total: progress.tick(n, total, f"Rendering the courier labels sharp enough to scan: {n} of {total}")
+    progress.stage("Rendering the courier labels", 10, 80)
     try:
-        done = render_many(courier_pdfs, jobs, (region.width, region.height), paths.BASE_DIR)
+        done = render_many(courier_pdfs, jobs, (region.width, region.height), paths.BASE_DIR, on_progress=tick)
         if done is not None:
             log.info("  %d courier label(s) rendered in worker processes in %.1fs", len(done), time.perf_counter() - started)
             return done
@@ -696,7 +811,8 @@ def _rendered(placed, courier_pdfs, sources, region):
         log.warning("  rendering in worker processes failed (%s): rendering here instead", e)
     with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 2) - 1))) as pool:
         pending = []
-        for name, page in jobs:
+        for n, (name, page) in enumerate(jobs):
+            tick(n, len(jobs))
             img = turn_for(region.width, region.height, render_label(sources[name][page - 1]))
             pending.append((img.width, img.height, pool.submit(compress_label, img)))
         done = [(w, h, f.result()) for w, h, f in pending]
@@ -731,8 +847,10 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
         target, scale = fit_target(region, width, height)
         put_label(out[p['packing_page'] - 1], region, target, (width, height), flate)
         p['scale_pct'] = round(scale * DPI / 72 * 100, 1)
+    progress.stage("Putting the courier labels and logos on the packing labels", 80, 92)
     logos = logos or {}
-    logo_pages = draw_logos(out, label_map, {ref: path for ref, (_, path) in logos.items()})
+    logo_pages = draw_logos(out, label_map, {ref: path for ref, (_, path) in logos.items()},
+                            pages={p['packing_page'] for p in placed})  # only where a courier label went
     no_logo = sorted({code for code, path in logos.values() if code and not path})
     old_map = bool(logos) and logo_region(label_map) is None
     leftovers = [(u, render_label(sources[u['file']][u['page'] - 1]) if add_unmatched else None)
@@ -831,6 +949,7 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
                      for sl in slots if sl['slot'] in set(plan['missing'])]
     # garbage=1 drops what select() left out; each courier label is its own image, so there's nothing to merge and the
     # duplicate search (garbage=3) only spent time comparing every label image with every other
+    progress.stage(f"Saving the Complete Labels PDF ({len(out)} pages)", 92, 99)
     out.save(output_path, garbage=1, deflate=True)
     out.close()
     for u in unmatched:
