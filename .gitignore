@@ -22,7 +22,12 @@ dist/
 # Ignore Python background files
 __pycache__/
 # Local runtime data: address book database, packing specs, senders, service code usage, logs
-data/
+# data/* (not data/): git can't re-include files inside an ignored folder, so ignore its contents instead
+data/*
+# ...except the courier logos: ship with the app so a fresh clone has them too
+!data/courier logos/
+data/courier logos/*
+!data/courier logos/*.png
 logs/
 
 # Claude Code: personal settings stay on each computer (the shared ones are .claude/settings.json)

@@ -25,10 +25,10 @@ def png(colour=(200, 0, 0), size=(400, 64)):
 
 @pytest.fixture()
 def store(tmp_path):
-    defaults = tmp_path / "default_logos"
-    defaults.mkdir()
-    (defaults / "dhl.png").write_bytes(png((255, 204, 0)))  # the app's own DHL logo
-    return ServiceStore(str(tmp_path / "courier_services.json"), str(tmp_path / "courier_logos"), str(defaults))
+    logos = tmp_path / "courier logos"
+    logos.mkdir()
+    (logos / "dhl.png").write_bytes(png((255, 204, 0)))  # DHL's logo, put in the folder by hand
+    return ServiceStore(str(tmp_path / "courier_services.json"), str(logos))
 
 
 def test_starting_list_has_the_groups_and_the_four_toll_priority_services(store):
@@ -57,15 +57,17 @@ def test_add_edit_delete_and_codes_stay_unique(store):
     assert all(g['name'] != 'NEW COURIER' for g in store.load()['groups'])  # an empty group goes
 
 
-def test_logo_comes_with_the_app_until_replaced_or_removed(store, tmp_path):
-    assert store.logo_for('DHLWPXOD').endswith(os.path.join('default_logos', 'dhl.png'))
+def test_group_id_logo_in_the_folder_is_used_until_replaced_or_removed(store, tmp_path):
+    folder = tmp_path / "courier logos"
+    assert store.logo_for('DHLWPXOD') == str(folder / "dhl.png")
     assert store.logo_for('IPECX') is None  # no file for it
     store.set_logo('dhl', png((0, 0, 255)))
-    assert os.path.dirname(store.logo_for('DHLWPXUD')) == str(tmp_path / "courier_logos")
+    assert os.path.dirname(store.logo_for('DHLWPXUD')) == str(folder)
+    assert not (folder / "dhl.png").exists()  # replaced: nothing uses the old one, so it goes
     with pytest.raises(ServiceError):
         store.set_logo('dhl', b'not an image')
     store.delete_logo('dhl')
-    assert store.logo_for('DHLWPXOD') is None  # removed on purpose: not even the app's own
+    assert store.logo_for('DHLWPXOD') is None  # removed on purpose: not even its dhl.png
     store.set_logo('dhl', png())
     assert store.logo_for('DHLWPXOD')
 
@@ -85,13 +87,13 @@ def test_back_up_and_move_carries_the_list_and_every_logo(store, tmp_path):
     assert 'courier_services' in manifest['items']
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    other = ServiceStore(str(other_dir / "courier_services.json"), str(other_dir / "courier_logos"), None)
+    other = ServiceStore(str(other_dir / "courier_services.json"), str(other_dir / "courier logos"))
     _, items = data_transfer.describe_zip(data)
     assert [i['key'] for i in items] == ['courier_services']
     result = data_transfer.import_zip(data, {'courier_services': 'replace'}, str(other_dir), book, None, other)
     assert result['done'][0][0] == 'Courier services'
     assert 'TOLX' in other.codes()
-    assert other.logo_for('20') and other.logo_for('DHLWPXOD')  # the dropped logo and the app's own both came
+    assert other.logo_for('20') and other.logo_for('DHLWPXOD')  # the dropped logo and DHL's dhl.png both came
 
 
 def test_service_of_each_label_comes_from_the_csv_as_saved(tmp_path):
@@ -217,8 +219,39 @@ def test_export_holds_only_the_logos_in_use_each_once(store, tmp_path):
     logos = [k for k in files if k.startswith('courier_logos/')]
     data = json.loads(files['courier_services.json'])
     linked = {g['logo'] for g in data['groups'] if g['logo']}
-    assert len(logos) == 2  # the shared one once, and the app's own DHL logo
+    assert len(logos) == 2  # the shared one once, and DHL's dhl.png
     assert {k.split('/', 1)[1] for k in logos} == linked
+
+
+def test_group_id_logos_go_with_their_group_and_other_files_stay(store, tmp_path):
+    folder = tmp_path / "courier logos"
+    (folder / "toll-priority.png").write_bytes(png((0, 90, 0)))
+    (folder / "spare logo.png").write_bytes(png((1, 1, 1)))  # no group's id: never the store's to delete
+    assert store.logo_for('22') == str(folder / "toll-priority.png")
+    store.delete_group('toll-priority')  # its services stay, each on its own, and its logo goes
+    assert not (folder / "toll-priority.png").exists() and '22' in store.codes()
+    store.delete_logo('dhl')  # removed on purpose: the file goes too
+    assert not (folder / "dhl.png").exists() and store.logo_for('DHLWPXOD') is None
+    store.add_service('NEW1', 'NEW COURIER')
+    assert (folder / "spare logo.png").exists()
+
+
+def test_logos_in_the_old_folder_move_to_the_new_one_on_first_use(tmp_path):
+    old, new = tmp_path / "courier_logos", tmp_path / "courier logos"
+    old.mkdir()
+    new.mkdir()
+    (old / "logo-0123456789abcdef.png").write_bytes(png((3, 3, 3)))  # dropped before the move
+    (old / "dhl.png").write_bytes(png((4, 4, 4)))
+    (new / "dhl.png").write_bytes(png((5, 5, 5)))  # already moved by hand: this one is kept
+    path = tmp_path / "courier_services.json"
+    data = ServiceStore(str(path), str(new)).load()
+    next(g for g in data['groups'] if g['id'] == 'tnt-overnight')['logo'] = 'logo-0123456789abcdef.png'
+    path.write_text(json.dumps(data), encoding='utf-8')
+    store = ServiceStore(str(path), str(new), legacy_dir=str(old))
+    assert old.exists()  # nothing moves until it's used
+    assert store.logo_for('TNTNONFC') == str(new / "logo-0123456789abcdef.png")
+    assert Image.open(new / "dhl.png").convert('RGB').getpixel((0, 0)) == (5, 5, 5)
+    assert sorted(os.listdir(old)) == ['dhl.png']  # the one it couldn't move stays where it was
 
 
 def test_adding_a_code_from_another_group_moves_it_here(store):

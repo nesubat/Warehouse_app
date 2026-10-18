@@ -44,7 +44,7 @@ from engine.courier.courier_export import (build_consignments, detect_series, wr
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, load_service_usage, service_options, record_service_usage,
                             write_csv_recipe, csv_from_recipe, RECIPE_SUFFIX, CSV_KINDS)
-from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES
+from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES, LOGO_DIR_NAME, LEGACY_LOGO_DIR_NAME
 import openpyxl
 from engine.core import app_log, project_record
 from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file
@@ -72,7 +72,8 @@ EXPORT_FILE = os.path.join(BASE_DIR, 'data', 'export_details.json')  # OpenFreig
 ADDRESS_BOOK = AddressBook(os.path.join(BASE_DIR, 'data', 'address_book.db'))
 SPEC_STORE = SpecStore(os.path.join(BASE_DIR, 'data', 'packing_specs.json'))
 # Courier services and their groups' logos (the logo Stitch Labels puts on each label)
-SERVICE_STORE = ServiceStore(os.path.join(BASE_DIR, 'data', 'courier_services.json'), os.path.join(BASE_DIR, 'data', 'courier_logos'))
+SERVICE_STORE = ServiceStore(os.path.join(BASE_DIR, 'data', 'courier_services.json'), os.path.join(BASE_DIR, 'data', LOGO_DIR_NAME),
+                             legacy_dir=os.path.join(BASE_DIR, 'data', LEGACY_LOGO_DIR_NAME))
 os.makedirs(PROJECTS_FOLDER, exist_ok=True)
 temp_dir = os.path.join(BASE_DIR, 'temp_pdf_engine')
 os.makedirs(temp_dir, exist_ok=True)

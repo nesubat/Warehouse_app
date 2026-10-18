@@ -1,13 +1,15 @@
 """Courier services: the service codes offered in the consignment preview and written in the courier CSV, grouped so
 one logo serves every service of a carrier. Stitch Labels puts the logo of each consignment's service on its labels.
 
-Kept in data/courier_services.json; a logo dropped for a group is data/courier_logos/logo-<content hash>.png. A logo
-belongs to a group (a service on its own is a group of one), and a service always shows the logo of the group it's in:
-move it to another group and it takes that group's logo. Files are named by their content, so groups with the same
-logo share one file, and a file no group uses any more (replaced, removed, its group deleted or emptied) is deleted
-after every change. Until a logo is dropped,
-the group uses the logo that comes with the app (engine/courier/default_logos/<group id>.png, made from the logo sheet
-by engine/courier/logo_sheet.py), unless its logo was removed on purpose ("logo_removed"):
+Kept in data/courier_services.json, the logos in one folder, data/courier logos/ (LOGO_DIR_NAME):
+  <group id>.png              a carrier's logo put there by hand (cut from the logo sheet by engine/courier/logo_sheet.py):
+                              the group with that id uses it until a logo is dropped for it, or it's removed on purpose
+                              ("logo_removed")
+  logo-<content hash>.png     a logo dropped for a group in the Address Book
+A logo belongs to a group (a service on its own is a group of one), and a service always shows the logo of the group
+it's in: move it to another group and it takes that group's logo. Dropped files are named by their content, so groups
+with the same logo share one file. A file no group uses any more (replaced, removed, its group deleted or emptied) is
+deleted after every change; any other file in the folder (no group's id, not dropped here) is left alone:
 
   {"groups": [{"id": "dhl", "name": "DHL", "logo": "dhl.png",
                "services": [{"code": "DHLWPXOD", "name": "DHL DDP EXPRESS PARCELS>30kG"}, ...]}, ...]}
@@ -57,7 +59,9 @@ DEFAULT_GROUPS = [
 OWN_GROUP = '__own__'  # update_service: take the service out of its group, on its own
 CODE_RE = re.compile(r'^[A-Z0-9][A-Z0-9_-]{0,19}$')
 LOGO_MAX_BYTES = 5 * 1024 * 1024
-DEFAULT_LOGO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'default_logos')
+LOGO_DIR_NAME = 'courier logos'  # in data/: every group's logo
+LEGACY_LOGO_DIR_NAME = 'courier_logos'  # in data/ before: its logos move into LOGO_DIR_NAME once
+DROPPED_RE = re.compile(r'^logo-[0-9a-f]{16}\.png$')
 LOGO_MAX_SIDE = 2400  # px: a 1000 px wide strip is plenty for the 43 mm slot; bigger ones are scaled down once
 
 
@@ -87,15 +91,34 @@ def _defaults():
 
 
 class ServiceStore:
-    def __init__(self, path, logo_dir, default_dir=DEFAULT_LOGO_DIR):
+    def __init__(self, path, logo_dir, legacy_dir=None):
         self.path = path
         self.logo_dir = logo_dir
-        self.default_dir = default_dir
+        self.legacy_dir = legacy_dir  # the folder the logos were in before; moved over on first use
         self._lock = threading.Lock()
+
+    def _move_legacy(self):
+        """Once: the logos in the old folder move into logo_dir (one already there by that name is kept), and the old
+        folder goes when it's empty. Done on first use, not at start-up, so importing the app changes nothing."""
+        old, self.legacy_dir = self.legacy_dir, None
+        if not old or not os.path.isdir(old) or os.path.abspath(old) == os.path.abspath(self.logo_dir):
+            return
+        try:
+            os.makedirs(self.logo_dir, exist_ok=True)
+            for name in os.listdir(old):
+                src, dest = os.path.join(old, name), os.path.join(self.logo_dir, name)
+                if name.lower().endswith('.png') and os.path.isfile(src) and not os.path.exists(dest):
+                    os.replace(src, dest)
+            if not os.listdir(old):
+                os.rmdir(old)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ reading
     def load(self):
         """{'groups': [...]}: the saved list, or the starting list when nothing usable is saved."""
+        if self.legacy_dir:
+            self._move_legacy()
         try:
             with open(self.path, encoding='utf-8') as f:
                 data = json.load(f)
@@ -124,18 +147,29 @@ class ServiceStore:
         return next((g for g in self.load()['groups'] if any(s['code'] == code for s in g['services'])), None)
 
     def logo_path(self, group):
-        """The group's logo file: the one dropped for it, else the one that comes with the app, else None."""
+        """The group's logo file: the one dropped for it, else <group id>.png in the folder, else None."""
         if not group:
             return None
         if group.get('logo'):
             path = os.path.join(self.logo_dir, os.path.basename(group['logo']))
             if os.path.exists(path):
                 return path
-        if not group.get('logo_removed') and self.default_dir:
-            path = os.path.join(self.default_dir, f"{os.path.basename(group['id'])}.png")
+        if not group.get('logo_removed'):
+            path = os.path.join(self.logo_dir, f"{os.path.basename(group['id'])}.png")
             if os.path.exists(path):
                 return path
         return None
+
+    @staticmethod
+    def _logo_names(group):
+        """The files in the logo folder the group can use: the one dropped for it, and its <group id>.png (kept
+        while nothing was dropped, so a dropped logo that goes missing falls back to it)."""
+        names = set()
+        if group.get('logo'):
+            names.add(os.path.basename(group['logo']))
+        elif not group.get('logo_removed'):
+            names.add(f"{os.path.basename(group['id'])}.png")
+        return names
 
     def logo_for(self, code):
         """The logo file for a service code (its group's), or None."""
@@ -152,21 +186,25 @@ class ServiceStore:
     def _change(self, fn):
         with self._lock:
             data = self.load()
+            before = self._used(data)
             result = fn(data)
             self._write(data)
-            self._prune_logos(data)
+            self._prune_logos(data, before)
             return result
 
-    def _prune_logos(self, data):
-        """Deletes the logo files no group uses any more (a replaced or removed logo, a deleted or emptied group).
-        The logos that come with the app are never touched."""
-        used = {os.path.basename(g['logo']) for g in data['groups'] if g.get('logo')}
+    def _used(self, data):
+        return set().union(*(self._logo_names(g) for g in data['groups']))
+
+    def _prune_logos(self, data, before=()):
+        """Deletes the logo files no group uses any more (a replaced or removed logo, a deleted or emptied group): a
+        dropped one, or a <group id>.png its group used until this change. Any other file in the folder stays."""
+        used = self._used(data)
         try:
             names = os.listdir(self.logo_dir)
         except OSError:
             return
         for name in names:
-            if name.lower().endswith('.png') and name not in used:
+            if name not in used and (DROPPED_RE.match(name) or name in before):
                 try:
                     os.remove(os.path.join(self.logo_dir, name))
                 except OSError:
@@ -330,7 +368,7 @@ class ServiceStore:
 
         def go(data):
             g = self._group(data, group_id)
-            g['logo'] = self._store_png(png)  # the group's earlier logo goes once nothing uses it (_prune_logos)
+            g['logo'] = self._store_png(png)  # the group's earlier logo goes unless another uses it (_prune_logos)
             g.pop('logo_removed', None)
             return {'width': img.width, 'height': img.height}
         return self._change(go)
@@ -351,7 +389,7 @@ class ServiceStore:
         g['logo'] = ''
 
     def delete_logo(self, group_id):
-        """No logo for the group any more, not even the one that comes with the app (drop one to have it again)."""
+        """No logo for the group any more, not even its <group id>.png (drop one to have it again)."""
         def go(data):
             g = self._group(data, group_id)
             self._remove_logo_file(g)
@@ -366,8 +404,8 @@ class ServiceStore:
         return f"{n} services in {len(groups)} groups, {logos} logo{'s' if logos != 1 else ''}"
 
     def export_files(self):
-        """{name in the zip: bytes}: the list, and only the logos a group (or a service on its own) uses, the app's
-        own ones too, each file once however many groups share it, named by its content."""
+        """{name in the zip: bytes}: the list, and only the logos a group (or a service on its own) uses, the
+        <group id>.png ones too, each file once however many groups share it, named by its content."""
         data = self.load()
         files = {}
         for g in data['groups']:
@@ -389,8 +427,7 @@ class ServiceStore:
         logos = {os.path.basename(k): v for k, v in files.items() if k.startswith('courier_logos/') and k.endswith('.png')}
         groups = [g for g in incoming.get('groups') or [] if isinstance(g, dict) and g.get('id')]
         if mode == 'replace':  # the logos here go as the list empties (_prune_logos); the zip's come in after
-            with self._lock:
-                self._write({'groups': []})
+            self._change(lambda data: data['groups'].clear())
             added = 0
             for g in groups:
                 for s in g.get('services') or []:

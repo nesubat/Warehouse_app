@@ -1,5 +1,5 @@
-"""Cuts the courier logo sheet (2 columns x 5 rows of logo strips) into one PNG per service group, the logos the app
-uses by default (engine/courier/default_logos/<group id>.png). Only the size changes: each strip is cut out of the sheet
+"""Cuts the courier logo sheet (2 columns x 5 rows of logo strips) into one PNG per service group, the logos each group
+uses until another is dropped for it (data/courier logos/<group id>.png). Only the size changes: each strip is cut out of the sheet
 as it is (its own colours and design) and scaled to LOGO_WIDTH px wide, which prints sharp in the label's 43 mm logo
 slot (as tall as the LABEL / PAGE chips) at 600 dpi and keeps every file small, so stitching stays quick.
 
@@ -12,8 +12,10 @@ import sys
 
 from PIL import Image
 
-from engine.courier.courier_services import DEFAULT_LOGO_DIR
+from engine.core.paths import DATA_DIR
+from engine.courier.courier_services import LOGO_DIR_NAME
 
+LOGO_DIR = os.path.join(DATA_DIR, LOGO_DIR_NAME)
 LOGO_WIDTH = 1000  # px: the 43 mm slot at 600 dpi
 ORDER = [  # (column, row) -> group id
     ('dhl', 0, 0), ('fedex-international', 0, 1), ('flash-couriers', 0, 2), ('startrack-premium-overnight', 0, 3),
@@ -69,7 +71,7 @@ def cells(img, cols=2, rows=5):
     return {(c, r): (xs[c][0], ys[r][0], xs[c][1], ys[r][1]) for c in range(cols) for r in range(rows)}
 
 
-def cut(sheet_path, out_dir=DEFAULT_LOGO_DIR, width=LOGO_WIDTH):
+def cut(sheet_path, out_dir=LOGO_DIR, width=LOGO_WIDTH):
     img = Image.open(sheet_path)
     img.load()
     img = img.convert('RGBA')
@@ -91,7 +93,8 @@ def cut(sheet_path, out_dir=DEFAULT_LOGO_DIR, width=LOGO_WIDTH):
         col = 0 if n < 5 else 1
         check.paste(Image.open(path), (pad + col * (width + pad), y[col]))
         y[col] += size[1] + pad
-    check.save(os.path.join(out_dir, '_cut_check.png'))
+    # Next to the sheet, not in the logo folder: only logos go there
+    check.save(os.path.join(os.path.dirname(os.path.abspath(sheet_path)), '_cut_check.png'))
     return made
 
 
@@ -100,4 +103,4 @@ if __name__ == '__main__':
         sys.exit(__doc__)
     for gid, path, size, nbytes in cut(sys.argv[1]):
         print(f"{gid:30s} {size[0]} x {size[1]} px  {nbytes / 1024:.1f} KB  {path}")
-    print("check sheet:", os.path.join(DEFAULT_LOGO_DIR, '_cut_check.png'))
+    print("check sheet:", os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), '_cut_check.png'))

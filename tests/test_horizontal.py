@@ -171,7 +171,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "SPEC_STORE", SpecStore(str(data / "packing_specs.json")))
     monkeypatch.setattr(app_module, "SERVICE_USAGE_FILE", str(data / "service_code_usage.json"))
     from engine.courier.courier_services import ServiceStore
-    monkeypatch.setattr(app_module, "SERVICE_STORE", ServiceStore(str(data / "courier_services.json"), str(data / "courier_logos")))
+    monkeypatch.setattr(app_module, "SERVICE_STORE", ServiceStore(str(data / "courier_services.json"), str(data / "courier logos")))
     monkeypatch.setattr(app_module, "EXPORT_FILE", str(data / "export_details.json"))
     monkeypatch.setattr(app_module, "VIEW_FOLDER", str(data / "page_views"))
     for name in ("close_if_open_elsewhere", "save_if_open_elsewhere"):  # Excel-only helpers

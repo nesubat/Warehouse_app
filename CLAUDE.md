@@ -26,8 +26,8 @@ Code is grouped by feature under `engine/`; `app.py` (routes) stays at the top a
   with a box per packing-sheet code (`code_cells`: header in the job number's place, code in the quantity's).
 - `engine/courier/`: `courier_import.py`, `courier_export.py` consignments and the Open360 / OpenFreight CSVs;
   `packing_specs.py` sizes and weights per Packing Spec.
-  `courier_services.py` the service list and each group's logo (`data/courier_services.json`, `data/courier_logos/`,
-  defaults in `engine/courier/default_logos/` cut by `logo_sheet.py`); Stitch Labels puts the logo in the label's slot.
+  `courier_services.py` the service list and each group's logo (`data/courier_services.json`; all logos in
+  `data/courier logos/`: `<group id>.png` cut by `logo_sheet.py`, dropped ones `logo-<hash>.png`); Stitch Labels puts the logo in the label's slot.
 - `engine/addresses/`: `address_book.py`, `address_match.py`, `address_import.py` (bulk update), `address_reference.py`
   (official G-NAF / LINZ data).
 - `engine/packing_labels/label_stitcher.py` puts courier labels on packing labels by the code in their Item Ref.

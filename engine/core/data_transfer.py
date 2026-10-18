@@ -9,7 +9,7 @@ takes the parts chosen there:
   packing_specs          data/packing_specs.json      Merge (adds the named specs missing here) or Replace
   export_details         data/export_details.json     Replace
   service_usage          data/service_code_usage.json Replace
-  courier_services       data/courier_services.json + data/courier_logos/*.png (each group's logo)
+  courier_services       data/courier_services.json + data/courier logos/*.png (each group's logo; courier_logos/ in the zip)
                          Merge (adds the services, groups and logos missing here) or Replace
   address_data_settings  data/address_reference.json  (the LINZ API key) Replace
 
@@ -189,7 +189,7 @@ def _backup(data_dir, book, keys, services=None):
             if os.path.exists(services.path):
                 shutil.copy2(services.path, os.path.join(folder, name))
             if os.path.isdir(services.logo_dir):
-                shutil.copytree(services.logo_dir, os.path.join(folder, 'courier_logos'))
+                shutil.copytree(services.logo_dir, os.path.join(folder, os.path.basename(services.logo_dir)))
         elif os.path.exists(os.path.join(data_dir, name)):
             shutil.copy2(os.path.join(data_dir, name), os.path.join(folder, name))
     return folder
