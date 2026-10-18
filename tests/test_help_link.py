@@ -22,8 +22,12 @@ def test_env_file_lines_are_read_and_the_environment_wins(tmp_path, monkeypatch)
 def test_help_link_in_the_nav_only_for_a_web_address(monkeypatch):
     import app as app_module
     assert app_module._help_url('https://help.example.com/a?b=1') == 'https://help.example.com/a?b=1'
-    for bad in ('javascript:alert(1)', 'file:///C:/x', 'help.example.com', '', 'https://x" onclick="y'):
+    for bad in ('javascript:alert(1)', 'file:///C:/x', r'C:\help.html', '', 'https://x" onclick="y', 'help'):
         assert app_module._help_url(bad) == '', bad
+    # Written without its https:// (or in angle brackets): taken as the web address it is
+    assert app_module._help_url('www.example.com/help') == 'https://www.example.com/help'
+    assert app_module._help_url('help.example.com') == 'https://help.example.com'
+    assert app_module._help_url('<https://example.com/help>') == 'https://example.com/help'
     client = app_module.app.test_client()
     monkeypatch.setattr(app_module, 'HELP_URL', 'https://help.example.com/warehouse')
     page = client.get('/packing-specs').data.decode()

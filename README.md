@@ -193,7 +193,7 @@ No secret key is needed. An optional `.env` file in the app folder (next to the 
 ```
 WAREHOUSE_HELP_URL=https://your-help-page
 ```
-`WAREHOUSE_HELP_URL` adds a round **?** Help icon at the far right of the nav bar, opening in a new tab. Only an `http://` or `https://` address is used; without one (or with anything else) there's no Help link. Restart the app after changing `.env`.
+`WAREHOUSE_HELP_URL` adds a round **?** Help icon at the far right of the nav bar, opening in a new tab. Only an `http://` or `https://` address is used; without one (or with anything else) there's no Help link. Restart the app after changing `.env`. An address written without `https://` (`www.example.com/help`) gets it. At start the app says whether the Help link is on and, if not, why (in its terminal and on the Logs page): restart it after changing `.env`.
 ### 4. Run application
 ```bash
 python app.py 

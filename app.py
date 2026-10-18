@@ -160,12 +160,25 @@ os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('WAREHOUSE_MAX_UPLOAD_MB', '500')) * 1024 * 1024
 
 def _help_url(url):
-    """WAREHOUSE_HELP_URL from .env: only a web address (http or https) becomes the nav's Help link."""
-    url = str(url or '').strip()
+    """WAREHOUSE_HELP_URL from .env: only a web address becomes the nav's Help link. One written without its
+    https:// ('www.example.com/help', 'help.example.com') gets it; anything else (a file path, javascript:) is left out."""
+    url = str(url or '').strip().strip('<>').strip()
+    if url and not re.match(r'[a-z][a-z0-9+.-]*:', url, re.I) and re.match(r'[\w-]+(\.[\w-]+)+(/|$)', url):
+        url = f"https://{url}"
     return url if re.match(r'https?://[^\s"<>]+$', url, re.I) else ''
 
 
 HELP_URL = _help_url(os.environ.get('WAREHOUSE_HELP_URL'))
+# Said once at start (terminal and Logs page): whether the Help link is on, and why not. Never the address itself
+if HELP_URL:
+    log_app.info("Help link: on (WAREHOUSE_HELP_URL)")
+elif os.environ.get('WAREHOUSE_HELP_URL', '').strip():
+    log_app.warning("Help link: off - WAREHOUSE_HELP_URL in .env isn't a web address (it needs to look like "
+                    "https://example.com/help)")
+else:
+    log_app.info("Help link: off - no WAREHOUSE_HELP_URL in %s (one line: WAREHOUSE_HELP_URL=https://…)",
+                 os.path.join(BASE_DIR, '.env') if os.path.exists(os.path.join(BASE_DIR, '.env')) else
+                 f"the environment, and there's no .env file in {BASE_DIR}")
 
 
 @app.context_processor
