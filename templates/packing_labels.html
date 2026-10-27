@@ -461,7 +461,8 @@
                                 <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
                                 {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="Not in the address book yet: it's saved there when you generate. Open ✏️ to compare with saved addresses.">New address</span>{% endif %}
-                                {% if c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
+                                {% if c.collect %}<span class="pl-courier-tag pl-tag-collect" title="The file says these packs are collected. Not in the courier CSV; each label's courier region says &quot;{{ c.collect }}&quot; and its pack number. Type an address in ✏️ to send them instead.">{{ c.collect|title }}</span>
+                                {% elif c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                                 </div></div>
                                 {# ✏️: the receiver and Attn open into fields where they're shown #}

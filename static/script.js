@@ -3402,7 +3402,10 @@ document.addEventListener('DOMContentLoaded', function () {
         (review.specs || []).forEach((sp) => tiers.fix.push({
             key: `spec:${sp.spec}`,
             title: sp.unread ? `Couldn't read the size from packing spec ${sp.spec}` : `No size saved for packing spec ${sp.spec}`,
-            detail: `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press 🔄 Update Previews.`,
+            detail: sp.unread
+                ? `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: its digits don't split into three sizes in mm (2-4 digits each, none starting with 0, no side of 1000 cm or more), so dimensions are left blank in the courier CSV.`
+                  + `${sp.meant ? ` Most likely ${sp.meant}, with a 0 typed twice.` : ''} Fix the code in the Excel file, then press 🔄 Update Previews.`
+                : `${sp.cartons} carton${sp.cartons === 1 ? '' : 's'}: dimensions are left blank in the courier CSV. Fill it in, then press 🔄 Update Previews.`,
             link: { href: sp.url, text: sp.unread ? '📐 Check the code in Packing Specs' : '📐 Add its size in Packing Specs' },
             entries: sp.consignments.map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
         (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text, edit: true,

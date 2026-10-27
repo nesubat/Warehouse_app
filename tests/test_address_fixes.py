@@ -69,3 +69,26 @@ def test_a_suburb_written_in_an_address_line_is_found_to_move_into_suburb():
     assert find(line1="12 Bondi Rd") is None  # a street, not the suburb
     assert find(line1="5 Swan St, Richmond 2753")[1] == "NSW"  # the postcode written with it picks the state
     assert find(line1="5 Swan St, Richmond", state="VIC")[1] == "VIC"
+
+
+def test_a_city_with_no_postcode_of_its_own_offers_its_suburbs_postcode():
+    """'Hervey Bay' is kept by the official data with no postcode: its suburbs (which carry the name too) give it."""
+    from engine.addresses.address_reference import _assess_in
+    db = _places((1, "HERVEY BAY", "QLD", []), (2, "PIALBA", "QLD", ["4655"]), (3, "URANGAN", "QLD", ["4655"]))
+    db.executemany("INSERT INTO locality_name VALUES ('HERVEY BAY', ?)", [(2,), (3,)])
+    a = {'line1': '12 Main St', 'line2': '', 'suburb': 'Hervey Bay', 'state': 'QLD', 'postcode': ''}
+    r = _assess_in('AU', db, a)
+    assert r['message'].startswith('No postcode: PIALBA QLD is 4655')
+    assert r['options'][0]['fields'] == {'suburb': 'PIALBA', 'state': 'QLD', 'postcode': '4655'}
+    assert _assess_in('AU', db, dict(a, postcode='4655'))['fields'].get('postcode') is None  # written in: no problem
+
+
+def test_a_country_written_after_the_suburb_is_read_as_the_country():
+    from engine.courier.courier_export import parse_address_text
+    read = lambda t: (lambda r: (r['suburb'], r['state'], r['postcode'], r['country']))(parse_address_text(t))  # noqa: E731
+    assert read('Billboard Solutions, 3F Miro Place, Albany NZ') == ('Albany', '', '', 'NZ')
+    assert read('5 High St, Lower Hutt NZ 5010') == ('Lower Hutt', '', '5010', 'NZ')
+    assert read('5 High St, Lower Hutt 5010 New Zealand') == ('Lower Hutt', '', '5010', 'New Zealand')
+    # Australian addresses read as before
+    assert read('34 Robinson St North, Wiley Park NSW 2195') == ('Wiley Park', 'NSW', '2195', '')
+    assert read('Shop 4, 12 Main St, Richmond VIC 3121, Australia') == ('Richmond', 'VIC', '3121', 'Australia')

@@ -29,7 +29,7 @@ from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from engine.addresses.address_book import AddressBook, AddressBookError
 from engine.addresses.address_import import build_review, apply_review, all_label_maps, ImportProblem
 from engine.addresses.address_match import suggestions as closest_addresses
-from engine.courier.packing_specs import SpecStore, parse_formula, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
+from engine.courier.packing_specs import SpecStore, parse_formula, likely_meant, FORMULA_PREFIXES, FORMULA_LABELS, FORMULA_EXAMPLES, ITEM_TYPES
 from engine.courier.courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
     FIELD_NAMES as IMPORT_FIELD_NAMES
 from engine.addresses import address_reference
@@ -40,7 +40,7 @@ from engine.packing_labels.label_stitcher import (read_courier_csv, courier_csv_
 import threading
 from collections import Counter
 import secrets
-from engine.courier.courier_export import (unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
+from engine.courier.courier_export import (collect_note, unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
@@ -2177,6 +2177,10 @@ def _review(previews, cartons, courier_warnings):
         # A code the size couldn't be read from goes to Check a code; any other spec to its own row
         s['url'] = (url_for('packing_specs_page', code=s['spec']) + '#ps-try' if s['unread']
                     else url_for('packing_specs_page', spec=s['spec']))
+        # A 0 typed twice ('OB11800170170'): the code it most likely is, with its size, for the person fixing the file
+        meant = likely_meant(s['spec']) if s['unread'] else ''
+        size = parse_formula(meant)[1] if meant else None
+        s['meant'] = f"{meant} ({' × '.join(f'{v:g}' for v in size)} cm)" if size else ''
     # The consignments a check names ('#4 …', 'Consignment 5 …') come with it, so the list can go to them. An
     # incomplete address is left to the rows' own 'missing' check (it follows edits)
     courier = []
@@ -2373,7 +2377,12 @@ def _check_against_book(consignments, edits, book_options=None):
     # The official address data: book entries first (a verified one settles it), then the reference
     started = time.perf_counter()
     for c in consignments:
-        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['book'] == 'missing'
+        # A row with no postcode (no complete address yet) is checked too: what it has (a suburb and state, or an
+        # address line with the suburb in it) is often all the official data needs to offer the rest in one click
+        # ('No postcode: WILEY PARK NSW is 2195'), with no address book entry needed.
+        # Packs collected rather than sent ('Kyle collect from warehouse') have no address to check: a note on the label
+        c['collect'] = collect_note(c['destination'].get('raw') or one_line(c['destination'])) if c.get('no_address') else ''
+        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['collect']
                     else _reference_for(c['destination'], edits.get(c['id'], {})))
         # What the saved addresses say about its suburb: only fields left empty or the official data can't check
         # (a row with no postcode included: its suburb may be all it needs to be completed)
@@ -3426,7 +3435,9 @@ def _distribution_page(mode):
                     c = by_number[x['consignment']]
                     d = c['destination']
                     label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
-                                                      'sent': not c.get('no_address')}
+                                                      'sent': not c.get('no_address'),
+                                                      # 'KYLE TO COLLECT': collected, not sent (its courier region says so)
+                                                      'collect': collect_note(d.get('raw') or one_line(d)) if c.get('no_address') else ''}
                 shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
                 ref_issues = []
                 edits_now = _consignment_edits(request.form)

@@ -1431,6 +1431,7 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 /* Consignments with no address (receiver name only): listed first, red */
 .pl-page .pl-missing-note { background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; padding: 10px 12px; margin: 14px 0 0; font-size: 13px; color: #922b21; }
 .pl-page .pl-tag-missing { border-color: #e74c3c; color: #c0392b; background: #fdedec; margin-left: 4px; }
+.pl-page .pl-tag-collect { border-color: #c0392b; color: #c0392b; background: #fff2a8; margin-left: 4px; font-weight: 600; }
 .pl-page .pl-con-row.pl-no-address > td { background: #fef5f4; }
 .pl-page .pl-con-row.pl-no-address > td:first-child { box-shadow: inset 4px 0 0 #e74c3c; }
 .pl-page .pl-no-address-text { color: #c0392b; font-style: italic; }

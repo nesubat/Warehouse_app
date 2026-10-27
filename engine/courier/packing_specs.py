@@ -42,7 +42,8 @@ DEFAULT_NAMED = [
     {'name': 'P1 jiffy bag', 'length': None, 'width': None, 'height': None, 'weight': 1},
 ]
 FALLBACK_WEIGHT = 2  # a spec with no weight anywhere
-MAX_CM, MAX_KG = 1000, 5000
+# No box we send has a side of 1000 cm or more: three digits in cm at most ('OB18500170170' is a 0 typed twice)
+MAX_CM, MAX_KG = 999, 5000
 
 _FORMULA = re.compile(r'^\s*(OB|CS|PALLET|FP)\s*[-:#]?\s*(\d[\d\s.x×*/-]*?)\s*$', re.I)
 
@@ -107,6 +108,24 @@ def split_count(spec):
     return 1, text
 
 
+def likely_meant(spec):
+    """'OB1180170170' for 'OB11800170170', 'OB 1850 x 170 x 170' for 'OB 18500 x 170 x 170': a code whose size
+    can't be read (or is 1000 cm or more) but can with one 0 taken out (a 0 typed twice), when that gives one size
+    only, in whole centimetres. A hint for the person fixing the file, never used for the CSV itself."""
+    text = str(spec or '')
+    m = _FORMULA.match(text)
+    if not m or parse_formula(text, 1)[1]:
+        return ''
+    meant = {}
+    for i in range(m.start(2), m.end(2)):
+        if text[i] == '0':
+            fixed = text[:i] + text[i + 1:]
+            size = parse_formula(fixed, 1)[1]  # FP: any 3rd size, only its two sizes are tried
+            if size and all(float(v).is_integer() for v in size):
+                meant.setdefault(size, fixed)
+    return next(iter(meant.values())) if len(meant) == 1 else ''
+
+
 def parse_formula(spec, fp_third_size=None):
     """('OB' | 'CS' | 'PALLET' | 'FP', (length, width, height) in cm or None) for formula codes, else None.
     Numbers can run together (OB1701701200) or be separated (OB 170 x 170 x 1200). An FP code with only
@@ -130,7 +149,7 @@ def parse_formula(spec, fp_third_size=None):
         if prefix != 'FP' or not fp_third_size:
             return prefix, None
         return prefix, tuple(_num(v / 10) for v in mm) + (_num(float(fp_third_size)),)
-    if not mm or len(mm) != 3 or not all(mm):
+    if not mm or len(mm) != 3 or not all(mm) or any(v / 10 > MAX_CM for v in mm):
         return prefix, None
     return prefix, tuple(_num(v / 10) for v in mm)
 

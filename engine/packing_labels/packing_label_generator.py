@@ -1371,7 +1371,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     (address book, edits); a plain address string also works. A pack going to an installer gets a red
     "Installer: <receiver> · Attn <contact>" line; any other pack whose
     receiver isn't the store (or has an Attn) gets "Deliver to: …". A pack left out of the courier CSV
-    (sent=False) says so in the courier label region. A pack missing from addresses shows its Excel address.
+    (sent=False) says so in the courier label region; one collected instead ('collect': 'KYLE TO COLLECT',
+    courier_export.collect_note) gets that note and 'PACK 2 OF 3' there in red on yellow, counted over its store's
+    boxes only. A pack missing from addresses shows its Excel address.
     report: the job report (draw_report_pages) put in front as page 1; the page numbers returned count it.
     A Packing Spec with a box count in front ('2 x OB170170170', packing_specs.split_count) gets one full set of
     pages per box, each with a diagonal "BOX 1 OF 2" watermark over the item grid (region C) and a box chip, so the
@@ -1391,6 +1393,11 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
 
     assign_label_numbers(pack_groups)
     assign_barcodes(pack_groups)
+    # 'PACK 2 OF 3' on a collected store's labels: its boxes counted, that store's only (a '2 x' pack is two)
+    store_boxes = Counter()
+    for g in pack_groups.values():
+        store_boxes[_norm(g['store_name'])] += split_count(g.get('pack_spec_name', ''))[0]
+    boxes_seen = Counter()
     # One item-box layout for the whole job (every box is CELL_W x CELL_H): the same block at the same place in each
     plan = plan_cells([it for g in pack_groups.values() for it in list(g.get('code_cells') or []) + g['items']],
                       attribute_order, fitz.Rect(0, 0, CELL_W, CELL_H))
@@ -1473,6 +1480,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         copies[pack_key] = []
         for box in range(1, boxes + 1):
             box_first_page = len(doc)
+            boxes_seen[_norm(store)] += 1
             current_item_idx = 0
             page_num = 1
 
@@ -1483,7 +1491,33 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                 if page_num == 1:
                     zone_a_rect = fitz.Rect(MARGIN, MARGIN, MARGIN + ZONE_A_W, MARGIN + ZONE_A_H)
                     page.draw_rect(zone_a_rect, color=(0.8, 0.8, 0.8), width=0.5, dashes="[3] 0")
-                    if info.get('sent', True):
+                    if info.get('collect'):
+                        # Collected, not sent ('Kyle collect from warehouse'): who collects, the store the packs are
+                        # for and which of its packs this is, in red on yellow where the courier label would go
+                        panel = fitz.Rect(zone_a_rect.x0 + 8, zone_a_rect.y0 + 8, zone_a_rect.x1 - 8, zone_a_rect.y1 - 8)
+                        page.draw_rect(panel, color=(0.8, 0.0, 0.0), fill=(1.0, 0.92, 0.25), width=2)
+                        red, room = (0.8, 0.0, 0.0), panel.width - 20
+
+                        def fitted(text, size, least, most_lines):
+                            # Biggest size (down to least) at which no word runs past the panel
+                            while size > least and max(fitz.get_text_length(w, fontname="hebo", fontsize=size)
+                                                       for w in text.split()) > room:
+                                size -= 1
+                            return [(line, size) for line in _wrap(text, "hebo", size, room)[:most_lines]]
+
+                        blocks = [fitted(_latin(info['collect']), 26, 12, 3),
+                                  fitted(_latin(" ".join(str(store).split())), 18, 10, 3),
+                                  fitted(f"PACK {boxes_seen[_norm(store)]} OF {store_boxes[_norm(store)]}", 22, 12, 1)]
+                        gap = 14
+                        height = sum(sz * 1.2 for b in blocks for _, sz in b) + gap * (len(blocks) - 1)
+                        y = panel.y0 + (panel.height - height) / 2
+                        for b in blocks:
+                            for line, sz in b:
+                                y += sz * 1.2
+                                page.insert_text((panel.x0 + (panel.width - fitz.get_text_length(line, fontname="hebo", fontsize=sz)) / 2,
+                                                  y - sz * 0.25), line, fontname="hebo", fontsize=sz, color=red)
+                            y += gap
+                    elif info.get('sent', True):
                         page.insert_textbox(zone_a_rect, "Courier Label Region\n(107mm x 150mm)", fontsize=10, color=(0.6, 0.6, 0.6), align=1)
                     else:
                         # Left out of the courier CSV: no courier label will come for this box

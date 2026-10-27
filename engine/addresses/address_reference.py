@@ -1086,6 +1086,17 @@ def _assess_in(country, db, a):
         if not ids:
             ids = [i for (i,) in db.execute("SELECT DISTINCT locality FROM locality_name WHERE key = ?", (suburb,))]
         named = _localities(db, ids)
+        if country == 'AU' and named and not any(l['postcodes'] for l in named):
+            # A name the official data keeps with no postcode of its own: a city made of suburbs ('Hervey Bay' is
+            # Pialba, Urangan, Scarness … 4655). Those suburbs carry the name too and give its postcode; the one the
+            # street is in comes first, so the fix offered is the suburb the address really is in
+            group = [l for l in _localities(db, [i for (i,) in db.execute(
+                "SELECT DISTINCT locality FROM locality_name WHERE key = ?", (suburb,))])
+                     if l['postcodes'] and (not state or l['state'] == state)]
+            if group:
+                street_in = _street_in(db, group, [a['line1'], a['line2']])[2]
+                group.sort(key=lambda l: _key(l['name']) != _key(street_in or ''))
+                named = group
     at_postcode = _localities(db, [i for (i,) in db.execute("SELECT locality FROM locality_postcode WHERE postcode = ?", (postcode,))]) \
         if postcode and country == 'AU' else []
     matched, suburb_unknown = [], False

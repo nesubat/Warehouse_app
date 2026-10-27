@@ -241,6 +241,16 @@ def _ends_with_state(text):
     return text, ''
 
 
+def _ends_with_country(text):
+    """('Albany', 'NZ') for 'Albany NZ' / 'Lower Hutt New Zealand', else (text, ''): a country written after the
+    suburb in the same part of the cell, not as a part of its own."""
+    words = text.split()
+    for size in (2, 1):
+        if len(words) > size and _norm(" ".join(words[-size:])) in COUNTRIES:
+            return " ".join(words[:-size]), " ".join(words[-size:])
+    return text, ''
+
+
 def _split_street_suburb(text):
     """'27 Sirius Road Lane Cove' -> ('27 Sirius Road', 'Lane Cove'): the suburb starts after the last street
     word that follows a name word (so 'Lane Cove' and 'St Kilda' stay suburbs). ('', '') if there's no street."""
@@ -284,6 +294,10 @@ def parse_address_text(raw, names=True):
     country = postcode = state = suburb = ''
     if len(parts) > 1 and _norm(parts[-1]) in COUNTRIES:
         country = parts.pop()
+    # A country written at the end of the last part, before or after its postcode ('Albany NZ', 'Lower Hutt NZ 5010',
+    # 'Lower Hutt 5010 NZ'): taken off, so the suburb before it is read and the address is checked in that country
+    if parts and not country:
+        parts[-1], country = _ends_with_country(parts[-1])
     # Postcode: a part of its own, or the end of the last part ('Lane Cove NSW 2067')
     if parts:
         m = re.fullmatch(r'(.*?)[\s,]*\b(\d{4})', parts[-1])
@@ -292,6 +306,8 @@ def parse_address_text(raw, names=True):
             parts[-1] = _tidy(m.group(1))
             if not parts[-1]:
                 parts.pop()
+    if parts and not country:
+        parts[-1], country = _ends_with_country(parts[-1])
     # State: a part of its own, or the end of the last part
     if parts and (postcode or len(parts) > 1):
         rest, code = _ends_with_state(parts[-1])
@@ -300,8 +316,9 @@ def parse_address_text(raw, names=True):
             parts[-1] = _tidy(rest)
             if not parts[-1]:
                 parts.pop()
-    # Suburb: what's left of the last part, unless it's the street itself
-    if parts and (postcode or state):
+    # Suburb: what's left of the last part, unless it's the street itself (a country written after it counts too:
+    # 'Billboard Solutions, 3F Miro Place, Albany NZ' has Albany as its suburb)
+    if parts and (postcode or state or country):
         last = parts[-1]
         street, after = _split_street_suburb(last)
         if after:
@@ -326,6 +343,36 @@ def parse_address_text(raw, names=True):
         found.append(parts.pop(0))  # 'Steven Priestley - Wilson Storage, 68 Ricketts Road'
     return {'head': head, 'names': found, 'attn': attn, 'atl': atl, 'street': ", ".join(parts),
             'suburb': suburb, 'state': state, 'postcode': postcode, 'country': country}
+
+
+_COLLECT = re.compile(r'\b(?:collect(?:s|ed|ing|ion)?|pick\s*-?\s*ups?|picks\s+up|picking\s+up)\b', re.I)
+# Words before 'collect' that aren't who collects ('to be collected', 'please collect from warehouse')
+_NOT_A_COLLECTOR = {'to', 'will', 'be', 'from', 'please', 'for', 'the', 'at', 'warehouse', 'client', 'customer', 'store',
+                    'by', 'pick', 'up', 'and', 'or', 'is', 'are', 'can', 'attn', 'note', 'notes', 'via', 'our', 'we'}
+
+
+def collect_note(text):
+    """'KYLE TO COLLECT' for a store whose packs are collected rather than sent: an address cell that says so
+    ('Kyle collect from warehouse', 'Kyle to collect', 'pick up from warehouse' -> 'TO BE COLLECTED') and has no
+    street number or postcode, so a real address naming a 'Collection' centre isn't one. '' for any other."""
+    t = " ".join(str(text or '').split())
+    # 'Click & Collect desk' names a store counter, not packs collected from the warehouse
+    t = re.sub(r'\bclick\s*(?:&|and|n|\'n\')\s*collect\b', ' ', t, flags=re.I)
+    m = _COLLECT.search(t)
+    if not m or re.search(r'\d', t):
+        return ''
+    words = [w.strip('.,:;-()') for w in t[:m.start()].split()]
+    names = [w for w in words if w and w.lower() not in _NOT_A_COLLECTOR]
+    who = " ".join(names[-2:]).upper()
+    return f"{who} TO COLLECT" if who else "TO BE COLLECTED"
+
+
+def collect_receiver(text):
+    """collect_note() as a receiver name: 'Kyle to collect', 'John Smith to collect', 'To be collected'."""
+    note = collect_note(text)
+    if note.endswith(" TO COLLECT"):
+        return note[:-len(" TO COLLECT")].title() + " to collect"
+    return note.capitalize()
 
 
 def _looks_like_address(text):
@@ -365,7 +412,11 @@ def resolve_destination(group):
     from_address = group.get('store_from_address')  # the store name was itself taken from this address
     store = '' if from_address else _tidy(group.get('store_name'))
     given = _tidy(group.get('receiver_name'))  # a Receiver Name column
-    p = parse_address_text("\n".join(t for t in texts if t), names=not (store or given))
+    # An installer pack (Install = Y) with no Receiver Name goes to whoever its address cell names first
+    # ('M. Hazelton, 34 Robinson St North…', 'Aurora Signs, 1/39 Grimwade St…'), not the store. Install N or blank:
+    # the store, as always
+    installer = bool(group.get('install')) and not given
+    p = parse_address_text("\n".join(t for t in texts if t), names=not (store or given) or installer)
 
     people = [n for n in ([p['head']] if p['head'] else []) + p['names']]
     company = next((n for n in people if _is_company(n)), '')
@@ -374,6 +425,9 @@ def resolve_destination(group):
         company = people[1]
     # Who the courier delivers to: the Receiver Name column, else a name in the address cell, else the store
     receiver = given or company or person or store
+    if installer and receiver == store and collect_note(raw):
+        # 'Kyle collect from warehouse': the installer is Kyle, collecting ('Installer: Kyle to collect')
+        receiver = collect_receiver(raw)
     others = [n for n in (company, person) if n and _norm(n) != _norm(receiver)]
     contact = ", ".join(x for x in ((others[-1] if others and (company or given) else ''), attn_text(group.get('contact')) or p['attn']) if x)
 
