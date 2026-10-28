@@ -369,10 +369,35 @@ def collect_note(text):
 
 def collect_receiver(text):
     """collect_note() as a receiver name: 'Kyle to collect', 'John Smith to collect', 'To be collected'."""
-    note = collect_note(text)
+    return _note_as_name(collect_note(text))
+
+
+def _note_as_name(note):
+    """'KYLE TO COLLECT' -> 'Kyle to collect', 'TO BE COLLECTED' -> 'To be collected'."""
     if note.endswith(" TO COLLECT"):
         return note[:-len(" TO COLLECT")].title() + " to collect"
     return note.capitalize()
+
+
+def collect_summary(consignments, pack_groups):
+    """The packs collected rather than sent, by who collects: [{'who': 'Kyle to collect', 'labels': 6,
+    'packs': [('Pack 1', 2), ('Pack 2', 4)], 'numbers': [3, 7]}] (packs: horizontal files, 'Tab 2 Pack 1' when more
+    than one tab). They have no courier label by design: counted here, never as consignments with no address."""
+    tabs = {g.get('tab_no', 1) for g in pack_groups.values()}
+    out = {}
+    for c in consignments:
+        if not c.get('collect'):
+            continue
+        row = out.setdefault(c['collect'], {'who': _note_as_name(c['collect']), 'labels': 0, 'packs': Counter(), 'numbers': []})
+        row['numbers'].append(c['number'])
+        for x in c['cartons']:
+            row['labels'] += 1
+            g = pack_groups.get(x['pack_key']) or {}
+            if g.get('pack_no') is not None:
+                row['packs'][(g.get('tab_no', 1), g['pack_no'])] += 1
+    for row in out.values():
+        row['packs'] = [((f"Tab {t} " if len(tabs) > 1 else '') + f"Pack {p}", n) for (t, p), n in sorted(row['packs'].items())]
+    return list(out.values())
 
 
 def _looks_like_address(text):
@@ -606,9 +631,15 @@ def build_consignments(pack_groups, edits=None, default_service='', resolve_spec
     cons = list(consignments.values())
     for c in cons:
         c['service_code_used'] = c['service_code'] or _tidy(default_service)
+        # Collected rather than sent ('Kyle collect from warehouse'): no address by design, so not a missing one. Its
+        # labels say 'KYLE TO COLLECT' where the courier label would go (collect_summary counts them)
+        d = c['destination']
+        c['collect'] = collect_note(d.get('raw') or one_line(d)) if c['no_address'] else ''
+        for x in c['cartons']:
+            x['collect'] = c['collect']
     if skipped:
         warnings.append(f"No store / receiver name and no address, left out of the courier CSV: {'; '.join(skipped)}")
-    missing = [c for c in cons if c['no_address']]
+    missing = [c for c in cons if c['no_address'] and not c['collect']]
     if missing:
         warnings.append(f"No address for {len(missing)} consignment{'s' if len(missing) != 1 else ''} "
                         f"({', '.join(f'#{c['number']} {c['destination']['receiver']}' for c in missing)}): pick a saved address "
@@ -937,7 +968,9 @@ def write_label_map(path, cartons, consignments, reference, pdf_name, csv_name, 
             'boxes': max(1, len(box_pages(x['pack_key']))),
             'box_pages': box_pages(x['pack_key']) or [p + 1 for p in page_info['pages'].get(x['pack_key'], [])][:1],
             'excel_rows': x['excel_rows'], 'job_numbers': x['job_numbers'],
-            'reason': 'no complete delivery address',
+            # Collected rather than sent ('KYLE TO COLLECT'): no courier label by design, not a missing address
+            'reason': f"collected: {x['collect']}" if x.get('collect') else 'no complete delivery address',
+            'collect': x.get('collect', ''),
         } for x in left_out],
     }
     with open(path, 'w', encoding='utf-8') as f:

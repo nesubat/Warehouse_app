@@ -27,7 +27,7 @@
          data-finalise-url="{{ url_for('stitch_finalise', project_name=project) }}"
          data-open-url="{{ url_for('open_local_file', folder_name=project, filename='__FILE__') }}">
         <h1>🔗 Match Courier Labels</h1>
-        <p class="ab-intro"><strong>{{ job }}</strong> · {{ project_label }}. These courier labels didn't match a packing label by their code. Each is paired with a packing label from the address printed on it, side by side; an address with as many courier labels as packing labels is paired in order. Check each pair: <strong>✓</strong> if it's right (the next one comes under your pointer), <strong>✕</strong> if not, or <strong>Match all 100%</strong> for the sure ones. Labels still to match sit beside their closest packing label, with a ✓ too. <strong>Save changes</strong> keeps the matches (nothing is stitched yet); <strong>Finalise</strong> stitches the Complete Labels PDF once, replacing the earlier one.</p>
+        <p class="ab-intro"><strong>{{ job }}</strong> · {{ project_label }}. These courier labels didn't match a packing label by their code. Each is paired with a packing label from the address printed on it, side by side; an address with as many courier labels as packing labels is paired in order. Check each pair: <strong>✓</strong> if it's right (the next one comes under your pointer), <strong>✕</strong> if not, or <strong>Match all 100%</strong> for the sure ones. Labels still to match sit beside their closest packing label, with a ✓ too. <strong>Save changes</strong> keeps the matches (nothing is stitched yet); <strong>Finalise</strong> stitches a new Complete Labels PDF once; the earlier ones are kept.</p>
 
         <div class="sm-toolbar">
             <input type="search" id="sm-search" class="ab-search" placeholder="Search receiver, suburb, postcode, store, label…" aria-label="Search labels" autocomplete="off">
@@ -40,7 +40,20 @@
                 ➕ Add courier label PDFs<input type="file" id="sm-add-files" accept=".pdf" multiple hidden>
             </label>
         </div>
-        <p class="ps-hint sm-files">Courier label PDFs used: {{ session.files|join(', ') }}</p>
+        <p class="ps-hint sm-files">Courier label PDFs used: {{ session.files|join(', ') }}{% if session.base and session.base.output %} (built on {{ session.base.output }}){% endif %}</p>
+        {# A pack an earlier stitch had labelled got another courier label in the new PDFs: the new one or the earlier one #}
+        <section class="sm-rebooked" id="sm-rebooked" aria-labelledby="sm-rebooked-title" hidden>
+            <div class="sm-section-head">
+                <h2 class="ps-heading" id="sm-rebooked-title">Booked again <span class="sm-count" id="sm-rebooked-count"></span></h2>
+                <span>
+                    <button type="button" class="ab-btn ab-btn-plain" id="sm-rebook-new">Use every new label</button>
+                    <button type="button" class="ab-btn ab-btn-plain" id="sm-rebook-keep">Keep every earlier label</button>
+                </span>
+            </div>
+            <p class="ps-hint sm-legend">These packs already had a courier label from the stitch you built on, and the new PDFs have another one for them. Choose for each: stitch the new courier label on its packing label, or leave it as it was. Finalise waits until each has a choice.</p>
+            <div class="sm-pair-head" aria-hidden="true"><span>Earlier courier label</span><span></span><span>New courier label</span></div>
+            <div class="sm-list" id="sm-rebooked-list"></div>
+        </section>
         <div class="sm-hintbar" id="sm-hintbar" hidden>
             <span id="sm-hint-text"></span>
             <button type="button" class="ab-btn" id="sm-match-shown">Match these in order</button>

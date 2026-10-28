@@ -63,6 +63,26 @@ def test_collect_note_counts_the_stores_own_boxes(tmp_path):
     assert 'NOT IN COURIER CSV' not in text('G1')
 
 
+def test_collected_packs_are_counted_on_their_own_not_as_no_address():
+    """'Kyle collect from warehouse' has no courier label by design: it's left out of 'No address for …' and counted
+    as 'Kyle to collect' with its labels per pack; a store with no address at all is still a missing address."""
+    from engine.courier.courier_export import build_consignments, collect_summary
+    groups = {}
+    for key, (store, address, pack_no) in {'K1': ('Medibank Sydney', 'Kyle collect from warehouse', 1),
+                                           'K2': ('Medibank Sydney', 'Kyle collect from warehouse', 2),
+                                           'K3': ('Medibank Perth', 'Kyle collect from warehouse', 2),
+                                           'B1': ('Medibank Hobart', '', 1)}.items():
+        groups[key] = {**_group(store, 'OB600100100', 2), 'address_1': address, 'pack_no': pack_no, 'tab_no': 1,
+                       'install': True}
+    cons, _, warnings = build_consignments(groups)
+    no_address = next(w for w in warnings if w.startswith("No address for "))
+    assert no_address.startswith("No address for 1 consignment ") and 'Medibank Hobart' in no_address
+    assert 'collect' not in no_address.lower()
+    (kyle,) = collect_summary(cons, groups)
+    assert kyle['who'] == 'Kyle to collect' and kyle['labels'] == 3
+    assert kyle['packs'] == [('Pack 1', 1), ('Pack 2', 2)]
+
+
 
 def test_an_installer_pack_goes_to_the_installer_named_in_the_address():
     """Install = Y and no Receiver Name: the name at the start of the address cell is the receiver (out of Address

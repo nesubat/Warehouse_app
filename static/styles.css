@@ -1557,6 +1557,12 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .sm-arrow { font-size: 22px; color: #1e8449; line-height: 1; }
 .sm-suggested-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #9a6700; background: #fef5e7; border-radius: 4px; padding: 1px 5px; text-align: center; }
 .sm-pair-suggested .sm-card { border-style: dashed; border-color: #e0a100; }
+/* A pack booked again: the earlier and the new courier label either side of the choice */
+.sm-rebooked { margin: 14px 0 22px; }
+.sm-rebook-row { grid-template-columns: minmax(0, 1fr) 190px minmax(0, 1fr); margin-bottom: 8px; }
+.sm-rebook-choice { display: flex; flex-direction: column; justify-content: center; gap: 6px; text-align: center; font-size: 13px; }
+.st-remaining { margin-top: 4px; font-size: 13px; }
+.st-remaining ul { margin: 4px 0 0 18px; }
 .sm-pair-suggested .sm-arrow { color: #b9770e; }
 .sm-rest-title { margin-top: 6px; }
 @media (max-width: 900px) { .sm-pair, .sm-pair-head { grid-template-columns: 1fr; } .sm-pair-mid { flex-direction: row; } }

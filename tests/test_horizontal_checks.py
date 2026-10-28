@@ -38,7 +38,7 @@ def read(final, sig=None, tab=TAB, tab_no=1):
 
 
 def units(groups):
-    return sum(float(i["qty"]) for g in groups.values() for i in g["items"] if not i.get("is_code"))
+    return sum(i["units"] for g in groups.values() for i in g["items"] if not i.get("is_code"))
 
 
 def refused(final, sig=None):
@@ -155,18 +155,68 @@ def test_store_below_the_label_plugins_last_row_refused(files):
     assert issue["stores"] == [[at["row"], "Doncaster"]]
 
 
-@pytest.mark.parametrize("bad", [-2, 1.5])
-def test_negative_or_part_quantities_refused(files, bad):
+@pytest.mark.parametrize("value, shown", [(-2, "-2"), (1.5, "1.5")])
+def test_negative_or_part_quantities_go_on_the_label_as_written(files, value, shown):
+    """Nothing in the grid but blank, '-' or 0 is left off a label: -2 and 1.5 are printed as the file has them."""
     final, sig = files
     at = {}
 
     def put(ws):
-        col = job_cols(ws)[0]
-        at["row"], at["col"] = store_row(ws, "Corio Village"), get_column_letter(col)
-        ws.cell(row=at["row"], column=col, value=bad)
+        col = job_cols(ws)[0]  # J476699-01: Corio Village has 2
+        at["row"] = store_row(ws, "Corio Village")
+        ws.cell(row=at["row"], column=col, value=value)
     edit(final, put)
-    issue = next(i for i in refused(final, sig) if i["text"].startswith("Quantity must be a whole number"))
-    assert issue["rows"] == str(at["row"]) and issue["col"] == at["col"]
+    groups, *_ = read(final, sig)
+    group = next(g for g in groups.values() if g["excel_rows"] == [at["row"]] and g["pack_no"] == 1)
+    assert next(i["qty"] for i in group["items"] if i["job_no"] == "J476699-01") == shown
+    assert units(groups) == SPRING_UNITS - 2 + value
+
+
+def test_a_quantity_with_a_note_counts_its_units_and_prints_the_note(files, tmp_path):
+    """'6 (2 of each kind)': 6 units on the label, the note under its quantity box (it was refused as not a number,
+    and the store's pack reported as having no quantities)."""
+    import pymupdf as fitz
+    from engine.packing_labels.packing_label_generator import generate_packing_labels
+    final, sig = files
+    at = {}
+
+    def put(ws):
+        col = job_cols(ws)[5]  # J476699-05, pack 2's counter card: Chadstone has 6
+        at["row"] = store_row(ws, "Chadstone")
+        ws.cell(row=at["row"], column=col, value="6 (2 of each kind)")
+    edit(final, put)
+    groups, *_ = read(final, sig)
+    assert units(groups) == SPRING_UNITS
+    key, group = next((k, g) for k, g in groups.items() if g["excel_rows"] == [at["row"]] and g["pack_no"] == 2)
+    card = next(i for i in group["items"] if i["job_no"] == "J476699-05")
+    assert card["qty"] == "6" and card["qty_note"] == "2 of each kind"
+    pdf = tmp_path / "labels.pdf"
+    generate_packing_labels({key: group}, str(pdf), ['job_no', 'qty'])
+    assert "(2 of each kind)" in fitz.open(pdf)[0].get_text()
+
+
+def test_words_in_the_grid_go_on_the_label_as_written_and_dash_or_zero_is_empty(files, tmp_path):
+    """'TBC' gets its item box with 'TBC' in the quantity box (no units counted); '-' and '0' are no item, as the Label
+    Shuffler and Packing Sheets take them."""
+    import pymupdf as fitz
+    from engine.packing_labels.packing_label_generator import generate_packing_labels
+    final, sig = files
+    at = {}
+
+    def put(ws):
+        cols = job_cols(ws)[5:]  # pack 2: Knox City has 3, 5, 0
+        at["row"] = store_row(ws, "Knox City")
+        ws.cell(row=at["row"], column=cols[0], value="TBC")
+        ws.cell(row=at["row"], column=cols[1], value="-")
+        ws.cell(row=at["row"], column=cols[2], value="0")
+    edit(final, put)
+    groups, *_ = read(final, sig)
+    assert units(groups) == SPRING_UNITS - 8  # Knox City's 3 and 5 are gone; TBC counts none
+    key, group = next((k, g) for k, g in groups.items() if g["excel_rows"] == [at["row"]] and g["pack_no"] == 2)
+    assert [(i["job_no"], i["qty"]) for i in group["items"]] == [("J476699-05", "TBC")]
+    pdf = tmp_path / "labels.pdf"
+    generate_packing_labels({key: group}, str(pdf), ['job_no', 'qty'])
+    assert "TBC" in fitz.open(pdf)[0].get_text()
 
 
 def test_signature_links_store_code_tabs_skip_the_tabs_that_arent_stores(files):

@@ -125,7 +125,7 @@ def test_logo_drawn_in_its_slot_on_each_box_first_page_once_in_the_file(tmp_path
         (xref, *_), = doc[n].get_images()
         where = doc[n].get_image_rects(xref)[0]
         assert fitz.Rect(region.x0 - 0.01, region.y0 - 0.01, region.x1 + 0.01, region.y1 + 0.01).contains(where)
-        assert abs(where.x1 - region.x1) < 0.5  # right edge of the slot
+        assert abs((where.x0 + where.x1) / 2 - (region.x0 + region.x1) / 2) < 0.5  # centred in the slot
     assert not doc[1].get_images()
     assert len({img[0] for p in doc for img in p.get_images()}) == 1  # one image, reused
 
@@ -138,13 +138,21 @@ def test_label_layout_has_a_logo_slot_in_the_label_map(tmp_path):
                      'items': [{'job_no': 'J476699-01', 'qty': '2', 'desc': 'A1 poster', 'dimension': '', 'material': '',
                                 'install': '', 'notes': '', 'thumbnails': []}]}}
     info = generate_packing_labels(groups, str(tmp_path / "l.pdf"), ['desc', 'job_no', 'barcode', 'qty'])
+    """The logo slot is where the Packing Spec panel was (under the courier region, its full width) and left empty; the
+    Packing Spec is in the logo's old place: a box at the right of the foot row, as tall as the chips, beside them."""
     r = info['logo_region_mm']
-    assert abs(r['width'] - 43.1) < 0.1 and abs(r['x'] + r['width'] - 111) < 0.05  # right edge of the label block
+    pt = lambda mm: mm * 72 / 25.4
+    slot = fitz.Rect(pt(r['x']), pt(r['y']), pt(r['x'] + r['width']), pt(r['y'] + r['height']))
+    assert abs(r['x'] - 4) < 0.05 and abs(r['width'] - 107) < 0.05 and abs(r['y'] - 156.5) < 0.05  # under the courier region
     page = fitz.open(tmp_path / "l.pdf")[-1]
-    chip = next(d for d in page.get_drawings() if d['rect'].height > 15 and d['rect'].y1 > 540)['rect']  # LABEL 1 OF 1's outline
-    assert abs(chip.height - r['height'] * 72 / 25.4) < 1.6  # the logo slot is as tall as the chips
-    assert abs(chip.y1 - (r['y'] + r['height']) * 72 / 25.4) < 1  # on the same line
-    assert page.search_for("LABEL 1 OF 1")[0].x1 < r['x'] * 72 / 25.4  # and the chips stay clear of it
+    assert not page.get_text(clip=slot).strip() and not [d for d in page.get_drawings() if slot.intersects(d['rect'])]
+    spec = page.search_for("OB600100100")[0]
+    box = next(d['rect'] for d in page.get_drawings() if d.get('fill') == (0, 0, 0) and d['rect'].contains(spec))
+    assert abs(box.width - pt(43.1)) < 0.5 and abs(box.x1 - pt(111)) < 0.5 and abs(box.y1 - pt(206)) < 0.5  # foot row, right
+    assert page.search_for("PACKING")[0].y0 > box.y0 and not page.search_for("PACK 1")
+    chip = next(d for d in page.get_drawings() if d['rect'].height > 15 and d['rect'].y1 > 540 and d['rect'] != box)['rect']
+    assert abs(chip.height - box.height) < 1.6 and abs(chip.y1 - box.y1) < 1  # LABEL 1 OF 1 on the same line, as tall
+    assert page.search_for("LABEL 1 OF 1")[0].x1 < box.x0  # and clear of the spec box
 
 
 def test_item_boxes_share_one_layout_whatever_each_item_has():

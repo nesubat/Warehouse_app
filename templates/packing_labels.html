@@ -449,7 +449,7 @@
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-missing="{{ missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' and not c.collect %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-missing="{{ '' if c.collect else missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -691,7 +691,7 @@
                 <datalist id="pl-countries"><option value="AU">Australia</option><option value="NZ">New Zealand</option></datalist>
                 {% if horizontal_mode %}
                 {# Group each pack's labels by allocation (the packing-sheet code A, B, C …), with or without a divider before
-                   each code; or keep them in the sheet's store order with no code on them. Kept through Update Previews #}
+                   each code; or keep them in the sheet's store order (code boxes still on each label). Kept through Update Previews #}
                 {% set grouping = courier.label_grouping if courier else 'code' %}
                 {% set dividers = courier.code_dividers if courier else true %}
                 <fieldset class="pl-csv-choice pl-divider-choice" id="pl-grouping">
@@ -700,7 +700,7 @@
                         <label class="pl-csv-option"><input type="radio" name="label_grouping" value="code"{% if grouping != 'store' %} checked{% endif %}>
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Group by allocation</strong><small>stores with the same allocation together: code A, B, C … on the label</small></span></label>
                         <label class="pl-csv-option"><input type="radio" name="label_grouping" value="store"{% if grouping == 'store' %} checked{% endif %}>
-                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Don't group</strong><small>each pack's labels in the sheet's store order, no code on them</small></span></label>
+                            <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>Don't group</strong><small>each pack's labels in the sheet's store order, code boxes still on each label</small></span></label>
                     </div>
                     <div class="pl-csv-options pl-divider-options"{% if grouping == 'store' %} hidden{% endif %}>
                         <label class="pl-csv-option"><input type="radio" name="code_dividers" value="1"{% if dividers %} checked{% endif %}>
@@ -708,7 +708,7 @@
                         <label class="pl-csv-option"><input type="radio" name="code_dividers" value="0"{% if not dividers %} checked{% endif %}>
                             <span class="pl-csv-btn"><span class="pl-csv-tick" aria-hidden="true">✓</span><strong>No dividers</strong><small>the codes follow each other</small></span></label>
                     </div>
-                    <span class="pl-csv-hint issue-detail" data-code="An audit page per pack, then code A, B, C …, stores in sheet order within each code." data-store="An audit page per pack, then its labels in the sheet's store order. No code on the labels, no dividers.">{% if grouping == 'store' %}An audit page per pack, then its labels in the sheet's store order. No code on the labels, no dividers.{% else %}An audit page per pack, then code A, B, C …, stores in sheet order within each code.{% endif %}</span>
+                    <span class="pl-csv-hint issue-detail" data-code="An audit page per pack, then code A, B, C …, stores in sheet order within each code." data-store="An audit page per pack, then its labels in the sheet's store order. Code boxes stay on each label; no dividers.">{% if grouping == 'store' %}An audit page per pack, then its labels in the sheet's store order. Code boxes stay on each label; no dividers.{% else %}An audit page per pack, then code A, B, C …, stores in sheet order within each code.{% endif %}</span>
                 </fieldset>
                 {% endif %}
                 <fieldset class="pl-csv-choice" id="pl-csv-choice">

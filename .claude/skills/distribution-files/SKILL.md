@@ -40,7 +40,8 @@ same quantities in a pack share a code; letters follow `sort_key`, and every ord
 - Barcode kinds: per item column (`source_key`), so `J…-03 K2` is the same piece on every store's label.
 
 ## Checks before anything prints
-Quantities are numbers; every item has a job number; a pack marked x has no quantities; every unit is on a label;
+Quantities: blank, `-` and `0` are empty; a number with a note in brackets (`4 (1 of each kind)`) is 4 units, the note
+under the quantity box; anything else (`TBC`, `-2`, `1.5`) goes in the quantity box as written; every item has a job number; a pack marked x has no quantities; every unit is on a label;
 TOTAL row agrees; codes agree with quantities and with Signature Links. Report each with its Excel row and column.
 
 ## Try it

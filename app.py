@@ -40,7 +40,7 @@ from engine.packing_labels.label_stitcher import (read_courier_csv, courier_csv_
 import threading
 from collections import Counter
 import secrets
-from engine.courier.courier_export import (collect_note, unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
+from engine.courier.courier_export import (collect_summary, unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
@@ -573,13 +573,16 @@ def newest_first(folder, names):
 
 
 def _generation_report(job, project, shipment_reference, sheet_warnings, courier_warnings,
-                       all_cartons, cartons, consignments, by_number, service, sender, csv_formats=None, ref_issues=None):
+                       all_cartons, cartons, consignments, by_number, service, sender, csv_formats=None, ref_issues=None,
+                       collect=None):
     """The job report on page 1 of the packing labels: job number, project, and what needs a look while preparing
-    labels (draw_report_pages). Read before Generate saves the new addresses to the address book."""
+    labels (draw_report_pages). Read before Generate saves the new addresses to the address book. collect:
+    _collect_lines(), the packs collected rather than sent (counted on their own, not as left out)."""
     def receiver(c):
         d = c['destination']
         return d['receiver'] + (f" (Attn {d['contact']})" if d.get('contact') else '')
-    left_out = [x for x in all_cartons if x not in cartons]
+    collect = collect or []
+    left_out = [x for x in all_cartons if x not in cartons and not by_number[x['consignment']].get('collect')]
     try:
         new_addresses = [c for c in consignments if not ADDRESS_BOOK.at_address(c['destination'])]
     except Exception:
@@ -606,6 +609,8 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
                    + (f" - {w['detail']}" if w.get('detail') else '') for w in sheet_warnings]},
         {'title': f"Going to installers - {len(installers)} pack{'s' if len(installers) != 1 else ''} labelled for the installer",
          'level': 'info', 'items': [f"{who} x{len(refs)}" for who, refs in by_installer.items()]},
+        {'title': "Collected, not sent - no courier label by design", 'level': 'info',
+         'items': [line['text'] + (f" ({line['detail']})" if line['detail'] else '') for line in collect]},
     ]
     facts = [("Packing labels", len(all_cartons)), ("Courier labels to come", len(cartons)), ("Consignments", len(consignments)),
              ("Installer packs", len(installers)),
@@ -614,6 +619,9 @@ def _generation_report(job, project, shipment_reference, sheet_warnings, courier
                          if consignments else (service or '-'))]
     if csv_formats:
         facts.append(("Courier CSV", " + ".join(CSV_FORMATS[f] for f in csv_formats)))
+    for line in collect:  # 'Kyle to collect: 6 labels'
+        who, count = line['text'].rsplit(': ', 1)
+        facts.insert(2, (who, count.split()[0]))
     if left_out:
         facts.insert(2, ("Not in courier CSV", len(left_out), 'bad'))
     return {'title': "Packing Labels Only", 'job': job, 'project': project,
@@ -677,7 +685,8 @@ def _keep_earlier_session(folder, new_map):
 
 def _stitch_file(name):
     """The app's own stitching files, kept out of the project's file lists."""
-    return name == CURRENT_RUN_FILE or (name.startswith(('stitch_session', 'stitch_matches')) and name.endswith('.json'))
+    return name == CURRENT_RUN_FILE or (name.startswith(('stitch_session', 'stitch_matches', 'stitch_history'))
+                                        and name.endswith('.json'))
 
 
 CURRENT_RUN_FILE = "stitch_run.json"  # the run picked on the Stitch page
@@ -711,17 +720,25 @@ def _courier_pdfs(folder, names):
     return pdfs
 
 
-def _plan(folder, label_map, pdfs, add_unmatched=None):
+def _plan(folder, label_map, pdfs, add_unmatched=None, layers=None, rebook=None, base=None):
     """Matches every courier label to its packing label from the labels' text and the matches saved by hand (fast:
-    nothing is drawn) and keeps the result for the matching page. Returns (plan, session)."""
+    nothing is drawn) and keeps the result for the matching page. layers / rebook / base: the courier PDFs by stitch,
+    the choices for packs booked again and the earlier stitch this one builds on (_stitch_base); left out, the
+    session's own (Save, Finalise and Add on the matching page go on with the stitch started on the Stitch page).
+    Returns (plan, session)."""
     started = time.perf_counter()
     progress.stage("Reading the courier labels and matching them", 2, 10)
     manual = _read_json(_run_file(folder, 'matches', label_map.get('_run')), {})
-    log_stitch.info("Match %s: %s, %d saved hand match(es)", os.path.basename(folder),
-                    ", ".join(f"{n} ({len(d) // 1024} KB)" for n, d in pdfs), len(manual))
-    plan = plan_stitch(folder, label_map, pdfs, manual)
-    session = match_session(label_map, plan)
     old = _read_json(_run_file(folder, 'session', label_map.get('_run')), {})
+    layers = old.get('layers') if layers is None else layers
+    rebook = (old.get('rebook_choices') or {}) if rebook is None else rebook
+    base = old.get('base') or {} if base is None else base
+    log_stitch.info("Match %s: %s, %d saved hand match(es)%s", os.path.basename(folder),
+                    ", ".join(f"{n} ({len(d) // 1024} KB)" for n, d in pdfs), len(manual),
+                    f", built on stitch {base['id']} ({base.get('output')})" if base.get('id') else '')
+    plan = plan_stitch(folder, label_map, pdfs, manual, layers, rebook)
+    session = match_session(label_map, plan)
+    session.update(layers=layers, rebook_choices=rebook, base=base)
     session['added_unmatched'] = old.get('added_unmatched', True) if add_unmatched is None else add_unmatched
     session['output'] = old.get('output') if old.get('output') and os.path.isfile(os.path.join(folder, old['output'])) else None
     _write_json(_run_file(folder, 'session', label_map.get('_run')), session)
@@ -731,20 +748,49 @@ def _plan(folder, label_map, pdfs, add_unmatched=None):
     return plan, session
 
 
-def _remove_old_labels(folder, keep=None, only=None):
-    """Deletes the earlier Complete Labels PDFs (a new one replaces them), so the folder holds one per run. only: the
-    names of this run's earlier ones, when the project has several runs (another run's are never touched).
-    Returns the ones that couldn't be deleted (open in a PDF viewer)."""
-    locked = []
-    for f in os.listdir(folder):
-        if f.startswith("Complete Labels") and f.endswith(".pdf") and f != keep and (only is None or f in only):
-            try:
-                os.remove(os.path.join(folder, f))
-                log_stitch.info("  removed the earlier %s", f)
-            except OSError as e:
-                log_stitch.warning("  couldn't remove the earlier %s (%s) - open in a PDF viewer?", f, e)
-                locked.append(f)
-    return locked
+def _history(folder, label_map):
+    """This run's stitches, oldest first: [{'id', 'output' (its Complete Labels PDF, kept), 'when', 'base' (the id of
+    the stitch it was built on, or None), 'layers' (the courier PDFs by stitch, the base's first), 'added', 'rebook'
+    (choices for packs booked again), 'placed', 'expected', 'new', 'remaining' ([{'slot', 'page'}] still without a
+    courier label), 'not_in_csv', 'collected'}]. A run stitched before stitches were kept has its last stitch (its
+    session) as stitch 1."""
+    run = label_map.get('_run')
+    data = _read_json(_run_file(folder, 'history', run), None)
+    if data is not None:
+        return data.get('stitches') or []
+    session = _read_json(_run_file(folder, 'session', run), {})
+    if session.get('finalised') and session.get('output') and session.get('files'):
+        return [{'id': 1, 'output': session['output'], 'when': '', 'base': None, 'layers': [session['files']],
+                 'added': session['files'], 'rebook': session.get('rebook_choices') or {}, 'placed': session.get('placed'),
+                 'expected': session.get('expected'), 'new': session.get('placed'), 'remaining': None,
+                 'not_in_csv': None, 'collected': None}]
+    return []
+
+
+def _stitch_base(history, wanted):
+    """The stitch a new one builds on: the one picked on the Stitch page ('base': its id), 'none' for a fresh start,
+    else the latest."""
+    if wanted == 'none' or not history:
+        return None
+    return next((h for h in history if str(h['id']) == str(wanted)), history[-1])
+
+
+def _keep_upload(folder, name, data, taken=()):
+    """An uploaded courier label PDF saved in the project under its own name, or a new one when a different file of
+    that name is there already (an earlier stitch's PDF is never overwritten). Returns the name it's kept under."""
+    path = os.path.join(folder, name)
+    if os.path.isfile(path):
+        with open(path, 'rb') as f:
+            if f.read() == data:
+                return name
+        name = unused_name(folder, name)
+        path = os.path.join(folder, name)
+    elif name in taken:
+        name = unused_name(folder, name)
+        path = os.path.join(folder, name)
+    with open(path, 'wb') as f:
+        f.write(data)
+    return name
 
 
 def _stitch_logos(folder, label_map):
@@ -836,17 +882,29 @@ def _finalise(folder, label_map, pdfs, add_unmatched=True):
     output_name = free_name(folder, numbered_name(folder, "Complete Labels", label_map.get('consignment_reference'), project_label,
                                                   datetime.now().strftime("%y%m%d_%H%M")))
     started = time.perf_counter()
+    base = session.get('base') or {}
     try:
         result = render_stitch(folder, label_map, pdfs, plan, os.path.join(folder, output_name), add_unmatched,
-                               logos=_stitch_logos(folder, label_map))
+                               logos=_stitch_logos(folder, label_map), built_on=base.get('output') or '')
     except Exception:
         log_stitch.exception("Stitch FAILED after %.2fs", time.perf_counter() - started)
         raise
     run = label_map.get('_run') or _current_run(folder)  # the run it started on, not one picked since
+    # Every stitch's Complete Labels is kept (a later one can be built on any of them): listed with the run's history
+    history = _history(folder, label_map)
+    layers = session.get('layers') or [plan['files']]
+    history.append({'id': max([h['id'] for h in history], default=0) + 1, 'output': output_name,
+                    'when': datetime.now().strftime('%d/%m/%Y %I:%M %p').replace(' 0', ' '), 'base': base.get('id'),
+                    'layers': layers, 'added': layers[-1] if len(layers) > (base.get('layers') or 0) else [],
+                    'rebook': session.get('rebook_choices') or {}, 'placed': len(result['placed']),
+                    'expected': session.get('expected'), 'new': len(plan.get('new_slots', [])),
+                    'remaining': [{'slot': m['slot'], 'page': m['page']} for m in result.get('missing_pages', []) if not m['not_in_csv']],
+                    'not_in_csv': sum(1 for m in result.get('missing_pages', []) if m['not_in_csv']),
+                    'collected': len(plan.get('collected', []))})
+    _write_json(_run_file(folder, 'history', run), {'stitches': history})
     files = label_map.setdefault('files', {})
-    mine = set(files.get('complete_labels') or [])
-    locked = _remove_old_labels(folder, keep=output_name, only=None if len(_label_maps(folder)) == 1 else mine)
-    files['complete_labels'] = [output_name] + [f for f in locked if f in mine]
+    files['complete_labels'] = list(dict.fromkeys(list(files.get('complete_labels') or []) + [output_name]))
+    locked = []
     if run:
         _write_json(os.path.join(folder, run), label_map)
     source = _service_csv(folder, label_map)
@@ -872,7 +930,8 @@ def _finalise(folder, label_map, pdfs, add_unmatched=True):
         log_stitch.info("  ... and %d more without a courier label (all in logs/warehouse.log)", len(result['without_label']) - 8)
     for d in result['duplicates']:
         log_stitch.warning("  duplicate %s p%s: %s (first used %s)", d['file'], d['page'], d['item_reference'], d['first'])
-    return output_name, {**result, 'session': session, 'complete': plan['complete']}, locked
+    return output_name, {**result, 'session': session, 'complete': plan['complete'],
+                         'new_slots': plan.get('new_slots', [])}, locked
 
 
 def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
@@ -889,6 +948,8 @@ def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
                                    'added_unmatched': add_unmatched, 'locked': locked, **extra,
                                    'unmatched': len(result['unmatched']),  # really matched nothing (hand matches aren't)
                                    'waiting': sum(1 for w in result['without_label'] if not w.endswith("(not in the courier CSV)")),
+                                   'new': len(result.get('new_slots', [])),
+                                   'built_on': ((result.get('session') or {}).get('base') or {}).get('output'),
                                    # each packing label still without a courier label, with its page in the new file
                                    'without': [m for m in result.get('missing_pages', []) if not m['not_in_csv']],
                                    'not_in_csv': [m for m in result.get('missing_pages', []) if m['not_in_csv']]}
@@ -898,6 +959,15 @@ def _start_finalise(folder, label_map, pdfs, add_unmatched, **extra):
             progress.finish()
             finished.set()
     threading.Thread(target=work, daemon=True, name="stitch").start()
+
+
+def _history_view(folder, history):
+    """The run's stitches for the Stitch page, newest first, each with the file it built on and every courier PDF
+    in it (data for 'Build on': which ticked PDFs it already has)."""
+    by_id = {h['id']: h for h in history}
+    return [{**h, 'exists': os.path.isfile(os.path.join(folder, h['output'])),
+             'base_output': (by_id.get(h['base']) or {}).get('output', ''),
+             'files': [f for layer in h['layers'] for f in layer]} for h in reversed(history)]
 
 
 @app.route('/stitch/<project_name>', methods=['GET', 'POST'])
@@ -929,12 +999,17 @@ def stitch_page(project_name):
     info = {'packs': sum(1 for sl in slots if not sl['not_in_csv']),
             'boxed': sum(1 for sl in slots if sl['boxes'] > 1 and sl['box'] == 1),
             'with_code': sum(1 for pk in (p for ps in label_map.get('stores', {}).values() for p in ps) if pk.get('open360_code')),
-            'left_out': len(label_map.get('not_in_courier_csv') or []),
+            'left_out': sum(1 for x in label_map.get('not_in_courier_csv') or [] if not x.get('collect')),
+            'collected': sum(1 for x in label_map.get('not_in_courier_csv') or [] if x.get('collect')),
             'latest': stitched[0] if stitched else None, 'stitched': stitched, 'candidates': candidates,
             'matching': bool(session and not session.get('complete') and (session.get('unmatched') or session.get('waiting'))
                              and not session.get('finalised')),
             'csvs': _courier_csv_choices(folder, label_map), 'service_csv': _service_csv(folder, label_map),
             'runs': _run_choices(folder, map_name)}
+    info['matching'] = info['matching'] or bool(session and not session.get('finalised') and any(
+        r.get('choice') not in ('new', 'keep') for r in session.get('rebooked') or []))
+    history = _history(folder, label_map)
+    info['history'] = _history_view(folder, history)
     if request.method == 'GET':
         return _show('stitch.html', project=os.path.basename(folder), info=info)
 
@@ -956,7 +1031,12 @@ def stitch_page(project_name):
         label_map.setdefault('files', {})['service_csv'] = source  # kept: Finalise on the matching page uses it too
         _write_json(os.path.join(folder, map_name), label_map)
         log_stitch.info("Stitch %s: services and addresses from %s", os.path.basename(folder), source)
-    pdfs = []
+    # Built on an earlier stitch (the latest unless another is picked): its courier PDFs and choices come first, the
+    # new ones after them, so nothing it placed is lost and a pack booked again is asked about
+    base = _stitch_base(history, request.form.get('base'))
+    base_layers = [list(layer) for layer in (base['layers'] if base else [])]
+    in_base = {f for layer in base_layers for f in layer}
+    added = []
     for upload in request.files.getlist('labels'):
         if upload and upload.filename:
             name = secure_filename(upload.filename) or 'courier-labels.pdf'
@@ -965,22 +1045,32 @@ def stitch_page(project_name):
                                        error=f"{upload.filename} isn't a PDF. Upload the label PDF from the courier portal.")
             if name in own:
                 name = f"courier-{name}"
-            data = upload.read()
-            with open(os.path.join(folder, name), 'wb') as f:  # kept with the project
-                f.write(data)
-            pdfs.append((name, data))
+            name = _keep_upload(folder, name, upload.read(), added)  # kept with the project
+            if name not in in_base and name not in added:
+                added.append(name)
     for name in request.form.getlist('existing'):
         name = os.path.basename(name)
-        if name in candidates and name not in {n for n, _ in pdfs}:
-            with open(os.path.join(folder, name), 'rb') as f:
-                pdfs.append((name, f.read()))
-    if not pdfs:
+        if name in candidates and name not in in_base and name not in added:
+            added.append(name)
+    layers = base_layers + ([added] if added else [])
+    names = [f for layer in layers for f in layer]
+    pdfs = _courier_pdfs(folder, names)
+    gone = [n for n in names if n not in {m for m, _ in pdfs}]
+    if gone:
+        return _show('stitch.html', project=os.path.basename(folder), info=info,
+                     error=f"{', '.join(gone)} of the stitch you're building on isn't in the project folder any more: "
+                           "put it back, or pick another stitch to build on.")
+    if not added and not base:
         log_stitch.warning("Stitch %s: no courier label PDF chosen", os.path.basename(folder))
         return _show('stitch.html', project=os.path.basename(folder), info=info,
                                error="Choose the courier label PDF (upload it, or tick one already in this project).")
+    log_stitch.info("Stitch %s: %s, new: %s", os.path.basename(folder),
+                    f"built on stitch {base['id']} ({base['output']})" if base else "a fresh stitch", added or 'none')
     add_unmatched = request.form.get('unmatched', 'add') != 'leave'
     try:
-        plan, session = _plan(folder, label_map, pdfs, add_unmatched)
+        plan, session = _plan(folder, label_map, pdfs, add_unmatched, layers=layers,
+                              rebook=dict(base['rebook'] or {}) if base else {},
+                              base={'id': base['id'], 'output': base['output'], 'layers': len(base_layers)} if base else {})
         if not plan['complete']:
             # Something to match by hand: straight to the matching page; nothing is stitched until Finalise
             return redirect(url_for('stitch_match_page', project_name=os.path.basename(folder)))
@@ -989,9 +1079,10 @@ def stitch_page(project_name):
         log_stitch.warning("Stitch stopped: %s", e)
         return _show('stitch.html', project=os.path.basename(folder), info=info, error=str(e))
     info.update(latest=output_name, stitched=[output_name], matching=False,
-                candidates=newest_first(folder, list(set(candidates) | {n for n, _ in pdfs})))
+                candidates=newest_first(folder, list(set(candidates) | {n for n, _ in pdfs})),
+                history=_history_view(folder, _history(folder, label_map)))
     return _show('stitch.html', project=os.path.basename(folder), info=info, report=report,
-                           files=[n for n, _ in pdfs], locked=locked)
+                           files=added, locked=locked)
 
 
 @app.route('/stitch/<project_name>/match')
@@ -1020,7 +1111,11 @@ def stitch_label_image(project_name, index):
         return "Not found", 404
     folder = found[0]
     session = _read_json(_run_file(folder, 'session'), {})
-    rows = session.get('unmatched') or []
+    if request.args.get('list') == 'rebooked':  # a pack booked again: its earlier or its new courier label
+        which = 'earlier' if request.args.get('which') == 'earlier' else 'new'
+        rows = [r[which] for r in session.get('rebooked') or []]
+    else:
+        rows = session.get('unmatched') or []
     if not 0 <= index < len(rows):
         return "Not found", 404
     row, dpi = rows[index], 200 if request.args.get('size') == 'zoom' else 70
@@ -1050,6 +1145,19 @@ def _valid_matches(folder, matches):
     return {k: v for k, v in (matches or {}).items() if k in known_keys and v in known_slots}, session, known_keys
 
 
+def _save_rebook(folder, sent):
+    """The choices made on the matching page for packs booked again ({new courier page key: 'new' | 'keep'}), kept in
+    the session for Finalise. Only the packs it lists count."""
+    path = _run_file(folder, 'session')
+    session = _read_json(path, {})
+    known = {r['new']['key'] for r in session.get('rebooked') or []}
+    choices = dict(session.get('rebook_choices') or {})
+    choices.update({k: v for k, v in (sent or {}).items() if k in known and v in ('new', 'keep')})
+    session['rebook_choices'] = choices
+    _write_json(path, session)
+    return choices
+
+
 def _save_matches(folder, matches, known_keys):
     """The page's pairs replace what was saved for its courier labels (a pair undone there is dropped too)."""
     saved = {k: v for k, v in _read_json(_run_file(folder, 'matches'), {}).items() if k not in known_keys}
@@ -1069,13 +1177,16 @@ def stitch_match_save(project_name):
     folder, _, label_map = found
     if (STITCH_JOBS.get(folder) or {}).get('state') == 'running':
         return {'error': "Still stitching - wait for it to finish."}, 409
-    sent = (request.get_json(silent=True) or {}).get('matches') or {}
+    body = request.get_json(silent=True) or {}
+    sent = body.get('matches') or {}
     matches, session, known_keys = _valid_matches(folder, sent)
     log_stitch.info("Matching page save %s: %d pair(s) sent, %d valid (%d ignored: label or pack no longer waiting)",
                     os.path.basename(folder), len(sent), len(matches), len(sent) - len(matches))
-    if not known_keys:
+    if not known_keys and not session.get('rebooked'):
         return {'error': "Nothing to match on this page any more: open it again."}, 409
-    _save_matches(folder, matches, known_keys)
+    if known_keys:
+        _save_matches(folder, matches, known_keys)
+    _save_rebook(folder, body.get('rebook'))
     try:
         plan, _ = _plan(folder, label_map, _courier_pdfs(folder, session.get('files') or []))
     except StitchError as e:
@@ -1098,6 +1209,10 @@ def stitch_finalise(project_name):
     matches, session, known_keys = _valid_matches(folder, body.get('matches'))
     if known_keys and 'matches' in body:
         _save_matches(folder, matches, known_keys)
+    choices = _save_rebook(folder, body.get('rebook'))
+    undecided = [r['slot'] for r in session.get('rebooked') or [] if choices.get(r['new']['key']) not in ('new', 'keep')]
+    if undecided:
+        return {'error': f"Choose the new or the earlier courier label for {', '.join(undecided)} (booked again) first."}, 400
     add_unmatched = bool(body.get('add_unmatched', True))
     pdfs = _courier_pdfs(folder, session.get('files') or [])
     if not pdfs:
@@ -1131,18 +1246,24 @@ def stitch_add_pdfs(project_name):
             return {'error': f"{upload.filename} isn't a PDF."}, 400
         if name in own or name.startswith("Complete Labels"):
             name = f"courier-{name}"
-        upload.save(os.path.join(folder, name))
+        name = _keep_upload(folder, name, upload.read(), added)
         if name not in names:
             names.append(name)
-        added.append(name)
+            added.append(name)
     if not added:
-        return {'error': "Choose one or more courier label PDFs."}, 400
+        return {'error': "Choose one or more courier label PDFs (new ones: these are in this stitch already)."}, 400
     log_stitch.info("Matching page: courier label PDF(s) added to %s: %s", os.path.basename(folder), added)
-    locked = _remove_old_labels(folder)
+    locked = []  # every stitch's Complete Labels is kept
+    # They join this stitch's own courier PDFs (after the ones of the stitch it builds on)
+    layers = [list(layer) for layer in session.get('layers') or []]
+    first_new = (session.get('base') or {}).get('layers') or 0
+    if len(layers) <= first_new:
+        layers.append([])
+    layers[-1] += added
     pdfs = _courier_pdfs(folder, names)
     add_unmatched = session.get('added_unmatched', True)
     try:
-        plan, _ = _plan(folder, label_map, pdfs, add_unmatched)
+        plan, _ = _plan(folder, label_map, pdfs, add_unmatched, layers=layers if session.get('layers') else None)
     except StitchError as e:
         return {'error': str(e)}, 400
     if plan['complete']:
@@ -2135,6 +2256,8 @@ def _unfixed_preview_problems(consignments, refs):
     for c in consignments:
         d = c['destination']
         problems = []
+        if c.get('collect'):
+            continue  # collected, not sent: no address by design (the job report counts them)
         if c.get('no_address'):
             problems.append("No address: left out of the courier CSV")
         else:
@@ -2190,6 +2313,13 @@ def _review(previews, cartons, courier_warnings):
         numbers = list(dict.fromkeys(int(n) for n in re.findall(r"#(\d+)", w) + re.findall(r"^Consignment (\d+)", w)))
         courier.append({'text': w, 'major': w.startswith(MAJOR_COURIER_WARNINGS), 'numbers': numbers})
     return {'file': file, 'specs': list(specs.values()), 'courier': courier}
+
+
+def _collect_lines(summary):
+    """collect_summary() as the preview's and the job report's lines: 'Kyle to collect: 6 labels', with each pack's count
+    ('Pack 1: 2 · Pack 2: 4') and the consignments they're in."""
+    return [{'text': f"{s['who']}: {s['labels']} label{'s' if s['labels'] != 1 else ''}",
+             'detail': " · ".join(f"{name}: {n}" for name, n in s['packs']), 'numbers': s['numbers']} for s in summary]
 
 
 def _option_view(entry, why, current=None):
@@ -2380,9 +2510,9 @@ def _check_against_book(consignments, edits, book_options=None):
         # A row with no postcode (no complete address yet) is checked too: what it has (a suburb and state, or an
         # address line with the suburb in it) is often all the official data needs to offer the rest in one click
         # ('No postcode: WILEY PARK NSW is 2195'), with no address book entry needed.
-        # Packs collected rather than sent ('Kyle collect from warehouse') have no address to check: a note on the label
-        c['collect'] = collect_note(c['destination'].get('raw') or one_line(c['destination'])) if c.get('no_address') else ''
-        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['collect']
+        # Packs collected rather than sent ('Kyle collect from warehouse', build_consignments' 'collect') have no
+        # address to check: a note on the label
+        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c.get('collect')
                     else _reference_for(c['destination'], edits.get(c['id'], {})))
         # What the saved addresses say about its suburb: only fields left empty or the official data can't check
         # (a row with no postcode included: its suburb may be all it needs to be completed)
@@ -2395,7 +2525,7 @@ def _check_against_book(consignments, edits, book_options=None):
     # a suburb, state, postcode, country or street doesn't exist there; then the address book's options and hints;
     # then addresses that are only new to the address book (they're saved on Generate); then the rest
     def rank(c):
-        if c['book'] == 'missing':
+        if c['book'] == 'missing' and not c.get('collect'):
             return 0
         if c['ref']['level'] in ('mismatch', 'note') and not c['ref'].get('soft'):
             return 1
@@ -3267,9 +3397,9 @@ def _distribution_page(mode):
                 'unverified': sum(c['book'] == 'unverified' for c in consignments),
                 'ref_mismatch': sum(c['ref']['level'] == 'mismatch' and not c['ref'].get('soft') for c in consignments),
                 'ref_loaded': address_reference.available(),
-                'missing': sum(c['book'] == 'missing' for c in consignments),
+                'missing': sum(c['book'] == 'missing' and not c.get('collect') for c in consignments),
                 'warnings': courier_warnings,
-                'review': _review(previews, cartons, courier_warnings),
+                'review': {**_review(previews, cartons, courier_warnings), 'collect': _collect_lines(collect_summary(consignments, combined))},
                 'fixed': {'reference': series, **fixed},
                 'edits_json': json.dumps(edits),
                 'book_option_rows': sum(1 for c in consignments if c['book_options']),
@@ -3437,7 +3567,7 @@ def _distribution_page(mode):
                     label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
                                                       'sent': not c.get('no_address'),
                                                       # 'KYLE TO COLLECT': collected, not sent (its courier region says so)
-                                                      'collect': collect_note(d.get('raw') or one_line(d)) if c.get('no_address') else ''}
+                                                      'collect': c.get('collect', '')}
                 shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
                 ref_issues = []
                 edits_now = _consignment_edits(request.form)
@@ -3459,7 +3589,7 @@ def _distribution_page(mode):
                         tab_notes.setdefault(tab_of[key], []).append(issue)
                 report = _generation_report(reference, safe_project_name, shipment_reference, sheet_warnings, courier_warnings,
                                             all_cartons, cartons, consignments, by_number, fixed['service_code'], sender, csv_formats,
-                                            ref_issues)
+                                            ref_issues, _collect_lines(collect_summary(all_consignments, combined_pack_groups)))
                 progress.stage("Drawing the packing labels", 20, 90)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
                     if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
@@ -3555,7 +3685,7 @@ def _distribution_page(mode):
             if horizontal_mode and os.path.exists(_signature_path(filepath)):
                 os.remove(_signature_path(filepath))
             log.info("Generate done in %.2fs: %s", time.perf_counter() - started, final_folder_name)
-            left_out = [x for x in all_cartons if x not in cartons]
+            left_out = [x for x in all_cartons if x not in cartons and not x.get('collect')]  # collected: by design
             summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
                 f"{x['item_reference']} ({x['packing_spec']}) - {x['store']}" for x in left_out]} if courier_mode else None
             return show(generation_complete=True, project_folder=final_folder_name, generated_files=output_files,

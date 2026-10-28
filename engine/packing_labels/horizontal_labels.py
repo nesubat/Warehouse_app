@@ -32,13 +32,11 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
     on_progress(done, total, step): as generate_packing_labels; drawing is most of the work, the reordering the rest."""
     notes = notes or {}
     if not group_by_code:
-        # Not grouped by allocation: each pack's labels in the sheet's store order, and no packing-sheet code on them
-        # (the Packing Spec panel says only the pack, no code boxes), no dividers. The labels only: Item References,
-        # the CSVs and the label map are the same either way (the keys don't change)
-        ordered = sorted(pack_groups, key=lambda k: (pack_groups[k].get('tab_no', 1), pack_groups[k]['pack_no'],
-                                                     pack_groups[k]['store_no']))
-        pack_groups = {k: {**pack_groups[k], 'pack_tag': f"PACK {pack_groups[k]['pack_no']}", 'code_cells': []}
-                       for k in ordered}
+        # Not grouped by allocation: each pack's labels in the sheet's store order, no dividers. The code boxes stay:
+        # the 'Code for Pack …' columns are columns of the pack like its items, and none is left off a label. The
+        # labels only: Item References, the CSVs and the label map are the same either way (the keys don't change)
+        pack_groups = {k: pack_groups[k] for k in sorted(pack_groups, key=lambda k: (
+            pack_groups[k].get('tab_no', 1), pack_groups[k]['pack_no'], pack_groups[k]['store_no']))}
         add_dividers = False
     tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
     tmp.close()
@@ -112,7 +110,7 @@ def draw_pack_audit(doc, pack_groups, keys, issues, dividers, grouped=True):
     # 'Tab 1 - Pack 1', and a pack with a name of its own says it too: 'Tab 1 - Pack 2: Window kit'
     name = str(first['pack_name']).strip()
     title = f"Tab {first['tab_no']} - Pack {first['pack_no']}" + ('' if name.isdigit() or name == str(first['pack_no']) else f": {name}")
-    order = ("Order: stores in sheet order, not grouped by code. No code on the labels, no dividers." if not grouped else
+    order = ("Order: stores in sheet order, not grouped by code. Each label still has its code boxes; no dividers." if not grouped else
              "Order: code by code (A, B, C ...), a divider before each code, stores in sheet order." if dividers else
              "Order: code by code (A, B, C ...), stores in sheet order. Dividers off.")
     specs = Counter(pack_groups[k].get('pack_spec_name', '') for k in keys)

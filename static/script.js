@@ -989,13 +989,20 @@ function cellPreview(getOrder) {
             setFont(ctx, true, size);
             const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
             const boxW = Math.min(innerW, Math.max(70 * textScale, widest + 16 * textScale));
-            const h = lines.length * size * LINE + 6 * textScale;
+            let h = lines.length * size * LINE + 6 * textScale;
             if (draw) {
                 const bx0 = (CW - boxW) / 2, half = border / 2;
                 ctx.lineWidth = border;
                 ctx.strokeStyle = '#000';
                 ctx.strokeRect(bx0 + half, y + half, boxW - border, h - border);
                 drawLines(ctx, lines, bx0, bx0 + boxW, y + 3 * textScale, true, size, '#000');
+            }
+            // The note written with the quantity ('4 (1 of each kind)'), under the box as the PDF has it
+            if (item.qty_note) {
+                const noteSize = 9 * textScale;
+                const noteLines = wrap(ctx, `(${item.qty_note})`, true, noteSize, innerW);
+                if (draw) drawLines(ctx, noteLines, x0, x1, y + h + 2 * textScale, true, noteSize, '#000');
+                h += 2 * textScale + noteLines.length * noteSize * LINE;
             }
             y += h + gap;
         } else if (TEXT_STYLES[attr] || /^row_\d+$/.test(attr)) {  // a row of the file reads like a description
@@ -1059,19 +1066,13 @@ function cellPreview(getOrder) {
         ctx.stroke();
     }
 
-    // Labels not grouped by allocation (horizontal files: Label order -> Don't group) carry no code boxes
-    const grouping = () => (document.querySelector('input[name="label_grouping"]:checked') || {}).value;
-    document.querySelectorAll('input[name="label_grouping"]').forEach((r) => r.addEventListener('change', schedule));
-
+    // Code boxes stay on the labels grouped or not (Label order -> Don't group): no column of a pack is left off
     function render() {
         const order = getOrder();
         const dpr = window.devicePixelRatio || 1;
-        const noCodes = grouping() === 'store';
-        const shown = data.items.map((item, i) => [item, images[i]]).filter(([item]) => !(noCodes && item.is_code));
+        const shown = data.items.map((item, i) => [item, images[i]]);
         const plan = planCells(canvases[0].getContext('2d'), shown, order);
         canvases.forEach((canvas, i) => {
-            canvas.hidden = noCodes && !!data.items[i].is_code;
-            if (canvas.hidden) return;
             const cssW = canvas.clientWidth || 160;
             const pxW = Math.round(cssW * dpr), pxH = Math.round(cssW * CH / CW * dpr);
             if (canvas.width !== pxW || canvas.height !== pxH) { canvas.width = pxW; canvas.height = pxH; }
@@ -1963,6 +1964,11 @@ document.addEventListener('DOMContentLoaded', function () {
     let saved = true;
     let finished = false;      // saved and stitched: the page shows the result until it's opened again
     let renderTimer = null;
+    // Packs booked again (a stitch built on an earlier one): new courier page key -> 'new' | 'keep'
+    const rebooked = session.rebooked || [];
+    const rebook = {};
+    rebooked.forEach((r) => { if (r.choice === 'new' || r.choice === 'keep') rebook[r.new.key] = r.choice; });
+    const undecided = () => rebooked.filter((r) => !rebook[r.new.key]);
 
     const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const plural = (n, word) => `${n} ${word}${n === 1 ? '' : (/(s|x|ch|sh)$/.test(word) ? 'es' : 's')}`;
@@ -2051,6 +2057,49 @@ document.addEventListener('DOMContentLoaded', function () {
         else unpair(key);
         say('Match undone.');
     }
+
+    // ---------- packs booked again: the new courier label or the earlier one ----------
+    const rebookImage = (i, which, size) => root.dataset.imageUrl.replace(/0\.png$/, `${i}.png`)
+        + `?list=rebooked&which=${which}${size ? `&size=${size}` : ''}`;
+    function rebookCard(i, which, side, title) {
+        const card = el('article', 'sm-card');
+        const img = el('img', 'sm-thumb'); img.src = rebookImage(i, which); img.loading = 'lazy';
+        img.alt = `${title} courier label (${side.file}, page ${side.page})`; img.title = 'Click to zoom';
+        img.addEventListener('click', () => { zoom.querySelector('img').src = rebookImage(i, which, 'zoom'); zoom.showModal(); });
+        const body = el('div', 'sm-card-body');
+        body.append(el('div', 'sm-card-title', `${title} courier label`), el('div', 'ab-detail', `${side.file} · page ${side.page}`));
+        card.append(img, body);
+        return card;
+    }
+    function renderRebooked() {
+        const box = document.getElementById('sm-rebooked');
+        box.hidden = !rebooked.length;
+        if (!rebooked.length) return;
+        const list = document.getElementById('sm-rebooked-list');
+        list.replaceChildren();
+        rebooked.forEach((r, i) => {
+            const row = el('div', 'sm-pair sm-rebook-row');
+            const mid = el('div', 'sm-rebook-choice');
+            mid.append(el('div', 'sm-card-title', r.slot));
+            [['new', 'Use the new label'], ['keep', 'Keep the earlier one']].forEach(([value, text]) => {
+                const on = rebook[r.new.key] === value;
+                const b = el('button', on ? 'ab-btn' : 'ab-btn ab-btn-plain', `${on ? '✓ ' : ''}${text}`);
+                b.type = 'button';
+                b.setAttribute('aria-pressed', String(on));
+                b.disabled = finished || root.dataset.running === '1';
+                b.addEventListener('click', () => { rebook[r.new.key] = value; saved = false; render(); });
+                mid.append(b);
+            });
+            row.classList.toggle('sm-pair-suggested', !rebook[r.new.key]);
+            row.append(rebookCard(i, 'earlier', r.earlier, 'Earlier'), mid, rebookCard(i, 'new', r.new, 'New'));
+            list.append(row);
+        });
+        const left = undecided().length;
+        document.getElementById('sm-rebooked-count').textContent = `(${rebooked.length}${left ? `, ${left} to choose` : ''})`;
+    }
+    const chooseAll = (value) => { rebooked.forEach((r) => { rebook[r.new.key] = value; }); saved = false; render(); };
+    document.getElementById('sm-rebook-new').addEventListener('click', () => chooseAll('new'));
+    document.getElementById('sm-rebook-keep').addEventListener('click', () => chooseAll('keep'));
 
     // ---------- cards ----------
     function courierCard(u) {
@@ -2280,7 +2329,8 @@ document.addEventListener('DOMContentLoaded', function () {
             b.title = sures ? `Match the ${plural(sures, 'pair')} whose courier label address matched the packing label 100%`
                             : 'No pair to check matched 100% — check the amber ones with ✓ or ✕';
         });
-        saveBtn.disabled = finished || !session.unmatched.length || root.dataset.running === '1';
+        renderRebooked();
+        saveBtn.disabled = finished || (!session.unmatched.length && !rebooked.length) || root.dataset.running === '1';
         saveBtn.textContent = saved ? '💾 Saved' : `💾 Save changes (${plural(n, 'pair')})`;
         finaliseBtn.disabled = finished || root.dataset.running === '1';
         finaliseBtn.textContent = finished ? '✅ Finalised' : '✅ Finalise';
@@ -2339,7 +2389,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (root.dataset.running === '1') return;
         saveBtn.disabled = true;
         try {
-            const data = await post(root.dataset.saveUrl, { matches: pairs });
+            const data = await post(root.dataset.saveUrl, { matches: pairs, rebook });
             saved = true;
             say(`💾 Saved ${plural(data.saved, 'match')}. ` + (data.complete
                 ? 'Every courier label now has its packing label: press Finalise to stitch the Complete Labels.'
@@ -2350,6 +2400,11 @@ document.addEventListener('DOMContentLoaded', function () {
     // Finalise: stitch once with these pairs, in the background behind the overlay
     finaliseBtn.addEventListener('click', async () => {
         if (root.dataset.running === '1') return;   // one click only
+        if (undecided().length) {  // a pack booked again needs its choice first
+            say(`Choose the new or the earlier courier label for ${plural(undecided().length, 'pack')} booked again first.`, true);
+            document.getElementById('sm-rebooked').scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'start' });
+            return;
+        }
         const left = session.unmatched.length - Object.keys(pairs).length;
         let addUnmatched = true;
         if (left > 0) {
@@ -2363,7 +2418,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const progressId = watch();
         say('Stitching the Complete Labels…');
         try {
-            await post(root.dataset.finaliseUrl, { matches: pairs, add_unmatched: addUnmatched }, progressId);
+            await post(root.dataset.finaliseUrl, { matches: pairs, add_unmatched: addUnmatched, rebook }, progressId);
             saved = true;
             poll();
         } catch (err) { root.dataset.running = ''; idle(); render(); say(err.message, true); }
@@ -2372,6 +2427,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function showResult(data) {
         const link = root.dataset.downloadUrl.replace('__FILE__', encodeURIComponent(data.output));
         status.replaceChildren(el('span', null, `${(data.without || []).length ? '⚠️' : '✅'} ${data.output}: ${plural(data.placed, 'courier label')} placed`
+            + (data.built_on ? ` (built on ${data.built_on}, ${data.new} new)` : '')
             + (data.unmatched ? `, ${data.unmatched} unmatched${data.added_unmatched ? ' (4-up at the end)' : ' (left out)'}. ` : '. ')));
         const a = el('a', 'ab-btn', '⬇ Download'); a.href = link;
         const open = el('a', 'ab-btn ab-btn-plain btn-file open', '📂 Open file');
@@ -2392,7 +2448,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const notInCsv = data.not_in_csv || [];
         if (notInCsv.length) status.append(el('div', 'ps-hint', `Not in the courier CSV (no complete address), so no courier label: ${notInCsv.map((m) => `${m.slot}${m.page ? ` (page ${m.page})` : ''}`).join(' · ')}.`));
         Object.keys(pairs).forEach((k) => { delete pairs[k]; delete suggested[k]; delete fromSuggestion[k]; });
-        session.unmatched = []; session.waiting = []; finished = true;
+        session.unmatched = []; session.waiting = []; rebooked.splice(0); finished = true;
         render();
         status.scrollIntoView({ behavior: motion ? 'smooth' : 'instant', block: 'center' });
     }
@@ -2444,7 +2500,8 @@ document.addEventListener('DOMContentLoaded', function () {
     restoreSuggestions();
     saved = Object.keys(pairs).length === savedBefore;
     render();
-    if (!session.unmatched.length) say('Every courier label is matched. Nothing to do here.');
+    if (undecided().length) say(`${plural(undecided().length, 'pack')} got another courier label in the new PDFs: choose the new or the earlier one under Booked again, then Finalise.`);
+    else if (!session.unmatched.length) say('Every courier label is matched. Nothing to do here.');
     else if (Object.keys(pairs).length) {
         const fresh = Object.keys(pairs).length - savedBefore;
         say([savedBefore ? `${plural(savedBefore, 'match')} saved earlier.` : '',
@@ -2463,10 +2520,26 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!form) return;
     const button = document.getElementById('st-submit');
     const error = document.getElementById('st-form-error');
+    // Build on: the PDFs the picked stitch already has are part of it (greyed, not ticked again)
+    const base = () => form.querySelector('input[name="base"]:checked');
+    const markBase = () => {
+        let inBase = [];
+        try { inBase = JSON.parse((base() || {}).dataset ? base().dataset.files || '[]' : '[]'); } catch (err) { inBase = []; }
+        form.querySelectorAll('input[name="existing"]').forEach((box) => {
+            const has = inBase.includes(box.value);
+            box.disabled = has;
+            if (has) box.checked = false;
+            const note = box.parentElement.querySelector('.st-in-base');
+            if (note) note.hidden = !has;
+        });
+    };
+    form.querySelectorAll('input[name="base"]').forEach((r) => r.addEventListener('change', markBase));
+    markBase();
     form.addEventListener('submit', (e) => {
         const files = form.querySelector('input[name="labels"]');
         const ticked = form.querySelectorAll('input[name="existing"]:checked').length;
-        if (form.dataset.sent === '1' || (!(files && files.files.length) && !ticked)) {
+        const onTop = base() && base().value !== 'none';  // stitching again on an earlier stitch needs no new PDF
+        if (form.dataset.sent === '1' || (!(files && files.files.length) && !ticked && !onTop)) {
             e.preventDefault();
             e.stopImmediatePropagation();  // no overlay for a form that isn't sent
             if (form.dataset.sent !== '1') error.hidden = false;
@@ -3410,6 +3483,11 @@ document.addEventListener('DOMContentLoaded', function () {
             entries: sp.consignments.map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
         (review.courier || []).forEach((w) => tiers[w.major ? 'fix' : 'check'].push({ key: `courier:${w.text}`, title: w.text, edit: true,
             entries: (w.numbers || []).map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
+        // Packs collected rather than sent ('Kyle to collect: 6 labels', 'Pack 1: 2 · Pack 2: 4'): no courier label by
+        // design, so counted here for information and never as 'No address'
+        (review.collect || []).forEach((w) => tiers.info.push({ key: `collect:${w.text}`, title: w.text,
+            detail: `${w.detail ? `${w.detail}. ` : ''}No courier label by design: each label says who collects where the courier label would go.`,
+            entries: (w.numbers || []).map((n) => rows.find((r) => numberOf(r) === String(n))).filter(Boolean).map((r) => [r, '']) }));
         // edit: a click on one of its consignments also opens it for editing (the fix is typing, not a suggestion)
         const rowGroup = (tier, key, title, detail, found, edit) => { if (found.length) tiers[tier].push({ key, title, detail, entries: found, edit }); };
         const withRef = (test) => rows.filter((r) => test(refOf(r))).map((r) => [r, refOf(r).message]);
@@ -3505,7 +3583,7 @@ document.addEventListener('DOMContentLoaded', function () {
 // =========================================
 // 27. LABEL ORDER (horizontal labels): group by allocation or not
 // =========================================
-// Grouped by allocation (code A, B, C …), the divider choice follows; not grouped, there are no codes and so no
+// Grouped by allocation (code A, B, C …), the divider choice follows; not grouped, there are no code groups and so no
 // dividers to choose, and the hint says what the PDF will hold.
 document.addEventListener('DOMContentLoaded', function () {
     const box = document.getElementById('pl-grouping');

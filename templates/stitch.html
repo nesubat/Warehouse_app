@@ -25,7 +25,7 @@
         {% if error %}<p class="ps-error-banner" role="alert">{{ error }}</p>{% endif %}
 
         {% if info %}
-        <p class="st-facts">{{ info.packs }} packing label{{ '' if info.packs == 1 else 's' }} with a courier consignment{% if info.boxed %} ({{ info.boxed }} pack{{ '' if info.boxed == 1 else 's' }} of several boxes, one label per box){% endif %}{% if info.with_code %} · {{ info.with_code }} with a unique code{% else %} · <span class="st-warn">no unique codes (generated before codes existed): matching falls back to the Item Ref text</span>{% endif %}{% if info.left_out %} · {{ info.left_out }} not in the courier CSV (no courier label expected){% endif %}</p>
+        <p class="st-facts">{{ info.packs }} packing label{{ '' if info.packs == 1 else 's' }} with a courier consignment{% if info.boxed %} ({{ info.boxed }} pack{{ '' if info.boxed == 1 else 's' }} of several boxes, one label per box){% endif %}{% if info.with_code %} · {{ info.with_code }} with a unique code{% else %} · <span class="st-warn">no unique codes (generated before codes existed): matching falls back to the Item Ref text</span>{% endif %}{% if info.left_out %} · {{ info.left_out }} not in the courier CSV (no courier label expected){% endif %}{% if info.collected %} · {{ info.collected }} to be collected (no courier label by design){% endif %}</p>
 
         {% if info.runs %}
         {# Labels from more than one Final file in this project: each run is stitched on its own #}
@@ -41,6 +41,7 @@
         {# Everything matched: no details needed, just the file #}
         <div class="st-result st-done">
             <h2 class="ps-heading">✅ All {{ report.placed|length }} courier label{{ '' if report.placed|length == 1 else 's' }} placed</h2>
+            {% if report.session and report.session.base and report.session.base.output %}<p class="ps-hint">Built on {{ report.session.base.output }}: {{ report.new_slots|length }} new in this stitch.</p>{% endif %}
             <p class="st-file-actions">
                 <a class="ab-btn" href="{{ url_for('download_file', folder_name=project, filename=info.latest) }}">⬇ Download {{ info.latest }}</a>
                 <a class="ab-btn ab-btn-plain btn-file open" href="{{ url_for('open_local_file', folder_name=project, filename=info.latest) }}">📂 Open file</a>
@@ -63,7 +64,22 @@
         <p class="st-match-cta"><a class="ab-btn" href="{{ url_for('stitch_match_page', project_name=project) }}">🔗 Continue matching</a>
             <span class="ps-hint">Some courier labels still need matching by hand. Nothing is stitched until you press Finalise there.</span></p>
         {% endif %}
-        {% if info.stitched and not report %}
+        {% if info.history %}
+        {# Every stitch of these labels, newest first: each Complete Labels file is kept, with what it still lacks #}
+        <section class="st-history" aria-labelledby="st-history-title">
+            <h2 class="ps-heading" id="st-history-title">Stitches of these labels</h2>
+            <ul class="st-list">{% for h in info.history %}
+                <li><strong>Stitch {{ h.id }}</strong>{% if h.when %} <span class="st-csv-meta">· {{ h.when }}</span>{% endif %}
+                    <span class="st-csv-meta">· {{ 'built on Stitch ' ~ h.base if h.base else 'first stitch' }}</span><br>
+                    {% if h.exists %}<a href="{{ url_for('download_file', folder_name=project, filename=h.output) }}">{{ h.output }}</a>
+                    <a class="btn-file open st-open" href="{{ url_for('open_local_file', folder_name=project, filename=h.output) }}">📂 Open</a>
+                    {% else %}{{ h.output }} <span class="st-warn">(not in the folder any more)</span>{% endif %}
+                    <br><span class="st-csv-meta">{% if h.placed is not none %}{{ h.placed }}{% if h.expected %} of {{ h.expected }}{% endif %} courier labels placed{% endif %}{% if h.new is not none and h.base %} · {{ h.new }} new{% endif %}{% if h.remaining is not none %} · <strong>{{ h.remaining|length }} still without one</strong>{% endif %}{% if h.collected %} · {{ h.collected }} to be collected{% endif %}{% if h.added %} · courier PDFs added: {{ h.added|join(', ') }}{% endif %}</span>
+                    {% if h.remaining %}<details class="st-remaining"><summary>Still without a courier label ({{ h.remaining|length }})</summary>
+                        <ul>{% for m in h.remaining %}<li>{{ m.slot }}{% if m.page %} · page {{ m.page }}{% endif %}</li>{% endfor %}</ul></details>{% endif %}
+                </li>{% endfor %}</ul>
+        </section>
+        {% elif info.stitched and not report %}
         <p class="ps-saved">Complete Labels in this project:</p>
         <ul class="st-list">{% for f in info.stitched %}<li><a href="{{ url_for('download_file', folder_name=project, filename=f) }}">{{ f }}</a>
             <a class="btn-file open st-open" href="{{ url_for('open_local_file', folder_name=project, filename=f) }}">📂 Open</a></li>{% endfor %}</ul>
@@ -102,11 +118,23 @@
                 {% endfor %}
             </fieldset>
             {% endif %}
+            {% if info.history %}
+            {# A new stitch adds to an earlier one: its courier labels stay, the new PDFs fill what it still lacks #}
+            <fieldset class="st-existing st-base">
+                <legend>Build on</legend>
+                <p class="ps-hint">The new courier labels go on top of the stitch picked here; everything it placed stays. A pack that gets a second courier label is asked about before anything is stitched.</p>
+                {% for h in info.history %}
+                <label><input type="radio" name="base" value="{{ h.id }}" data-files="{{ h.files|tojson|forceescape }}"{% if loop.first %} checked{% endif %}>
+                    Stitch {{ h.id }} <span class="st-csv-meta">· {{ h.output }}{% if h.remaining is not none %} · {{ h.remaining|length }} still without a courier label{% endif %}</span></label>
+                {% endfor %}
+                <label><input type="radio" name="base" value="none" data-files="[]"> Start fresh <span class="st-csv-meta">· only the PDFs chosen here</span></label>
+            </fieldset>
+            {% endif %}
             {% if info.candidates %}
-            <fieldset class="st-existing">
+            <fieldset class="st-existing st-pick-existing">
                 <legend>Or use label PDFs already in this project</legend>
                 {% for f in info.candidates %}
-                <label><input type="checkbox" name="existing" value="{{ f }}"{% if files and f in files %} checked{% endif %}> {{ f }}</label>
+                <label><input type="checkbox" name="existing" value="{{ f }}"{% if files and f in files %} checked{% endif %}> {{ f }}<span class="st-csv-meta st-in-base" hidden> · in the stitch you build on</span></label>
                 {% endfor %}
             </fieldset>
             {% endif %}

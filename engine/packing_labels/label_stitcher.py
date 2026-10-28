@@ -217,8 +217,9 @@ def slot_name(item_reference, box, boxes):
 def packing_slots(label_map):
     """Every place a courier label goes, in packing label order: one per box of every packing label ('2 x
     OB170170170' is two boxes, each with its own pages and courier label; both share one Open360 row and code).
-    [{'slot', 'item_reference', 'box', 'boxes', 'page', 'pack', 'not_in_csv'}]; page is 1-based in the packing
-    labels PDF (None when the label map doesn't say)."""
+    [{'slot', 'item_reference', 'box', 'boxes', 'page', 'pack', 'not_in_csv', 'collect'}]; page is 1-based in the
+    packing labels PDF (None when the label map doesn't say). collect: 'KYLE TO COLLECT' for a pack collected rather
+    than sent (no courier label by design; mark_collected finds it on the labels of an older label map)."""
     out = []
     groups = [(store, pk, False) for store, packs in label_map.get('stores', {}).items() for pk in packs]
     groups += [(pk.get('store', ''), pk, True) for pk in label_map.get('not_in_courier_csv') or []]
@@ -228,19 +229,43 @@ def packing_slots(label_map):
         for box in range(1, boxes + 1):
             out.append({'slot': slot_name(pk['item_reference'], box, boxes), 'item_reference': pk['item_reference'],
                         'box': box, 'boxes': boxes, 'page': pages[box - 1] if box - 1 < len(pages) else None,
-                        'pack': {**pk, 'store': store}, 'not_in_csv': left_out})
+                        'pack': {**pk, 'store': store}, 'not_in_csv': left_out,
+                        'collect': (pk.get('collect') or '') if left_out else ''})
     out.sort(key=lambda sl: (sl['page'] or 10 ** 9))
     return out
 
 
-def waiting_packs(label_map, done):
+_COLLECT_PANEL = re.compile(r'\b(?:TO\s+COLLECT|TO\s+BE\s+COLLECTED)\b')
+
+
+def mark_collected(slots, packing, label_map):
+    """Packs collected rather than sent, from a label map made before it said so: their packing label has the yellow
+    'KYLE TO COLLECT' panel where the courier label goes (packing_label_generator), so its first lines are read there.
+    slots: packing_slots(), given their 'collect'; packing: the open packing labels PDF."""
+    region, _ = _region(label_map)
+    for sl in slots:
+        if not sl['not_in_csv'] or sl['collect'] or not sl['page'] or sl['page'] > len(packing):
+            continue
+        lines = [ln.strip() for ln in packing[sl['page'] - 1].get_text(clip=region).splitlines() if ln.strip()]
+        upto = next((n for n, ln in enumerate(lines[:4]) if _COLLECT_PANEL.search(ln)), None)
+        if upto is not None:
+            sl['collect'] = " ".join(lines[:upto + 1])
+
+
+def _collector(note):
+    """'KYLE TO COLLECT' -> 'Kyle to collect' (a fact on the report)."""
+    return note[:-len(" TO COLLECT")].title() + " to collect" if note.endswith(" TO COLLECT") else note.capitalize()
+
+
+def waiting_packs(label_map, done, collected=()):
     """The packing labels (each box of them) still without a courier label, with what's needed to recognise them:
     receiver, Attn and the full address of their consignment. done: the slots already taken. Packs left out of the
-    courier CSV are included (they may have been booked another way), flagged. 'item_reference' is the slot id."""
+    courier CSV are included (they may have been booked another way), flagged; packs collected rather than sent
+    (collected: their slots) aren't: no courier label comes for them by design. 'item_reference' is the slot id."""
     cons = {c['number']: c for c in label_map.get('consignments', [])}
     out = []
     for sl in packing_slots(label_map):
-        if sl['slot'] in done:
+        if sl['slot'] in done or sl['slot'] in collected or sl['collect']:
             continue
         pk = sl['pack']
         common = {'item_reference': sl['slot'], 'pack_reference': sl['item_reference'], 'box': sl['box'],
@@ -611,8 +636,8 @@ def draw_logos(doc, label_map, logos, pages=None):
             continue
         w, h = sizes[path]
         scale = min(region.width / w, region.height / h)
-        where = fitz.Rect(region.x1 - w * scale, region.y0 + (region.height - h * scale) / 2, region.x1,
-                          region.y0 + (region.height + h * scale) / 2)  # right edge of the slot, centred in the row
+        where = fitz.Rect(region.x0 + (region.width - w * scale) / 2, region.y0 + (region.height - h * scale) / 2,
+                          region.x0 + (region.width + w * scale) / 2, region.y0 + (region.height + h * scale) / 2)  # centred
         for page_no in pk.get('box_pages') or []:
             if not 1 <= page_no <= len(doc) or (pages is not None and page_no not in pages):
                 continue
@@ -631,23 +656,35 @@ def _packing_pdf(project_dir, label_map):
     return os.path.join(project_dir, pdf_name)
 
 
-def plan_stitch(project_dir, label_map, courier_pdfs, manual=None):
+def plan_stitch(project_dir, label_map, courier_pdfs, manual=None, layers=None, rebook=None):
     """Which courier label goes on which packing label, from the text of every courier label page at once: nothing
     is drawn or written, so it takes a moment however many labels there are.
       1. The unique code in each label's Item Ref (or, for a project generated before codes, the Item Ref text)
          picks the pack; a pack of several boxes takes its labels in turn, box 1 first.
       2. For the rest, the matches made by hand (manual: {courier page key: slot or item reference}).
+    layers: the courier PDFs by stitch, oldest first ([['a.pdf'], ['b.pdf']]: a stitch built on an earlier one), each
+    stitch's labels read (codes, then hand matches) before the next one's; a file in none of them is the last stitch's.
+    A label for a pack whose boxes all have an earlier stitch's label is the pack booked again: rebook ({its courier
+    page key: 'new' | 'keep'}) says whether it replaces the earlier label or is left out; with no choice yet the
+    earlier one stays and the plan isn't complete.
     Returns {'placed', 'unmatched' (with each page's text), 'duplicates', 'without_label', 'slots', 'files',
-    'complete'}: complete when every courier label found its packing label and every packing label that should get
-    a courier label has one (so the Complete Labels can be made straight away)."""
+    'rebooked', 'new_slots', 'complete'}: complete when every courier label found its packing label, every packing
+    label that should get a courier label has one and every pack booked again has its choice (so the Complete Labels
+    can be made straight away). new_slots: the packing labels the last stitch's labels went on."""
     packing_path = _packing_pdf(project_dir, label_map)
     by_code, by_ref = label_targets(label_map)
     if not by_code and not by_ref:
         raise StitchError("This project's label map lists no packing labels.")
+    slots = packing_slots(label_map)
     with fitz.open(packing_path) as packing:
         packing_pages = len(packing)
-    manual = manual or {}
-    slots = packing_slots(label_map)
+        mark_collected(slots, packing, label_map)
+    manual, rebook = manual or {}, rebook or {}
+    layer_of = {}
+    for n, names in enumerate(layers or []):
+        for name in names:
+            layer_of.setdefault(name, n)
+    last_layer = max(len(layers or []) - 1, 0)
     slots_of, slot_by_id = {}, {}
     for sl in slots:
         slots_of.setdefault(sl['item_reference'], []).append(sl)
@@ -682,6 +719,7 @@ def plan_stitch(project_dir, label_map, courier_pdfs, manual=None):
                 pack = next((by_ref[_ref_key(r)] for r in _item_ref_texts(text) if _ref_key(r) in by_ref), None)
                 method = 'item reference' if pack else None
             pages.append({'file': name, 'page': i + 1, 'key': key, 'text': text, 'code': code,
+                          'layer': layer_of.get(name, last_layer),
                           'pack': pack['item_reference'] if pack else None, 'store': pack.get('store', '') if pack else '',
                           'method': method, 'other_store': other_store,
                           'code_store': by_code[code].get('store', '') if other_store else ''})
@@ -695,6 +733,7 @@ def plan_stitch(project_dir, label_map, courier_pdfs, manual=None):
                               'why': "its packing label page is missing"})
             return
         done[sl['slot']] = f"{p['file']} p{p['page']}"
+        held[sl['slot']] = p
         placed.append({'file': p['file'], 'page': p['page'], 'key': p['key'], 'item_reference': sl['slot'],
                        'pack_reference': sl['item_reference'], 'box': sl['box'], 'boxes': sl['boxes'],
                        'store': sl['pack'].get('store', ''), 'packing_page': sl['page'], 'method': method,
@@ -702,43 +741,70 @@ def plan_stitch(project_dir, label_map, courier_pdfs, manual=None):
         log.debug("    %s p%d: %s (matched %s%s) -> packing label page %d", p['file'], p['page'], sl['slot'], method,
                   f" {p['code']}" if method == 'code' else '', sl['page'])
 
-    # 1. Codes (or Item Ref text): each label takes its pack's next box still free
-    rest = []
-    for p in pages:
-        if not p['pack']:
-            rest.append(p)
-            continue
-        free = next((sl for sl in slots_of.get(p['pack'], []) if sl['slot'] not in done), None)
-        if free:
-            take(p, free, p['method'])
-        else:
+    held, rebooked = {}, []  # slot -> the courier page on it; packs booked again in a later stitch
+    # Stitch by stitch, oldest first, so a later stitch's labels never take what an earlier one placed without asking
+    for layer in sorted({p['layer'] for p in pages}):
+        # 1. Codes (or Item Ref text): each label takes its pack's next box still free
+        rest, claimed = [], set()  # claimed: boxes a label of this stitch was booked again for (one label each)
+        for p in (p for p in pages if p['layer'] == layer):
+            if not p['pack']:
+                rest.append(p)
+                continue
+            free = next((sl for sl in slots_of.get(p['pack'], []) if sl['slot'] not in done), None)
+            if free:
+                take(p, free, p['method'])
+                continue
+            # Every box has a label. One of an earlier stitch's: the pack was booked again
+            earlier = next((sl for sl in slots_of[p['pack']]
+                            if held[sl['slot']]['layer'] < layer and sl['slot'] not in claimed), None)
+            if earlier is not None:
+                claimed.add(earlier['slot'])
+                old, choice = held[earlier['slot']], rebook.get(p['key'])
+                rebooked.append({'slot': earlier['slot'], 'store': earlier['pack'].get('store', ''), 'choice': choice,
+                                 'earlier': {'file': old['file'], 'page': old['page'], 'key': old['key']},
+                                 'new': {'file': p['file'], 'page': p['page'], 'key': p['key']}})
+                if choice == 'new':  # the new label replaces the earlier one
+                    placed[:] = [x for x in placed if x['item_reference'] != earlier['slot']]
+                    take(p, earlier, p['method'])
+                    log.info("    %s p%d: %s booked again - the new label replaces %s p%d", p['file'], p['page'],
+                             earlier['slot'], old['file'], old['page'])
+                elif choice == 'keep':
+                    duplicates.append({'file': p['file'], 'page': p['page'], 'item_reference': p['pack'],
+                                       'first': done[earlier['slot']], 'kept_earlier': True})
+                continue  # no choice yet: the earlier label stays until one is made
             first = done.get(slots_of[p['pack']][0]['slot'], '')
             log.debug("    %s p%d: %s again (all its boxes have a label) - skipped", p['file'], p['page'], p['pack'])
             duplicates.append({'file': p['file'], 'page': p['page'], 'item_reference': p['pack'], 'first': first})
-    # 2. Matches made by hand, for the labels the codes didn't place
-    for p in rest:
-        wanted = manual.get(p['key'])
-        sl = slot_by_id.get(wanted) if wanted else None
-        if wanted and sl is None:  # an older match by item reference: that pack's next free box
-            sl = next((s for s in slots_of.get(wanted, []) if s['slot'] not in done), None)
-        if sl is not None and sl['slot'] not in done:
-            take(p, sl, 'by hand')
-            if sl['slot'] in done:
-                by_hand.append({**_why_not(p, project_dir, by_code, elsewhere), 'matched_to': sl['slot']})
-            continue
-        if elsewhere is None and by_code and _item_ref_texts(p['text']):
-            elsewhere = codes_elsewhere(project_dir)
-        unmatched.append(_why_not(p, project_dir, by_code, elsewhere))
+        # 2. Matches made by hand, for the labels the codes didn't place
+        for p in rest:
+            wanted = manual.get(p['key'])
+            sl = slot_by_id.get(wanted) if wanted else None
+            if wanted and sl is None:  # an older match by item reference: that pack's next free box
+                sl = next((s for s in slots_of.get(wanted, []) if s['slot'] not in done), None)
+            if sl is not None and sl['slot'] not in done:
+                take(p, sl, 'by hand')
+                if sl['slot'] in done:
+                    by_hand.append({**_why_not(p, project_dir, by_code, elsewhere), 'matched_to': sl['slot']})
+                continue
+            if elsewhere is None and by_code and _item_ref_texts(p['text']):
+                elsewhere = codes_elsewhere(project_dir)
+            unmatched.append(_why_not(p, project_dir, by_code, elsewhere))
 
     left_out = {sl['slot'] for sl in slots if sl['not_in_csv']}
-    missing = [sl['slot'] for sl in slots if sl['slot'] not in done]
+    # Collected rather than sent ('KYLE TO COLLECT'): no courier label by design, so never 'without a courier label'
+    collected = [sl['slot'] for sl in slots if sl['collect'] and sl['slot'] not in done]
+    missing = [sl['slot'] for sl in slots if sl['slot'] not in done and sl['slot'] not in collected]
     without_label = [s + (" (not in the courier CSV)" if s in left_out else '') for s in missing]
-    complete = not unmatched and all(s in left_out for s in missing)
-    log.info("  plan: %d placed, %d courier label(s) unmatched, %d packing label(s) without one, %d duplicate(s)%s",
-             len(placed), len(unmatched), len(missing), len(duplicates), " - complete" if complete else '')
+    undecided = [r for r in rebooked if r['choice'] not in ('new', 'keep')]
+    complete = not unmatched and not undecided and all(s in left_out for s in missing)
+    new_slots = [slot for slot, p in held.items() if p['layer'] == last_layer and slot in done] if layers else list(done)
+    log.info("  plan: %d placed (%d by this stitch), %d courier label(s) unmatched, %d packing label(s) without one, "
+             "%d to be collected, %d booked again (%d to choose), %d duplicate(s)%s", len(placed), len(new_slots),
+             len(unmatched), len(missing), len(collected), len(rebooked), len(undecided), len(duplicates),
+             " - complete" if complete else '')
     return {'placed': placed, 'unmatched': unmatched, 'duplicates': duplicates, 'without_label': without_label,
-            'missing': missing, 'slots': slots, 'done': done, 'by_hand': by_hand,
-            'files': [n for n, _ in courier_pdfs], 'complete': complete}
+            'missing': missing, 'collected': collected, 'slots': slots, 'done': done, 'by_hand': by_hand,
+            'rebooked': rebooked, 'new_slots': new_slots, 'files': [n for n, _ in courier_pdfs], 'complete': complete}
 
 
 def _why_not(p, project_dir, by_code, elsewhere):
@@ -778,7 +844,8 @@ def match_session(label_map, plan):
     labels), those already matched by hand carrying 'matched_to' (so they show as pairs and can be changed), and the
     packing labels (each box) without a courier label from a code."""
     hand_slots = {u['matched_to'] for u in plan.get('by_hand', [])}
-    waiting = waiting_packs(label_map, {s: v for s, v in plan['done'].items() if s not in hand_slots})
+    waiting = waiting_packs(label_map, {s: v for s, v in plan['done'].items() if s not in hand_slots},
+                            plan.get('collected', ()))
     order = {name: n for n, name in enumerate(plan['files'])}
     pages = sorted([u for u in plan['unmatched'] if u.get('key')] + plan.get('by_hand', []),
                    key=lambda u: (order.get(u['file'], 0), u['page'] or 0))
@@ -790,6 +857,7 @@ def match_session(label_map, plan):
     for u in left:
         u.pop('text')
     return {'files': plan['files'], 'unmatched': left, 'waiting': waiting, 'placed': len(plan['placed']),
+            'rebooked': plan.get('rebooked', []),
             'duplicates': len(plan['duplicates']), 'complete': plan['complete'],
             'expected': sum(1 for sl in plan['slots'] if not sl['not_in_csv'])}
 
@@ -820,14 +888,15 @@ def _rendered(placed, courier_pdfs, sources, region):
     return done
 
 
-def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched=True, logos=None):
+def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched=True, logos=None, built_on=''):
     """Draws the Complete Labels PDF for a plan (plan_stitch), in this order:
       1. the job report (stitching results, then what Generate found), replacing Generate's report page
       2. every packing label in the packing labels' own order, with its courier label where one was found
       3. courier labels that matched no packing label (no Item Ref / Item Reference, or a code of another job),
          4-up in cut-and-stack order (four_up_order), if add_unmatched
     Each courier label is rendered at 600 dpi only here. logos: {pack item reference: (service code, PNG path or
-    None)}: each label's first page gets its service's logo (draw_logos). Returns {'placed', 'unmatched',
+    None)}: each label's first page gets its service's logo (draw_logos). built_on: the earlier stitch this one adds
+    to ('Complete Labels 2 - …pdf'), for the report. Returns {'placed', 'unmatched',
     'duplicates', 'without_label', 'report_pages', 'groups', 'logos'}."""
     from datetime import datetime
     region, region_mm = _region(label_map)
@@ -843,6 +912,8 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
     placed = [dict(p) for p in plan['placed']]
     unmatched = [dict(u) for u in plan['unmatched']]
     duplicates, without_label = plan['duplicates'], plan['without_label']
+    collected, rebooked = plan.get('collected', []), plan.get('rebooked', [])
+    collect_of = {sl['slot']: sl['collect'] for sl in plan['slots']}
     for p, (width, height, flate) in zip(placed, _rendered(placed, courier_pdfs, sources, region)):
         target, scale = fit_target(region, width, height)
         put_label(out[p['packing_page'] - 1], region, target, (width, height), flate)
@@ -881,7 +952,8 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
             entry['four_up'] = f"page {at(page_idx)}, {quadrant}"
         groups = [
             f"{_pages([at(n) for n in range(len(order))])}: the packing labels in their own order - {len(placed)} with their "
-            f"courier label, {len(slots) - len(placed)} without" if order else '',
+            f"courier label, {len(plan['missing'])} without" + (f", {len(collected)} to be collected" if collected else '')
+            if order else '',
             (f"{_pages([at(p) for p in four_up_pages])}: courier labels that matched no packing label, 4-up "
              f"({len(leftovers)}) - cut the stack into quarters, then stack top-left, top-right, bottom-left, bottom-right "
              f"to have them in file order" if add_unmatched else
@@ -902,8 +974,14 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
                        if add_unmatched else "Courier labels matching no packing label - LEFT OUT of this file"), 'level': 'bad',
              'items': [f"{u['file']}{' p' + str(u['page']) if u['page'] else ''}: {u['reason']}"
                        + (f" ({u['four_up']})" if u.get('four_up') else '') for u in unmatched]},
+            {'title': "Packs booked again - a new courier label for a pack an earlier stitch had labelled", 'level': 'warn',
+             'items': [f"{r['slot']}: " + (f"the new label ({r['new']['file']} p{r['new']['page']}) replaces {r['earlier']['file']} "
+                                           f"p{r['earlier']['page']}" if r['choice'] == 'new' else
+                                           f"the earlier label kept ({r['earlier']['file']} p{r['earlier']['page']}); "
+                                           f"{r['new']['file']} p{r['new']['page']} left out") for r in rebooked]},
             {'title': "Same courier label more than its pack has boxes - the first ones were used", 'level': 'warn',
-             'items': [f"{d['file']} p{d['page']}: {d['item_reference']} (used {d['first']})" for d in duplicates]},
+             'items': [f"{d['file']} p{d['page']}: {d['item_reference']} (used {d['first']})" for d in duplicates
+                       if not d.get('kept_earlier')]},
             {'title': "Packs of several boxes - one packing label and one courier label per box", 'level': 'info',
              'items': [f"{ref}: {n} boxes" for ref, n in boxed]},
             {'title': "Courier services with no logo yet - add one on the Address Book page (Courier services)", 'level': 'warn',
@@ -913,8 +991,13 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
         ] + [_compact(s) for s in (project.get('report') or {}).get('sections', []) if s.get('kind') != 'left_out'
              and not s['title'].startswith("Not in the courier CSV")]  # already in "without a courier label"
         missing = len(without_label)
-        facts = [("Courier labels placed", f"{len(placed)} of {len(slots)} packing labels"),
+        facts = [("Courier labels placed", f"{len(placed)} of {len(slots) - len(collected)} packing labels"),
                  ("Without a courier label", missing, 'bad' if missing else None)]
+        # 'Kyle to collect: 6 labels': no courier label by design, counted on their own
+        facts += [(_collector(note), f"{n} label{'s' if n != 1 else ''}")
+                  for note, n in Counter(collect_of[s] for s in collected).items()]
+        if built_on:  # added to an earlier stitch: its labels are here too
+            facts += [("Built on", built_on), ("New in this stitch", len(plan.get('new_slots', [])))]
         if unmatched:
             facts.append(("Courier labels not matched", f"{len(unmatched)} ({'4-up at the end' if add_unmatched else 'left out'})", 'bad'))
         if duplicates:
@@ -959,11 +1042,12 @@ def render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_u
             'missing_pages': missing_pages}
 
 
-def stitch(project_dir, label_map, courier_pdfs, output_path, manual=None, add_unmatched=True, logos=None):
+def stitch(project_dir, label_map, courier_pdfs, output_path, manual=None, add_unmatched=True, logos=None, layers=None,
+           rebook=None, built_on=''):
     """plan_stitch, then render_stitch: the whole stitch in one go. Returns render_stitch's result plus 'session'
     (match_session: what the matching page needs) and 'complete'."""
-    plan = plan_stitch(project_dir, label_map, courier_pdfs, manual)
+    plan = plan_stitch(project_dir, label_map, courier_pdfs, manual, layers, rebook)
     session = match_session(label_map, plan)
-    result = render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched, logos)
+    result = render_stitch(project_dir, label_map, courier_pdfs, plan, output_path, add_unmatched, logos, built_on)
     session['output'] = os.path.basename(output_path)
     return {**result, 'session': session, 'complete': plan['complete']}

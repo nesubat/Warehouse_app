@@ -65,12 +65,11 @@ def test_subgroup_codes_kept_and_shown(files):
     groups, *_ = read(final, sig=sig)
     chad = next(g for g in groups.values() if g["serial"] == "03T1P2")
     assert chad["sub_codes"] == [("1-2", "C")]
-    # With Signature Links the codes are in the label's code boxes only; the packing spec box just names the pack
-    assert chad["pack_tag"] == "PACK 2"
+    # The codes are in the label's code boxes, Signature Links or not (the packing spec box has no pack or code tag)
     assert [c["qty"] for c in chad["code_cells"]] == [chad["pack_code"], "C"]
     alone, *_ = read(final)
     chad = next(g for g in alone.values() if g["serial"] == "03T1P2")
-    assert "CODE " in chad["pack_tag"] and "1-2: C" in chad["pack_tag"]
+    assert [c["qty"] for c in chad["code_cells"]] == [chad["pack_code"], "C"]
 
 
 def test_without_code_columns_codes_come_from_signature_links_then_quantities(tmp_path):
@@ -278,20 +277,24 @@ def test_courier_labels_stitch_onto_their_packing_labels(client, files):
     assert fitz.open(out).page_count >= len(refs)
 
 
-def test_pack_tag_leaves_packing_spec_full_size(tmp_path):
-    """The PACK/CODE tag must not shrink the Packing Spec printed under it (they once shared a variable)."""
+def test_packing_spec_box_has_no_pack_number_and_a_long_spec_still_fits(tmp_path):
+    """The Packing Spec box (the foot row's, beside the chips) shows the spec only: no 'PACK 2' or code in it. A spec
+    too long for one line goes on two, inside the box."""
     from engine.packing_labels.packing_label_generator import generate_packing_labels
-    group = lambda tag: {"g": {"pack_spec_name": "2 x CS450320150", "store_name": "Chadstone", "receiver_name": "", "install": False,
-                               "address_1": "", "address_2": "", "suburb": "", "state": "", "postcode": "", "country": "",
-                               "pack_tag": tag, "excel_rows": [9], "items": [{"job_no": "J1-01", "qty": "1", "desc": "", "dimension": "",
-                                                                              "material": "", "install": "", "notes": "", "thumbnails": []}]}}
-    sizes = []
-    for tag in ("", "PACK 2 \u00b7 CODE C \u00b7 1-2: C"):
-        out = tmp_path / f"l{len(sizes)}.pdf"
-        generate_packing_labels(group(tag), str(out))
-        spans = [s for b in fitz.open(out)[0].get_text("dict")["blocks"] for line in b.get("lines", []) for s in line["spans"]]
-        sizes.append(max(s["size"] for s in spans if "CS450320150" in s["text"]))
-    assert sizes[0] == sizes[1] >= 18
+    for n, spec in enumerate(("2 x CS450320150", "Bespoke timber crate with foam inserts")):
+        group = {"g": {"pack_spec_name": spec, "store_name": "Chadstone", "receiver_name": "", "install": False,
+                       "address_1": "", "address_2": "", "suburb": "", "state": "", "postcode": "", "country": "",
+                       "pack_no": 2, "pack_code": "C", "excel_rows": [9],
+                       "items": [{"job_no": "J1-01", "qty": "1", "desc": "", "dimension": "", "material": "", "install": "",
+                                  "notes": "", "thumbnails": []}]}}
+        out = tmp_path / f"l{n}.pdf"
+        generate_packing_labels(group, str(out))
+        page = fitz.open(out)[0]
+        words = [w for w in page.get_text("words") if w[1] > 500]  # the foot of the label block
+        assert not any(w[4] == "PACK" for w in words)
+        box = next(d['rect'] for d in page.get_drawings() if d.get('fill') == (0, 0, 0) and d['rect'].y0 > 500)
+        inside = [w[4] for w in words if box.contains(fitz.Rect(w[:4]))]
+        assert sorted(inside) == sorted(["PACKING", "SPEC"] + spec.split())  # the whole spec, in the box
 
 
 def test_labels_carry_code_boxes_and_audit_page_is_short(client, files):
@@ -464,16 +467,19 @@ def test_each_artwork_is_embedded_once_at_full_quality(files, tmp_path):
     assert {(doc.extract_image(x)['width'], doc.extract_image(x)['height']) for x in xrefs} == sizes  # full size kept
 
 
-def test_page_without_grouping_keeps_sheet_order_and_no_codes(client, files):
-    """'Don't group': each pack's labels in the sheet's store order, no code in the Packing Spec panel, no code boxes,
-    no dividers; the Item References (and so the CSVs and Stitch Labels) are the same as grouped."""
+def test_page_without_grouping_keeps_sheet_order_and_every_code_column(client, files):
+    """'Don't group': each pack's labels in the sheet's store order, no code in the Packing Spec panel, no dividers,
+    but every label keeps its code boxes ('Code for Pack …' is a column of the pack: none is left off, Signature Links
+    or not); the Item References (and so the CSVs and Stitch Labels) are the same as grouped."""
     final, sig, _ = files
     folder = run_page(client, final, sig, extra={"label_grouping": "store", "code_dividers": "1"})  # dividers ignored
     names = os.listdir(folder)
     doc = fitz.open(folder / next(n for n in names if n.startswith("Packing Labels Only")))
     labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
-    labels = [p.get_text() for p in doc if "PACKING SPEC" in p.get_text() and "PACK AUDIT" not in p.get_text()]
-    assert labels and not any(" CODE " in t or "Code for Pack" in t for t in labels)
+    labels = [" ".join(p.get_text().split()) for p in doc if "PACKING SPEC" in " ".join(p.get_text().split()) and "PACK AUDIT" not in p.get_text()]
+    assert labels and not any(" CODE " in t for t in labels)
+    assert all("Code for Pack" in t for t in labels)
+    assert any("Code for pack 2: 1-2" in t for t in labels)  # the sub-group code column too
     packs = [pk for store in labelmap["stores"].values() for pk in store]
     label_pages = {p for pk in packs for p in pk["pdf_pages"]}
     blocks = {serial_of(pk["open360_code"])[2:] for pk in packs}  # 'T1P2': one audit page per tab and pack
@@ -692,10 +698,118 @@ def test_packing_labels_left_without_a_courier_label_are_listed_with_their_pages
     assert len(missing) == 3 and all(m["page"] for m in missing)
     doc = fitz.open(out)
     for m in missing:  # the page named is that packing label, with no courier label on it
-        text = doc[m["page"] - 1].get_text()
+        text = " ".join(doc[m["page"] - 1].get_text().split())
         assert m["store"] in text and "PACKING SPEC" in text
     report = "".join(doc[n].get_text() for n in range(result["report_pages"]))
     assert all(f"{m['slot']} - page {m['page']}" in report.replace("\n", " ") for m in missing)
+
+
+def test_packs_to_be_collected_are_never_without_a_courier_label(client, files):
+    """Carindale's address says 'Kyle collect from warehouse': its labels get no courier label by design, so a stitch
+    with every courier label that came counts them as 'Kyle to collect', not 'Without a courier label', and the
+    matching page doesn't wait for them. A label map made before it said so is read off the labels' yellow panel."""
+    import csv
+    import openpyxl
+    from engine.packing_labels.label_stitcher import stitch
+    final, sig, _ = files
+    wb = openpyxl.load_workbook(final)
+    ws = wb["Spring Sale"]
+    header = {str(ws.cell(row=8, column=c).value or '').strip(): c for c in range(1, ws.max_column + 1)}
+    row = next(r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "Carindale")
+    ws.cell(row=row, column=header["Address 1"], value="Kyle collect from warehouse")
+    for name in ("Suburb", "State", "Postcode"):
+        ws.cell(row=row, column=header[name]).value = None
+    wb.save(final)
+    folder = run_page(client, final, sig)
+    names = os.listdir(folder)
+    map_path = folder / next(n for n in names if n.endswith(".labelmap.json"))
+    labelmap = json.load(open(map_path))
+    assert [x["collect"] for x in labelmap["not_in_courier_csv"]] == ["KYLE TO COLLECT"]
+    rows = list(csv.DictReader(open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8")))
+    courier = fitz.open()
+    for ref in [r["Item Reference"] for r in rows for _ in range(int(r["Item Quantity"] or 1))]:
+        courier.new_page(width=288, height=432).insert_text((20, 300), f"Item Ref: {ref}", fontsize=10)
+    older = {**labelmap, "not_in_courier_csv": [{k: v for k, v in x.items() if k != "collect"}
+                                                for x in labelmap["not_in_courier_csv"]]}
+    for n, lm in enumerate((labelmap, older)):
+        out = folder / f"Complete {n}.pdf"
+        result = stitch(str(folder), lm, [("courier.pdf", courier.tobytes())], str(out))
+        assert result["without_label"] == [] and result["complete"]
+        assert not result["session"]["waiting"]
+        report = " ".join(" ".join(fitz.open(out)[p].get_text().split()) for p in range(result["report_pages"]))
+        assert "Kyle to collect 1 label" in report.replace(":", "")
+
+
+def _courier_pdf(refs, note=""):
+    """A courier label PDF: one page per Item Reference (note: more text, e.g. a new consignment number)."""
+    doc = fitz.open()
+    for ref in refs:
+        doc.new_page(width=288, height=432).insert_text((20, 300), f"Item Ref: {ref} {note}", fontsize=10)
+    return doc.tobytes()
+
+
+def test_each_stitch_builds_on_an_earlier_one_and_a_pack_booked_again_is_asked_about(client, files):
+    """Courier labels that come in batches: each stitch keeps its own Complete Labels and builds on the latest one by
+    default (its labels stay, the new PDF fills the rest), with a history of what was placed and what's left; a pack
+    an earlier stitch labelled that gets another courier label waits for 'new' or 'keep' before Finalise; a stitch
+    can be built on an older one."""
+    import csv
+    import io as io_module
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = run_page(client, final, sig)
+    names = os.listdir(folder)
+    rows = list(csv.DictReader(open(folder / next(n for n in names if n.endswith("Open360.csv")), encoding="utf-8")))
+    refs = [r["Item Reference"] for r in rows for _ in range(int(r["Item Quantity"] or 1))]
+    first, rest = refs[:4], refs[4:]
+
+    def stitch_page(pdf_name, data, **form):
+        return c.post(f"/stitch/{folder.name}", data={"labels": (io_module.BytesIO(data), pdf_name), **form},
+                      content_type="multipart/form-data", follow_redirects=True).data.decode()
+
+    def finalise(**body):
+        r = c.post(f"/stitch/{folder.name}/finalise", json={"matches": {}, "add_unmatched": True, **body})
+        if r.status_code == 202:
+            assert app_module.STITCH_DONE[str(folder)].wait(30)
+        return r
+
+    def history():
+        lm = app_module._stitch_project(folder.name)[2]
+        return app_module._history(str(folder), lm)
+
+    # 1. The first batch: the rest are still to come, so the matching page; Finalise makes stitch 1
+    page = stitch_page("batch-a.pdf", _courier_pdf(first))
+    assert "Match Courier Labels" in page
+    assert finalise().status_code == 202
+    (one,) = history()
+    assert one["base"] is None and one["placed"] == 4 and len(one["remaining"]) == len(rest)
+    # 2. The rest, on top of stitch 1 (the default): everything placed, straight away
+    batch_b = _courier_pdf(rest)
+    page = stitch_page("batch-b.pdf", batch_b)
+    assert "placed</h2>" in page
+    one, two = history()
+    assert two["base"] == 1 and two["placed"] == len(refs) and two["new"] == len(rest) and two["remaining"] == []
+    assert (folder / one["output"]).exists() and (folder / two["output"]).exists()  # every stitch's file is kept
+    assert "Stitch 2" in c.get(f"/stitch/{folder.name}").data.decode()
+    # 3. One pack booked again: asked about, and Finalise waits for the choice
+    page = stitch_page("batch-c.pdf", _courier_pdf(refs[:1], "Consignment 99 rebooked"))
+    assert "Booked again" in page
+    session = json.load(open(app_module._run_file(str(folder), "session"), encoding="utf-8"))
+    (again,) = session["rebooked"]
+    assert again["earlier"]["file"] == "batch-a.pdf" and again["new"]["file"] == "batch-c.pdf" and again["choice"] is None
+    r = finalise()
+    assert r.status_code == 400 and "booked again" in r.get_json()["error"]
+    assert finalise(rebook={again["new"]["key"]: "new"}).status_code == 202
+    three = history()[-1]
+    assert three["base"] == 2 and three["rebook"] == {again["new"]["key"]: "new"} and three["new"] == 1
+    lm = app_module._stitch_project(folder.name)[2]
+    plan = app_module.plan_stitch(str(folder), lm, app_module._courier_pdfs(str(folder), [f for l in three["layers"] for f in l]),
+                                  None, three["layers"], three["rebook"])
+    assert next(p for p in plan["placed"] if p["item_reference"] == again["slot"])["file"] == "batch-c.pdf"
+    # 4. Built on stitch 1 instead: batch B again fills the rest; batch C isn't in it
+    stitch_page("batch-b.pdf", batch_b, base="1")  # the same file again: kept once, under its own name
+    four = history()[-1]
+    assert four["base"] == 1 and four["layers"] == [["batch-a.pdf"], ["batch-b.pdf"]] and four["remaining"] == []
 
 
 def test_units_on_no_label_say_which_cells(tmp_path):
@@ -1048,7 +1162,6 @@ def test_two_label_runs_in_one_project_are_stitched_apart(client, files):
     assert "This project has labels from 2 runs" in page and "stitching this one" in page
     c.get(f"/stitch/{folder.name}?run={first}")
     assert app_module._current_run(str(folder)) == first and app_module._run_file(str(folder), "session") == str(earlier)
-    assert app_module._remove_old_labels(str(folder), keep="new.pdf", only=set()) == []
     assert (folder / "Complete Labels 1 - first.pdf").exists()  # another run's Complete Labels: never removed
     kinds, _ = app_module._courier_csvs(str(folder), os.listdir(folder))
     assert list(kinds) == ["openfreight"]  # the newest run made only OpenFreight: Open360 is offered for it

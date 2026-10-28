@@ -961,6 +961,15 @@ def _layout_cell(item, attribute_order, cell, text_scale, thumb_scale, draw_page
                 half = border / 2
                 draw_page.draw_rect(fitz.Rect(bx0 + half, y + half, bx0 + box_w - half, y + h - half), color=(0, 0, 0), width=border)
                 _draw_lines(draw_page, lines, bx0, bx0 + box_w, y + 3 * text_scale, "hebo", size, (0, 0, 0))
+            # The note written with the quantity ('4 (1 of each kind)', horizontal files) goes under the box, so the
+            # box still shows only the units packed
+            note = _clean(item.get('qty_note'))
+            if note:
+                note_size = 9 * text_scale
+                note_lines = _wrap(f"({note})", "hebo", note_size, inner_w)
+                if draw_page:
+                    _draw_lines(draw_page, note_lines, inner_x0, inner_x1, y + h + 2 * text_scale, "hebo", note_size, (0, 0, 0))
+                h += 2 * text_scale + len(note_lines) * note_size * LINE
             y += h + gap
 
         elif attr in TEXT_STYLES or attr.startswith('row_'):
@@ -1038,27 +1047,26 @@ def _round_rect(page, rect, r, color=None, fill=None, width=0):
     page.draw_rect(rect, color=color, fill=fill, width=width, radius=radius)
 
 
-def _spec_panel(page, rect, spec, max_size=22, tag=""):
-    """Black rounded panel with the Packing Spec in large white type. Returns its bottom y."""
-    inner_w = rect.width - 16
-    size = max_size
-    lines = _wrap(spec, "hebo", size, inner_w)
-    while len(lines) > 2 and size > 11:
-        size -= 1
-        lines = _wrap(spec, "hebo", size, inner_w)
-    lines = lines[:3]
-    h = 14 + len(lines) * size * LINE + 6
-    panel = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + h)
-    _round_rect(page, panel, 6, fill=(0, 0, 0))
-    page.insert_text((panel.x0 + 8, panel.y0 + 11), "PACKING SPEC", fontname="hebo", fontsize=7, color=(1, 1, 1))
-    if tag:  # horizontal files: the pack and its packing-sheet code, top right of the panel
-        tag_size = 9  # its own name: 'size' is the Packing Spec's, drawn below
-        while tag_size > 6 and fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size) > panel.width - 90:
-            tag_size -= 0.5
-        width = fitz.get_text_length(tag, fontname="hebo", fontsize=tag_size)
-        page.insert_text((panel.x1 - 8 - width, panel.y0 + 12), tag, fontname="hebo", fontsize=tag_size, color=(1, 0.82, 0.2))
-    _draw_lines(page, lines, panel.x0 + 8, panel.x0 + 8 + inner_w, panel.y0 + 15, "hebo", size, (1, 1, 1))
-    return panel.y1
+def _spec_panel(page, rect, spec):
+    """The Packing Spec in its black rounded box (rect: SPEC_BOX_W x SPEC_ROW_H, beside the chips): 'PACKING SPEC'
+    small on the left, the spec in white type as large as the box takes, on one line, or two when it must."""
+    white, pad, caption = (1, 1, 1), 6, 5.5
+    _round_rect(page, rect, 6, fill=(0, 0, 0))
+    words = ("PACKING", "SPEC")
+    top = rect.y0 + (rect.height - len(words) * caption * LINE) / 2
+    for i, word in enumerate(words):
+        page.insert_text((rect.x0 + pad, top + caption * 0.92 + i * caption * LINE), word, fontname="hebo",
+                         fontsize=caption, color=white)
+    x0 = rect.x0 + pad + _text_len(words[0], "hebo", caption) + 5
+    x1 = rect.x1 - pad
+    size = (rect.height - 4) / LINE
+    while size > 7 and _text_len(spec, "hebo", size) > x1 - x0:
+        size -= 0.5
+    lines = [spec] if _text_len(spec, "hebo", size) <= x1 - x0 else None
+    if lines is None:  # too long for one line: two, smaller
+        size = (rect.height - 3) / (2 * LINE)
+        lines = _wrap(spec, "hebo", size, x1 - x0)[:2]
+    _draw_lines(page, lines, x0, x1, rect.y0 + (rect.height - len(lines) * size * LINE) / 2, "hebo", size, white)
 
 
 def _counter_chip(page, x0, y0, text, size=11):
@@ -1292,13 +1300,16 @@ A4_W, A4_H = fitz.paper_size("a4-l")
 ZONE_A_W = 107 * MM2PT
 ZONE_A_H = 150 * MM2PT
 CHIP_H = 11 * LINE + 8
-# The row under the address on a label's first page: LABEL / PAGE (/ BOX) chips on the left and, on the right, the slot
-# Stitch Labels puts the courier service's logo in, as tall as the chips (the logos are strips about 6.3 : 1, so the
-# chips there are 9.5 pt to leave the strip its width). Its place goes in the label map.
+# The row at the foot of a label's first page: LABEL / PAGE (/ BOX) chips on the left and, on the right, the Packing
+# Spec box, as tall as the chips (9.5 pt chips there, to leave the box its width)
 CHIP1_SIZE = 9.5
-LOGO_ROW_H = CHIP1_SIZE * LINE + 8   # the chips' height
-LOGO_RATIO = 6.3
-LOGO_W = LOGO_ROW_H * LOGO_RATIO     # about 43 x 6.8 mm
+SPEC_ROW_H = CHIP1_SIZE * LINE + 8   # the chips' height
+SPEC_BOX_W = SPEC_ROW_H * 6.3        # about 43 x 6.8 mm
+# Under the courier region, the slot Stitch Labels puts the courier service's logo in (the logos are strips about
+# 6.3 : 1): the full width, as tall as a one-line Packing Spec panel once was (it and the spec swapped places and sizes).
+# Packing labels leave it empty: the logos only come with the courier labels. Its place goes in the label map.
+LOGO_W = ZONE_A_W
+LOGO_H = 14 + 22 * LINE + 6          # about 107 x 16.4 mm
 ROWS = 3
 
 # One box size for every page: width from page 1's 4 columns beside the courier region,
@@ -1344,10 +1355,10 @@ def cell_preview(pack_groups, max_px=360):
         # A code box has nothing to scan: no barcode, as _layout_cell draws it
         barcode = '' if item.get('is_code') else item.get('barcode') or _clean(item.get('job_no'))
         items.append({
-            **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'desc', 'dimension', 'material', 'install', 'notes')},
+            **{k: _clean(item.get(k)) for k in ('job_no', 'qty', 'qty_note', 'desc', 'dimension', 'material', 'install', 'notes')},
             **{k: _clean(v) for k, v in item.items() if k.startswith('row_')},  # rows of the file offered as blocks
             'barcode': barcode,
-            'is_code': bool(item.get('is_code')),  # a code box: left out when the labels aren't grouped by allocation
+            'is_code': bool(item.get('is_code')),  # a code box: no barcode, grouped by allocation or not
             'modules': code128_modules(barcode, compact=True) if barcode else None,
             'thumbnails': [_thumb_data_url(d, max_px) for d in item.get('thumbnails') or []],
         })
@@ -1526,7 +1537,8 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                                             fontname="hebo", fontsize=11, color=(0.75, 0.1, 0.1), align=1)
 
                     zone_b = fitz.Rect(MARGIN, zone_a_rect.y1 + GAP, MARGIN + ZONE_A_W, A4_H - MARGIN)
-                    y = _spec_panel(page, zone_b, spec, tag=_latin(group_data.get('pack_tag') or '')) + 6
+                    # The top of zone B is the courier logo's slot (LOGO_W x LOGO_H): left empty for Stitch Labels
+                    y = zone_b.y0 + LOGO_H + 6
 
                     if store and store.lower() != 'none':
                         for line in _wrap(shown_name, "hebo", 13, zone_b.width)[:2]:
@@ -1553,18 +1565,19 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         address = ", ".join(p for p in addr_parts if p)
                     if address:
                         address_lines = _wrap(address, "helv", 9, zone_b.width)
-                        room = int((zone_b.y1 - LOGO_ROW_H - 3 - y) // (9 * LINE))
+                        room = int((zone_b.y1 - SPEC_ROW_H - 3 - y) // (9 * LINE))
                         for line in address_lines[:max(0, min(3, room))]:
                             page.insert_text((zone_b.x0, y + 9), line, fontname="helv", fontsize=9)
                             y += 9 * LINE
 
-                    # The chips, centred in the logo row and kept clear of the logo slot (smaller type if they must)
+                    # The Packing Spec box at the right of the foot row, the chips beside it (smaller type if they must)
+                    _spec_panel(page, fitz.Rect(zone_b.x1 - SPEC_BOX_W, zone_b.y1 - SPEC_ROW_H, zone_b.x1, zone_b.y1), spec)
                     chips = [label_text, page_text] + ([f"BOX {box} OF {boxes}"] if boxes > 1 else [])
-                    room_w = zone_b.width - LOGO_W - 8
+                    room_w = zone_b.width - SPEC_BOX_W - 8
                     chip_size = CHIP1_SIZE
                     while chip_size > 7 and sum(_text_len(t, "hebo", chip_size) + 16 for t in chips) + 6 * (len(chips) - 1) > room_w:
                         chip_size -= 0.5
-                    chip_y = zone_b.y1 - LOGO_ROW_H + (LOGO_ROW_H - (chip_size * LINE + 8)) / 2
+                    chip_y = zone_b.y1 - SPEC_ROW_H + (SPEC_ROW_H - (chip_size * LINE + 8)) / 2
                     x = zone_b.x0
                     for t in chips:
                         x = _counter_chip(page, x, chip_y, t, size=chip_size).x1 + 6
@@ -1618,7 +1631,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         'page_size_mm': [round(A4_W / MM2PT, 1), round(A4_H / MM2PT, 1)],
         'courier_region_mm': {'x': round(MARGIN / MM2PT, 1), 'y': round(MARGIN / MM2PT, 1),
                               'width': round(ZONE_A_W / MM2PT, 1), 'height': round(ZONE_A_H / MM2PT, 1)},
-        # Where Stitch Labels puts the courier service's logo on each label's first page (LOGO_ROW_H, LOGO_W)
-        'logo_region_mm': {'x': round((MARGIN + ZONE_A_W - LOGO_W) / MM2PT, 2), 'y': round((A4_H - MARGIN - LOGO_ROW_H) / MM2PT, 2),
-                           'width': round(LOGO_W / MM2PT, 2), 'height': round(LOGO_ROW_H / MM2PT, 2)},
+        # Where Stitch Labels puts the courier service's logo on each label's first page (LOGO_W x LOGO_H)
+        'logo_region_mm': {'x': round(MARGIN / MM2PT, 2), 'y': round((MARGIN + ZONE_A_H + GAP) / MM2PT, 2),
+                           'width': round(LOGO_W / MM2PT, 2), 'height': round(LOGO_H / MM2PT, 2)},
     }
