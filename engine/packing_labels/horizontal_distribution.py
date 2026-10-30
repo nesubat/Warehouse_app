@@ -342,6 +342,15 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     totals_row = next((r for r in range(last_row + 1, min(ws.max_row, last_row + 3) + 1)
                        if TOTAL_ROW.match(val(r, store_col))), None)
 
+    # 5a. The tab's layout as found (the preview's Blueprint, as Packing Sheets shows it; making the Packing Sheet and
+    # Signature Links of a file that came without them): on the tab's result, and on its PackCheckError from here on
+    final_file = any(p['code_cols'] or p['sub_cols'] for p in packs)
+    blueprint = _blueprint(packs, spec_cols, final_file, store_rows, first_row, last_row, last_col, job_row, pack_row,
+                           store_col, item_cols, header_row)
+    # Each pack's job numbers (item columns only, not the code columns), as Packing Sheets' pack_job_numbers gives them:
+    # the preview warns about one that turns up in more than one pack, as Packing Sheets does
+    blueprint['pack_jobs'] = [(p['name'], list(dict.fromkeys(val(job_row, x) for x in p['items']))) for p in packs]
+
     # 5b. Quantities no label would carry: the labels are made per store row and per item column with a job number,
     # so units (or text) anywhere else in the grid would be left off without a word. Each is refused with its cells.
     def units(r, x):
@@ -525,7 +534,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
                     grid_units += q
                     items.append({**{k: v for k, v in info[x].items()}, 'qty': shown, 'units': q, 'qty_note': note,
                                   'install': "INSTALLER" if install else "", 'source_key': (ws.title, x)})
-            spec = _spec_for(p, r, val, spec_cols, attr_rows, any(p['code_cols'] or p['sub_cols'] for p in packs))
+            spec = _spec_for(p, r, val, spec_cols, attr_rows, final_file)
             if items and spec.lower() in NO_PACK:
                 (x_but_qty if spec else no_spec).append((r, p))
                 lost += [(r, i['source_key'][1], i['units']) for i in items]
@@ -601,7 +610,9 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
             warnings.append(_issue(str(totals_row), 'TOTAL', f"TOTAL row says {sheet_total:g}, the stores add up to {grid_units:g}", major=True))
     with_stores(errors + warnings, lambda r: val(r, store_col))  # 'Row 11 Macpac Adelaide', not only 'Row 11'
     if errors:
-        raise PackCheckError(errors, warnings)
+        error = PackCheckError(errors, warnings)
+        error.blueprint = blueprint
+        raise error
 
     # 10. Packing-sheet order: pack, code (A … Z, AA …), sub-group codes, the store's row
     order = sorted(groups, key=lambda k: (groups[k]['pack_no'], code_key(groups[k]['pack_code']),
@@ -613,7 +624,7 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
                               "the file's code columns" if p['code_source'].startswith("the file's") else
                               'worked out from the quantities' for p in packs}),
              'rows': {'job': job_row, 'pack': pack_row, 'stores': f"{first_row}-{last_row}"},
-             'plugin': bool(plugin), 'stores': n_stores,
+             'plugin': bool(plugin), 'stores': n_stores, 'blueprint': blueprint,
              # Each pack's Packing Specs and how many labels each, for the tab's card: [{'pack', 'specs': [[spec, n]]}]
              'specs_by_pack': [{'pack': f"Pack {p['order']}" + ('' if str(p['name']).strip() in ('', str(p['order'])) else f" ({p['name']})"),
                                 'specs': [[s, n] for s, n in Counter(groups[k]['pack_spec_name'] for k in order
@@ -633,15 +644,45 @@ def _read(ws, excel_path, header_row, columns, tab_no, signature):
     return {k: groups[k] for k in order}, last_row, found, warnings
 
 
+def _spec_col(p, spec_cols, final_file):
+    """A pack's Packing Spec column: the one headed with the pack's number (Courier Import's), else the Label Plugin's
+    stock column for the pack; None when its specs are in a row above the items (or nowhere)."""
+    n = int(p['name']) if p['name'].isdigit() else p['order']
+    if n in spec_cols:
+        return spec_cols[n]
+    plug = p.get('plugin') or {}
+    return _letter_to_col(plug.get('stock_col_final') if final_file else plug.get('stock_col')) or _letter_to_col(plug.get('stock_col'))
+
+
+def _blueprint(packs, spec_cols, final_file, store_rows, first_row, last_row, last_col, job_row, pack_row, store_col,
+               item_cols, header_row):
+    """The tab's layout in Packing Sheets' words ('Packaging stocks are in G to K.', '1 spans from M to R'), plus the
+    cells Packing Sheets is given for it (job_cell: the first item's job number; start_cell: the first Packing Spec
+    column on the pack row, '' when the Packing Spec headers aren't on that row, as Packing Sheets needs them;
+    store_col). final_file: the file has packing-sheet code columns already."""
+    L = get_column_letter
+    stock = sorted({c for c in (_spec_col(p, spec_cols, final_file) for p in packs) if c})
+    if not stock:
+        stocks_map = "No Packing Spec columns found (one per pack, headed with its number)."
+    elif stock == list(range(stock[0], stock[-1] + 1)):
+        stocks_map = f"Packaging stocks are in {L(stock[0])} to {L(stock[-1])}." if len(stock) > 1 else f"Packaging stocks are in {L(stock[0])}."
+    else:
+        stocks_map = f"Packaging stocks are in {', '.join(L(c) for c in stock)}."
+    return {
+        'last_col': L(last_col), 'last_row': last_row, 'first_row': first_row, 'total_stores': len(store_rows),
+        'job_row': job_row, 'pack_row': pack_row, 'store_col': L(store_col), 'stocks_map': stocks_map,
+        'stock_cols': [L(c) for c in stock], 'final_file': final_file,
+        'packages': [f"{p['name']} spans from {L(p['cols'][0])} to {L(p['cols'][-1])}" if len(p['cols']) > 1 else
+                     f"{p['name']} is in column {L(p['cols'][0])}" for p in packs],
+        'job_cell': f"{L(min(item_cols))}{job_row}" if item_cols else '',
+        'start_cell': f"{L(stock[0])}{pack_row}" if stock and spec_cols and header_row == pack_row else '',
+    }
+
+
 def _spec_for(p, r, val, spec_cols, attr_rows, final_file):
     """A store's Packing Spec for a pack: its column headed with the pack's number (Courier Import's), else the
     Label Plugin's stock column for the pack, else a Packing Spec row above the pack's items."""
-    n = int(p['name']) if p['name'].isdigit() else p['order']
-    if n in spec_cols:
-        p['spec_from'] = 'column'
-        return val(r, spec_cols[n])
-    plug = p.get('plugin') or {}
-    col = _letter_to_col(plug.get('stock_col_final') if final_file else plug.get('stock_col')) or _letter_to_col(plug.get('stock_col'))
+    col = _spec_col(p, spec_cols, final_file)
     if col:
         p['spec_from'] = 'column'
         return val(r, col)

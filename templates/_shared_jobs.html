@@ -1,0 +1,13 @@
+{# Job numbers in more than one pack group, at the top of the Blueprint Previews (Packing Sheets, and horizontal
+   labels): the warning the Packing Sheets download page gives, before anything is made. A warning only, as there:
+   Generate still goes ahead. shared_job_warnings: app._shared_jobs. #}
+{% if shared_job_warnings %}
+<div class="warning-box shared-job-warning">
+    ⚠️ These job numbers appear in more than one pack group. You can still generate, but please check them first:
+    <ul>
+        {% for warning in shared_job_warnings %}
+        <li>{{ warning }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}

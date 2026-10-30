@@ -181,6 +181,16 @@ def client(tmp_path, monkeypatch):
     for name in ("close_if_open_elsewhere", "save_if_open_elsewhere"):  # Excel-only helpers
         monkeypatch.setattr(app_module, name, lambda *a, **k: None)
     monkeypatch.setattr(app_module, "convert_legacy_excel_to_xlsx", lambda p: p)
+    # Packing Sheets runs in Excel: here it writes its two files and keeps what it was asked for (app_module.sheets_runs)
+    app_module.sheets_runs = []
+
+    def packing_sheets(file_path, original, tabs, inputs, tab_data, folder):
+        app_module.sheets_runs.append({'tabs': tabs, 'inputs': inputs, 'tab_data': tab_data})
+        for name in ("Packing Sheet_J476699.xlsx", "Signature links_J476699.xlsx"):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"xlsx")
+        return "Final x.xlsx", "Packing Sheet_J476699.xlsx", "Signature links_J476699.xlsx", []
+    monkeypatch.setattr(app_module, "generate_all_outputs", packing_sheets)
     app_module.app.config["TESTING"] = True
     return app_module.app.test_client(), app_module, tmp_path / "projects"
 
@@ -876,8 +886,139 @@ def test_labels_from_a_packing_sheets_project_are_saved_in_that_project(client, 
     assert any(n.endswith("Open360.csv") for n in new) and any(n.endswith(".courier.json") for n in new)
     assert not (projects / filename).exists()  # the copy made for the page went
     assert not any(n.startswith("Used for labels") for n in new)  # unchanged: no copy kept
+    assert app_module.sheets_runs == []  # the project has its Packing Sheet and Signature Links already
     page = c.get("/").data.decode()
     assert "Stitch Labels" in page and "Create OpenFreight CSV" in page and "Label Shuffler" in page
+
+
+def _run_without_signature(client, final, project, extra=None):
+    """The page with a distribution file and no Signature Links file: scan, preview (header row 8), Generate.
+    Returns (project folder, preview page, result page)."""
+    c, app_module, projects = client
+    with open(final, "rb") as f:
+        c.post("/packing-labels/horizontal", data={"file": (f, final.name)}, content_type="multipart/form-data",
+               follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+            "selected_tabs": ["Spring Sale", "Easter"], "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    preview = c.post("/packing-labels/horizontal", data={**form, "preview": "1"}, follow_redirects=True).data.decode()
+    gen = {**form, "generate": "1", "who_pays": "S", "service_code": app_module.SERVICE_STORE.services()[0]['code'],
+           "reference": "J476699", "project_name": project, "courier_csv": ["open360"],
+           "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty", **(extra or {})}
+    result = c.post("/packing-labels/horizontal", data=gen, follow_redirects=True).data.decode()
+    assert "Labels Successfully Generated" in result, result[:1500]
+    folder = next(p for p in projects.iterdir() if p.is_dir() and p.name.startswith(project))
+    return folder, preview, result
+
+
+@pytest.mark.parametrize("grouping", ["code", "store"])
+def test_labels_without_signature_links_also_make_the_packing_sheet_and_signature_links(client, tmp_path, grouping):
+    """No Signature Links file sent: Packing Sheets runs on the file too (every pack of each tab, from the layout the
+    labels were read with), whatever the label order, and its Packing Sheet and Signature Links go into the project."""
+    c, app_module, projects = client
+    final = tmp_path / "Spring rollout.xlsx"
+    build_final_file(final, codes=False)
+    folder, _, result = _run_without_signature(client, final, f"Raw {grouping}", {"label_grouping": grouping})
+    (run,) = app_module.sheets_runs
+    assert run["tabs"] == ["Spring Sale", "Easter"]
+    spring = run["inputs"]["Spring Sale"]
+    assert (spring["start"], spring["job"], spring["store"]) == ("H8", "J7", "A")  # first Packing Spec, first job number
+    assert spring["selected_packs"] == ["1", "2"] and run["inputs"]["Easter"]["job"] == "I7"
+    names = os.listdir(folder)
+    assert "Packing Sheet_J476699.xlsx" in names and "Signature links_J476699.xlsx" in names
+    assert not any(n.startswith("Final ") for n in names)  # only the two files
+    assert "Download Packing Sheet" in result and "Download Signature Links" in result
+    assert any(n.startswith("Packing Labels Only") for n in names)  # the labels as ever
+
+
+def test_labels_with_signature_links_make_no_packing_sheet(client, files):
+    c, app_module, projects = client
+    final, sig, _ = files
+    folder = run_page(client, final, sig)
+    assert app_module.sheets_runs == [] and not any(n.startswith("Packing Sheet") for n in os.listdir(folder))
+
+
+def test_a_final_file_without_its_signature_links_isnt_coded_again(client, tmp_path):
+    """A Final file (code columns in already) sent without its Signature Links: no Packing Sheet made from it (its codes
+    would be coded again); the result page says why."""
+    c, app_module, projects = client
+    final = tmp_path / "Final J476699 Spring rollout.xlsx"
+    build_final_file(final)
+    _, _, result = _run_without_signature(client, final, "Final run")
+    assert app_module.sheets_runs == []
+    assert "already has packing-sheet code columns" in result
+
+
+def test_blueprint_preview_comes_first_with_each_packs_columns(client, tmp_path):
+    """Horizontal labels: a Blueprint Preview per tab, as Packing Sheets shows it, before the Data Previews."""
+    c, app_module, projects = client
+    final = tmp_path / "Spring rollout.xlsx"
+    build_final_file(final, codes=False)
+    _, preview, _ = _run_without_signature(client, final, "Blueprint")
+    text = " ".join(re.sub(r"<[^>]+>", " ", preview).split())
+    assert text.index("Blueprint Previews") < text.index("Data Previews")
+    assert "Last Column: Q" in text and "Last Row: 16" in text and "Total Stores: 8" in text
+    assert "Packaging stocks are in H to I." in text and "1 spans from J to N" in text and "2 spans from O to Q" in text
+    assert "more than one pack group" not in text  # no job number is in two packs
+
+
+SHARED = "J476699-01 is in Spring Sale | Pack 1, Spring Sale | Pack 2, Easter | Pack 1"
+
+
+def _shared_job_file(path):
+    """The sample file (no code columns) with J476699-01, pack 1's first item, also on pack 2's first item (O7) and on
+    Easter's first item (I7): one job number in three pack groups, two tabs."""
+    import openpyxl
+    build_final_file(path, codes=False)
+    wb = openpyxl.load_workbook(path)
+    wb["Spring Sale"]["O7"] = "J476699-01"
+    wb["Easter"]["I7"] = "J476699-01"
+    wb.save(path)
+
+
+def _text(page):
+    return " ".join(re.sub(r"<[^>]+>", " ", page).split())
+
+
+def test_blueprint_previews_warn_about_a_job_number_in_more_than_one_pack(client, tmp_path):
+    """The download page's warning, on both Blueprint Previews before anything is made: horizontal labels and
+    Packing Sheets name the same job number and the same pack groups, across tabs. Generate isn't locked by it."""
+    c, app_module, projects = client
+    final = tmp_path / "Spring rollout.xlsx"
+    _shared_job_file(final)
+    with open(final, "rb") as f:
+        c.post("/packing-labels/horizontal", data={"file": (f, final.name)}, content_type="multipart/form-data",
+               follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+            "selected_tabs": ["Spring Sale", "Easter"], "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    labels = _text(c.post("/packing-labels/horizontal", data={**form, "preview": "1"}, follow_redirects=True).data.decode())
+    assert "These job numbers appear in more than one pack group" in labels and SHARED in labels
+    assert labels.index(SHARED) < labels.index("Data Previews")  # with the Blueprint Previews, at the top
+
+    sheets = _text(c.post("/preview", data={
+        "filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+        "selected_tabs": ["Spring Sale", "Easter"], "start_Spring Sale": "H8", "job_Spring Sale": "J7",
+        "store_Spring Sale": "A", "start_Easter": "H8", "job_Easter": "I7", "store_Easter": "A"},
+        follow_redirects=True).data.decode())
+    assert "These job numbers appear in more than one pack group" in sheets and SHARED in sheets
+    assert sheets.index("Blueprint Previews") < sheets.index(SHARED) < sheets.index("Spring Sale Last Column")
+    assert "Cannot Generate" not in sheets and "Generate Packing Sheet" in sheets
+
+
+def test_pack_job_numbers_keep_each_packs_own_once():
+    """Packing Sheets' job numbers per pack: blank cells skipped, a job number twice in one pack kept once (that's
+    two kinds, not a shared job number); one in two packs is what's warned about."""
+    from engine.packing_sheets.matrix_engine import pack_job_numbers, job_groups, find_shared_job_numbers
+    row = [None, "J1-01", " J1-02 ", "", "J1-02", "J1-01", None]
+    cols, packs = pack_job_numbers(row, [{"name": "1", "start": 2, "end": 5}, {"name": "2", "start": 6, "end": 8}])
+    assert packs == [("1", ["J1-01", "J1-02"]), ("2", ["J1-01"])]
+    assert cols == {2: "J1-01", 3: "J1-02", 5: "J1-02", 6: "J1-01"}
+    assert find_shared_job_numbers(job_groups("Tab", packs)) == ["J1-01 is in Tab | Pack 1, Tab | Pack 2"]
+
+
+def test_packing_sheets_file_names_use_the_job_number_itself():
+    from engine.packing_sheets.matrix_engine import file_job
+    assert file_job("J481189-01") == file_job("J481189-001") == file_job("J481189") == "J481189"
+    assert file_job("Window decal") == "Window decal"  # not a job number: as written
 
 
 def _into_project_form(c, app_module, folder, final):

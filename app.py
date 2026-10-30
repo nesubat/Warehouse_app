@@ -5,6 +5,7 @@ from flask import has_request_context, Flask, render_template, request, redirect
 import os
 import filecmp
 import shutil
+import tempfile
 import json
 import pymupdf as fitz
 import io
@@ -18,7 +19,8 @@ from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException, InternalServerError
 from urllib.parse import urlencode, urlsplit
 from engine.label_shuffler.pdf_engine import process_and_shuffle_pdf
-from engine.packing_sheets.matrix_engine import scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx
+from engine.packing_sheets.matrix_engine import (scan_excel_tabs, generate_tab_map, generate_all_outputs, convert_legacy_excel_to_xlsx,
+                                                 job_groups, find_shared_job_numbers)
 from engine.core.core_math import job_series, JOB_NUMBER, unused_name, clean_file_name, close_if_open_elsewhere, save_if_open_elsewhere, clean_store_name, NOT_STORE_TABS, read_divider_barcodes, \
     free_name
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
@@ -398,6 +400,20 @@ def matrix():
 
     return _show('matrix.html', tabs=tabs, filename=filename)
 
+def _shared_jobs(previews, log):
+    """Job numbers in more than one pack, across every previewed tab ("J476699-01 is in Spring Sale | Pack 1, Easter |
+    Pack 1"), for the Blueprint Previews: the warning the download page gives, before anything is made. Each preview's
+    'pack_jobs' (Packing Sheets' generate_tab_map), or its blueprint's (horizontal labels' read_horizontal)."""
+    groups = []
+    for bp in previews:
+        pack_jobs = bp.get('pack_jobs') or (bp.get('blueprint') or {}).get('pack_jobs') or []
+        groups += job_groups(bp['sheet_name'], pack_jobs)
+    shared = find_shared_job_numbers(groups)
+    for w in shared:
+        log.warning("  needs a look: job number %s", w)
+    return shared
+
+
 @app.route('/preview', methods=['POST'])
 def preview():
     filename = request.form.get('filename')
@@ -444,9 +460,11 @@ def preview():
                 })
                 
     blueprints_json = json.dumps(blueprints)
+    shared_job_warnings = _shared_jobs(previews, log_sheets)
     log_sheets.info("Preview ready in %.2fs", time.perf_counter() - started)
 
-    return _show('matrix.html', _at='/matrix', tabs=all_tabs, previews=previews, filename=filename, user_inputs=user_inputs, blueprints_json=blueprints_json)
+    return _show('matrix.html', _at='/matrix', tabs=all_tabs, previews=previews, filename=filename, user_inputs=user_inputs,
+                 blueprints_json=blueprints_json, shared_job_warnings=shared_job_warnings)
 
 @app.route('/generate', methods=['POST'])
 def generate():
@@ -3157,6 +3175,50 @@ def _keep_signature_upload(upload, filepath, tabs):
     return inputs, None
 
 
+def _sheets_for_labels(project_dir, excel_path, filename, tabs, blueprints, log):
+    """The Packing Sheet and Signature Links of a horizontal file whose labels were made without a Signature Links
+    file: Packing Sheets (generate_all_outputs, Excel) run on it with every pack of each tab, from the layout the
+    labels were read with (read_horizontal's blueprint: the first Packing Spec cell on the pack row, the first item's
+    job number, the store column). Only the two files go into the project, under their usual names. The labels don't
+    wait on it: a tab it can't do, or Excel failing, is a note on the result page.
+    Returns ([file names put in the project], note: why it wasn't (fully) made, '' when it was)."""
+    usable, skipped = [], []
+    for tab in tabs:
+        b = blueprints.get(tab) or {}
+        if b.get('final_file'):  # a Packing Sheets output already: its codes would be coded again
+            skipped.append(f"{tab} already has packing-sheet code columns (a Final file): use its own Signature Links file")
+        elif not b.get('start_cell') or not b.get('job_cell'):
+            skipped.append(f"{tab} has no Packing Spec columns on its pack header row (Packing Sheets reads them there)")
+        else:
+            usable.append(tab)
+    note = "; ".join(skipped)
+    if not usable:
+        log.info("  no Packing Sheet made: %s", note)
+        return [], f"No Packing Sheet or Signature Links made: {note}."
+    made = []
+    try:
+        progress.stage("Making the Packing Sheet and Signature Links", 99, 100)
+        tab_data, inputs = {}, {}
+        for tab in usable:
+            b = blueprints[tab]
+            tab_data[tab] = generate_tab_map(excel_path, tab, b['start_cell'], b['job_cell'], b['store_col'])['backend_data']
+            inputs[tab] = {'start': b['start_cell'], 'job': b['job_cell'], 'store': b['store_col'],
+                           'selected_packs': [p['name'] for p in tab_data[tab]['pack_ranges']]}
+        with tempfile.TemporaryDirectory() as work:
+            with app_log.step(log, f"  Packing Sheet and Signature Links for {', '.join(usable)}"):
+                _, sheet, links, _ = generate_all_outputs(excel_path, filename, usable, inputs, tab_data, work)
+            for name in (sheet, links):
+                if name:
+                    kept = unused_name(project_dir, name)
+                    shutil.move(os.path.join(work, name), os.path.join(project_dir, kept))
+                    made.append(kept)
+    except Exception as e:
+        log.exception("  the Packing Sheet couldn't be made (the labels are done): %s", e)
+        return made, f"The labels are done, but the Packing Sheet and Signature Links couldn't be made: {e}. Make them " \
+                     "on the Packing Sheets page."
+    return made, (f"Packing Sheet made for {', '.join(usable)} only: {note}." if note else '')
+
+
 def _distribution_page(mode):
     """Packing Labels and Courier Import share one page and its steps: upload, tabs and header rows, the preview
     (Column mapping, consignment table with the address book, ✏️ edits, merges, service codes, weights), the
@@ -3313,6 +3375,7 @@ def _distribution_page(mode):
                     'found_headers': found_headers, # Pass headers to the UI
                     'warnings': warnings,
                     'mapping': mapping,
+                    'blueprint': found_headers.get('blueprint'),  # horizontal files: the layout, as Packing Sheets shows it
                     'error': None
                 })
             except PackCheckError as e:
@@ -3322,7 +3385,8 @@ def _distribution_page(mode):
                     log.warning("    %s", issue_text(i))
                 for w in e.warnings:
                     log.info("    needs a look: %s", issue_text(w))
-                previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings, 'mapping': mapping})
+                previews.append({'sheet_name': tab, 'error': True, 'issues': e.issues, 'warnings': e.warnings, 'mapping': mapping,
+                                 'blueprint': getattr(e, 'blueprint', None)})  # the layout, to see where it went wrong
             except ValueError as e:  # a column that can't be found: picked in the Column mapping
                 log.warning("  tab %s: %s", tab, e)
                 previews.append({'sheet_name': tab, 'error': True, 'issues': [{'rows': '', 'col': '', 'text': str(e), 'detail': ''}],
@@ -3423,7 +3487,8 @@ def _distribution_page(mode):
         signature = _signature_for(filepath) if horizontal_mode else None
         return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
                                file_note=file_note, cell_preview=preview_cells,
-                               signature_note=_signature_note(signature) if horizontal_mode else None)
+                               signature_note=_signature_note(signature) if horizontal_mode else None,
+                               shared_job_warnings=_shared_jobs(previews, log) if horizontal_mode else [])
 
     # Action: Generate Final PDF & Save to Project
     if 'generate' in request.form:
@@ -3460,11 +3525,13 @@ def _distribution_page(mode):
         close_if_open_elsewhere(filepath)
 
         project_dir = None
+        sheets_note = ''  # horizontal labels without Signature Links: why its Packing Sheet wasn't made, if it wasn't
         project_had = None  # into a Packing Sheets project: the files it had, so a failure takes back only this run's
         started = time.perf_counter()
         tab_of = {}  # pack key -> its tab's number among the selected tabs, for the Item Reference ('01T2QWXK Store')
         pack_notes = {}  # horizontal: (tab number, pack number) -> the warnings about that pack, for its audit page
         tab_notes = {}   # vertical: tab number -> its warnings, for the tab's audit page
+        blueprints = {}  # horizontal: tab -> its layout (read_horizontal's 'blueprint'), for its Packing Sheet
         try:
             # 1. Parse Data
             sheet_warnings = []
@@ -3472,9 +3539,10 @@ def _distribution_page(mode):
             for tab in selected_tabs:
                 progress.tick(selected_tabs.index(tab), len(selected_tabs), f"Reading tab {tab}")
                 header_row = int(user_inputs[tab]['header_row'])
-                pack_groups, _, _, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode), mode,
-                                                            selected_tabs.index(tab) + 1)
+                pack_groups, _, found_tab, tab_warnings = _read_tab(filepath, header_row, tab, _column_choices(request.form, tab, mode),
+                                                                    mode, selected_tabs.index(tab) + 1)
                 if horizontal_mode:
+                    blueprints[tab] = (found_tab or {}).get('blueprint')
                     for g in pack_groups.values():
                         key = (g['tab_no'], g['pack_no'])
                         pack_notes.setdefault(key, [w for w in tab_warnings
@@ -3653,6 +3721,12 @@ def _distribution_page(mode):
                                  'report_pages': page_info.get('report_pages', 0)})
                 log.info("  label map %s", map_name)
                 output_files = [output_pdf_name] + csv_files
+                if horizontal_mode and not signature_used and not into:
+                    # Labels made without a Signature Links file: Packing Sheets makes this file's Packing Sheet and
+                    # Signature Links too, into this project, whatever the label order chosen (a Packing Sheets
+                    # project, or a Signature Links file sent with the file, has them already)
+                    made, sheets_note = _sheets_for_labels(project_dir, new_filepath, filename, selected_tabs, blueprints, log)
+                    output_files += made
             used_copy = None
             if into:
                 # It worked: a new label map starts a new stitching session, and the copy of the Final file the labels
@@ -3689,7 +3763,7 @@ def _distribution_page(mode):
             summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
                 f"{x['item_reference']} ({x['packing_spec']}) - {x['store']}" for x in left_out]} if courier_mode else None
             return show(generation_complete=True, project_folder=final_folder_name, generated_files=output_files,
-                        summary=summary)
+                        summary=summary, sheets_note=sheets_note)
 
         except Exception as e:
             log.exception("Generate FAILED after %.2fs (project folder undone)", time.perf_counter() - started)

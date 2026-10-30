@@ -7,7 +7,7 @@ import collections
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import json
 from engine.core import app_log, progress
-from engine.core.core_math import clean_file_name, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
+from engine.core.core_math import clean_file_name, job_series, generate_pack_signatures, format_file1, format_file2, build_initial_metadata, clean_store_name, format_quantity, DIVIDER_BARCODE_SHEET, DIVIDER_BARCODE_COLUMNS, LABEL_PLUGIN_SHEET, LABEL_PLUGIN_COLUMNS, label_plugin_rows
 
 log = app_log.get('sheets')  # Packing Sheets: the Logs page and the loading overlay (progress.py) show its steps
 
@@ -157,6 +157,11 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
                     
                 current_col += 1
                 
+        # Each pack's job numbers, for the job numbers that turn up in more than one pack (warned about on the
+        # preview, before anything is made, as well as on the download page)
+        _, pack_jobs = pack_job_numbers([sheet.cell(row=job_id_row, column=c).value for c in range(1, max_col + 1)],
+                                        pack_ranges)
+
         backend_data = {
             "job_id_row": job_id_row,
             "pack_group_row": pack_group_row,
@@ -179,6 +184,7 @@ def generate_tab_map(file_path, sheet_name, start_cell, job_id_cell, store_col):
         "last_row": last_row,
         "total_stores": total_stores,
         "duplicate_warning": duplicate_warning,
+        "pack_jobs": pack_jobs,
         "backend_data": backend_data
     }
 
@@ -301,9 +307,35 @@ def write_job_numbers_sheet(wb, master_job_data):
         job_sheet.range("B:B").api.EntireColumn.AutoFit()
 
 
+def pack_job_numbers(job_row_values, pack_ranges):
+    """Each pack's job numbers, from the Job ID row's values (column A first): every column of the pack that has one,
+    kept in first-seen order with repeats within the same pack dropped.
+    Returns ({column: job number}, [(pack name, [its job numbers])])."""
+    column_jobs, pack_jobs = {}, []
+    for pack in pack_ranges:
+        jobs = []
+        for c in range(pack["start"], pack["end"] + 1):
+            val = job_row_values[c - 1] if c <= len(job_row_values) else None
+            if val is None or str(val).strip() == "":
+                continue
+            job = str(val).strip()
+            column_jobs[c] = job
+            if job not in jobs:
+                jobs.append(job)
+        pack_jobs.append((pack["name"], jobs))
+    return column_jobs, pack_jobs
+
+
+def job_groups(tab_name, pack_jobs):
+    """A tab's packs as the "Job numbers" tab and find_shared_job_numbers take them: {"header": "Tab | Pack 1",
+    "jobs": [...]} each. pack_jobs: [(pack name, [job numbers])], as pack_job_numbers gives them."""
+    return [{"header": f"{tab_name} | Pack {name}", "jobs": jobs} for name, jobs in pack_jobs]
+
+
 def find_shared_job_numbers(master_job_data):
     """Job numbers that turn up in more than one pack group (in the same tab or across tabs).
-    That shouldn't happen, so the results page warns about each one - generation still goes ahead."""
+    That shouldn't happen, so the Blueprint Previews (Packing Sheets, and horizontal labels) and the results page warn
+    about each one - generation still goes ahead."""
     job_to_groups = {}
     for group in master_job_data:
         for job in group["jobs"]:
@@ -354,6 +386,14 @@ def build_divider_barcode_rows(tab_name, pack_summaries, column_jobs, job_kinds)
     return rows
 
 
+def file_job(raw_job_id):
+    """The job in Packing Sheets' file names ('Packing Sheet_J481189.xlsx', 'Signature links_J481189.xlsx'): the job
+    number itself, as the dashboard shows it ('J481189' from 'J481189-01' or 'J481189-001'); anything that isn't a job
+    number stays as written. Saved in the project's details too, where Sub-Group finds the Packing Sheet by it (older
+    projects keep the name they were made with)."""
+    return clean_file_name(job_series(raw_job_id))
+
+
 # =====================================================================
 # THE CORE GENERATOR ENGINE (PHASE 1, 2, and 3)
 # =====================================================================
@@ -363,7 +403,7 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
     
     first_tab = selected_tabs[0]
     raw_job_id = tab_data_memory[first_tab]["raw_job_id"]
-    cleaned_job_id = clean_file_name(raw_job_id)
+    cleaned_job_id = file_job(raw_job_id)
     
     # ---------------------------------------------------------
     # MASTER SWITCH: Check if any tab has any packs selected
@@ -426,24 +466,9 @@ def generate_all_outputs(file_path, original_filename, selected_tabs, user_input
             raw_values = sheet2.range((1, 1), (tab_info["last_row"], last_col)).value
 
             # --- COLLECT JOB NUMBERS PER PACK (for the "Job numbers" tab) ---
-            # Each pack's columns carry their job number in the Job ID row. Keep the
-            # first-seen order and drop repeats within the same pack.
-            job_row_values = raw_values[tab_info["job_id_row"] - 1]
-            tab_column_jobs[tab_name] = {}
-            for pack in tab_info["pack_ranges"]:
-                pack_jobs = []
-                for c in range(pack["start"], pack["end"] + 1):
-                    val = job_row_values[c - 1]
-                    if val is None or str(val).strip() == "":
-                        continue
-                    job = str(val).strip()
-                    tab_column_jobs[tab_name][c] = job
-                    if job not in pack_jobs:
-                        pack_jobs.append(job)
-                master_job_data.append({
-                    "header": f"{tab_name} | Pack {pack['name']}",
-                    "jobs": pack_jobs
-                })
+            tab_column_jobs[tab_name], pack_jobs = pack_job_numbers(raw_values[tab_info["job_id_row"] - 1],
+                                                                    tab_info["pack_ranges"])
+            master_job_data += job_groups(tab_name, pack_jobs)
 
             tab_summaries[tab_name] = []
             inputs = user_inputs.get(tab_name, {"selected_packs": []})

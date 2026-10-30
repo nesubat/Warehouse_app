@@ -163,8 +163,8 @@ Warehouse_app/
     ├── MyCampaign_Job-12345_260804_1000/        ← Distribution Mapper project
     │   ├── OriginalUpload.xlsx              ← your original file (matrix flow)
     │   ├── Final OriginalUpload.xlsx        ← "File 1": working copy with signature columns
-    │   ├── Packing Sheet_12345.xlsx         ← "File 2": master summary book (this is what floor staff read)
-    │   ├── Signature links_12345.xlsx       ← "File 3": clean store→code lookup table (used by the PDF shuffler)
+    │   ├── Packing Sheet_J476699.xlsx       ← "File 2": master summary book (this is what floor staff read)
+    │   ├── Signature links_J476699.xlsx     ← "File 3": clean store→code lookup table (used by the PDF shuffler)
     │   ├── Final OriginalUpload.json        ← metadata memory for this project
     │   ├── Stage - 1 - Final OriginalUpload.xlsx   ← after your 1st sub-group run
     │   ├── Stage - 1 - Final OriginalUpload.json
@@ -258,7 +258,8 @@ return render_template('matrix.html', tabs=tabs, filename=filename)
 1. Reads the 3 coordinate fields from the form, defaulting to `B8`, `E1`, `A` if blank.
 2. Stores them in `user_inputs[tab]` (this dict gets round-tripped back into hidden form fields, so if the user clicks "Update Previews" again, their typed values survive).
 3. **Only for checked tabs**, calls `generate_tab_map()` (see [Section 6.2](#62-generate_tab_map--reading-a-blueprint-from-a-tab)) inside a `try/except`. If the coordinates are wrong (e.g. "E1" isn't actually where the Job ID lives), `openpyxl` throws an exception, which gets caught and turned into a friendly `{"error": "..."}` dictionary instead of crashing the whole page.
-4. All the successfully-mapped blueprints get serialized to JSON (`blueprints_json`) and stuffed into a **hidden form field** — this is important: Flask does not remember anything between requests by itself (no session used here), so the *entire* blueprint has to be smuggled through the HTML back to the browser and then submitted right back to the server at `/generate`.
+4. `_shared_jobs()` puts every mapped tab's packs together (each preview's `pack_jobs`, from `generate_tab_map()`) and runs `find_shared_job_numbers()` on them: a job number in more than one pack group, in one tab or across tabs, is listed at the top of the Blueprint Previews (`templates/_shared_jobs.html`), the same warning the results page gives after Generate. It doesn't lock Generate.
+5. All the successfully-mapped blueprints get serialized to JSON (`blueprints_json`) and stuffed into a **hidden form field** — this is important: Flask does not remember anything between requests by itself (no session used here), so the *entire* blueprint has to be smuggled through the HTML back to the browser and then submitted right back to the server at `/generate`.
 
 **`/generate`.** This is where a **Project Folder actually gets created**:
 ```python
@@ -657,7 +658,7 @@ sheet1_xw.range(f"{col_letter_start}{start_r}").value = batch_data
 ```
 Writing to Excel cell-by-cell through `xlwings` is slow (each write is a round-trip to the real Excel application). Building the whole column as a Python list first, then writing it in **one** `.value = batch_data` assignment, can turn thousands of slow round-trips into a single fast one.
 
-**The "Job numbers" tab.** While each tab's `raw_values` is read (before File 2's rows/columns are touched), every pack's columns are scanned along the **Job ID row**, and the job numbers found are kept in first-seen order with repeats inside that same pack dropped. Each pack becomes one entry in `master_job_data` (`{"header": "Tab | Pack X", "jobs": [...]}`). After all tabs are done, `write_job_numbers_sheet()` writes one block per pack (bold header, then the job numbers centered underneath), with a thin black divider row between blocks, the same idea as Packaging Stocks. Inside each block, job numbers are grouped by **series**: a job number is `series-index` (e.g. `J476523-01` → series `J476523`, index `01`), split on the first `-` by `split_job_number()`. A job number with no `-` is series-only. `group_jobs_by_series()` keeps the series in the order they first appear and sorts each series' jobs by index: series-only first, then numeric indexes in number order. Each series gets a grey, italic `Series J476523` sub-heading. The full job number stays in its own cell on each row so that cell can carry a link later. It also builds `job_to_groups` (`{job_number: [every pack header it appears in]}`). Any job number that appears in **more than one** pack group, whether in the same tab or a different one, is filled light red, and column B next to it lists the other group(s): `⚠ Shared with: Other Tab | Pack 2`. The same check, `find_shared_job_numbers()`, is also returned as the 4th value of `generate_all_outputs()` so `/generate` can list those job numbers in a warning on the results page. Generation still goes ahead.
+**The "Job numbers" tab.** While each tab's `raw_values` is read (before File 2's rows/columns are touched), every pack's columns are scanned along the **Job ID row** by `pack_job_numbers()`, and the job numbers found are kept in first-seen order with repeats inside that same pack dropped. Each pack becomes one entry in `master_job_data` (`{"header": "Tab | Pack X", "jobs": [...]}`, from `job_groups()`). `generate_tab_map()` runs the same `pack_job_numbers()` on the preview (its `pack_jobs`), so the Blueprint Previews warn about the same job numbers before anything is made. After all tabs are done, `write_job_numbers_sheet()` writes one block per pack (bold header, then the job numbers centered underneath), with a thin black divider row between blocks, the same idea as Packaging Stocks. Inside each block, job numbers are grouped by **series**: a job number is `series-index` (e.g. `J476523-01` → series `J476523`, index `01`), split on the first `-` by `split_job_number()`. A job number with no `-` is series-only. `group_jobs_by_series()` keeps the series in the order they first appear and sorts each series' jobs by index: series-only first, then numeric indexes in number order. Each series gets a grey, italic `Series J476523` sub-heading. The full job number stays in its own cell on each row so that cell can carry a link later. It also builds `job_to_groups` (`{job_number: [every pack header it appears in]}`). Any job number that appears in **more than one** pack group, whether in the same tab or a different one, is filled light red, and column B next to it lists the other group(s): `⚠ Shared with: Other Tab | Pack 2`. The same check, `find_shared_job_numbers()`, is also returned as the 4th value of `generate_all_outputs()` so `/generate` can list those job numbers in a warning on the results page. Generation still goes ahead.
 
 **Installer tabs and the "Divider Barcodes" tab (File 3).** A tab ticked as "sent to an installer" (`user_inputs[tab]["installer"]`, set in `/generate`, which also selects every pack in that tab) gets one row per job number per code in an extra `Divider Barcodes` tab of the Signature Links file: `Tab | Pack | Code | Job Number | Kind | Qty | Barcode`. `tab_column_jobs` records which job number sits in each pack column. `assign_job_kinds()` numbers the kinds: a job number found in more than one column (same pack, another pack or another tab) gets Kind 1, 2, 3... in reading order, first tab to last and left to right within each tab. A job number in only one column has no kind. Kinds are counted across every selected tab, installer or not. `build_divider_barcode_rows()` then walks each code's signature: every column with a quantity and a job number becomes a row, and `Qty` is that store's quantity. `Barcode` is the exact text the divider's barcode encodes: the job number, plus ` Kind N` when it has more than one kind (e.g. `J476699-17 K1`), so a scan tells kinds apart. The tab is only written when at least one tab is an installer tab, so File 3 is otherwise unchanged.
 
@@ -1710,6 +1711,26 @@ Under the consignment preview, **Label order** (`label_grouping`, kept through a
   boxes ('Code for Pack 1', sub-group codes) stay on every label, Signature Links or not: they're columns of the pack
   and none is left off. Only the PDF changes: Item References (01T1P2 Store), the CSVs and the label map are the same
   either way. The live preview shows the code boxes either way.
+
+### 10.23b Blueprint Previews, and the Packing Sheet made with the labels (horizontal files)
+
+- **Blueprint Previews first.** Before the Data Previews, each tab's layout as Packing Sheets' own Blueprint Previews
+  show it: Last Column, Last Row, Total Stores, the rows (job numbers, pack headers, stores), "Packaging stocks are in
+  G to K." and each pack's columns ("1 spans from M to R", or "is in column T"). It comes from `read_horizontal`'s
+  `found['blueprint']` (`_blueprint()` in horizontal_distribution.py, step 5a), and from `PackCheckError.blueprint`
+  when the tab has problems later on, so the ranges can be checked while fixing them.
+- **Job numbers in more than one pack**, at the top of the Blueprint Previews, as Packing Sheets lists them: the
+  blueprint's `pack_jobs` (each pack's item columns' job numbers; the code columns' headers aren't job numbers) go
+  through `app._shared_jobs()`, Packing Sheets' `job_groups()` + `find_shared_job_numbers()`, across every previewed
+  tab, so both pages name the same packs ("J476699-01 is in Spring Sale | Pack 1, Easter | Pack 1"). A warning only.
+- **No Signature Links file sent** (and not from a Packing Sheets project, which has its own): after the labels,
+  `_sheets_for_labels()` runs Packing Sheets (`generate_tab_map` + `generate_all_outputs`, Excel) on the file with
+  every pack of each tab selected, from the blueprint's cells (`start_cell`: the first Packing Spec column on the pack
+  row; `job_cell`: the first item's job number; `store_col`), and puts its **Packing Sheet** and **Signature Links**
+  into the labels project under their usual names (the Final file it makes is left out). The label order chosen
+  (grouped or not) doesn't change it. A tab that is a Final file already (code columns in it) or whose Packing Spec
+  headers aren't on the pack header row is skipped, and Excel failing doesn't undo the labels: either is a note on
+  the result page. The codes are worked out the same way for both, so the packing sheets and the labels agree.
 
 ### 10.22 Why a big labels PDF is quick to write
 

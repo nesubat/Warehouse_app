@@ -724,7 +724,7 @@ button:hover {
   text-align: center;
 }
 
-/* Job numbers found in more than one pack group (Distribution Mapper results page) */
+/* Job numbers found in more than one pack group (Blueprint Previews, and the Packing Sheets results page) */
 .shared-job-warning {
   text-align: left;
 }
