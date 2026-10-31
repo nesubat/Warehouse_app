@@ -1009,13 +1009,13 @@ button:hover {
   padding-bottom: 20px; 
 }
 
-#mapped-headers-list {
+.pl-headers-pool {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-#mapped-headers-list .sortable-item {
+.pl-headers-pool .sortable-item {
   background: #e8f8f5;
   color: #1abc9c;
   border: 1px dashed #1abc9c;
@@ -1027,18 +1027,18 @@ button:hover {
   transition: all 0.2s ease;
 }
 
-#mapped-headers-list .sortable-item:hover {
+.pl-headers-pool .sortable-item:hover {
   background: #d1f2eb;
 }
 
-#mapped-headers-list .sortable-item .cell-only-styling {
+.pl-headers-pool .sortable-item .cell-only-styling {
   display: none;
 }
-#mapped-headers-list .sortable-item .badge-text {
+.pl-headers-pool .sortable-item .badge-text {
   display: block;
 }
 
-#attribute-list {
+.pl-attr-list {
   width: 100%;
   max-width: 320px;
   border: 2px solid #000;
@@ -1049,7 +1049,7 @@ button:hover {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
-#attribute-list .sortable-item {
+.pl-attr-list .sortable-item {
   background: #fff;
   cursor: grab;
   position: relative;
@@ -1058,10 +1058,10 @@ button:hover {
   border-radius: 0;
 }
 
-#attribute-list .sortable-item .cell-only-styling {
+.pl-attr-list .sortable-item .cell-only-styling {
   display: block;
 }
-#attribute-list .sortable-item .badge-text {
+.pl-attr-list .sortable-item .badge-text {
   display: none;
 }
 
@@ -1081,22 +1081,22 @@ button:hover {
 
 .drag-container { min-height: 120px; padding-bottom: 20px; }
 
-#mapped-headers-list { display: flex; flex-direction: column; gap: 10px; }
-#mapped-headers-list .sortable-item {
+.pl-headers-pool { display: flex; flex-direction: column; gap: 10px; }
+.pl-headers-pool .sortable-item {
     background: #fff; border: 1px dashed #bdc3c7; 
     padding: 0; border-radius: 4px; font-size: 14px; 
     cursor: grab; transition: all 0.2s ease;
 }
 
-#attribute-list {
+.pl-attr-list {
     width: 100%; max-width: 320px; border: 2px solid #000; background: #fff;
     display: flex; flex-direction: column; margin: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
-#attribute-list .sortable-item {
+.pl-attr-list .sortable-item {
     border-bottom: 1px dashed #bdc3c7; background: #fff;
     cursor: grab; position: relative; color: #000; padding: 0; border-radius: 0;
 }
-#attribute-list .sortable-item:last-child { border-bottom: none; }
+.pl-attr-list .sortable-item:last-child { border-bottom: none; }
 .sortable-item:active { cursor: grabbing !important; }
 
 /* Empty Field styling */
@@ -1177,7 +1177,7 @@ button:hover {
 .pl-page .pl-config-label-first { margin-top: 20px; }
 .pl-page .pl-config-hint { color: #7f8c8d; font-size: 13px; margin-bottom: 20px; }
 .pl-page .pl-fixed-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 25px; }
-.pl-page #mapped-headers-list.pl-headers-pool { background: #fff; padding: 15px; border-radius: 6px; border: 1px dashed #bdc3c7; min-height: 200px; }
+.pl-page .pl-headers-pool { background: #fff; padding: 15px; border-radius: 6px; border: 1px dashed #bdc3c7; min-height: 200px; }
 
 /* Cell previews: each block styled as it prints on the label */
 .pl-page .pl-cell-text { padding: 12px; font-family: sans-serif; color: #34495e; font-size: 13px; text-align: center; }
@@ -1258,6 +1258,10 @@ button:hover {
    ADDRESS BOOK (address_book.html) + suggestions in the consignment edit form
 ========================================= */
 .pl-page .pl-tag-book { border-color: #3498db; color: #2471a3; margin-left: 4px; }
+/* A postcode the official data filled in by itself (the suburb is one place with one postcode) */
+.pl-page .pl-tag-filled { border-color: #27ae60; color: #1e8449; margin-left: 4px; }
+.pl-page .pl-fill-note { margin-top: 3px; color: #9a6700; }
+.pl-page .pl-merged-note { margin-top: 3px; color: #1e8449; font-weight: 600; }
 .pl-page .pl-suggest { list-style: none; margin: 4px 0 8px; padding: 4px; border: 1px solid #bdc3c7; border-radius: 6px; background: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.08); max-width: 640px; }
 .pl-page .pl-suggest li { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; color: #2c3e50; }
 .pl-page .pl-suggest li span { color: #7f8c8d; font-size: 12px; }
@@ -1671,7 +1675,12 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-group-title { margin-right: auto; }
 .pl-page .pl-group-hint { color: #7f8c8d; }
 .pl-page .pl-group-keep-label { font-size: 12px; font-weight: 600; color: #2c3e50; display: inline-flex; align-items: center; gap: 6px; }
-.pl-page .pl-group-keep { max-width: 360px; font-size: 12px; padding: 4px 6px; border: 1px solid #ccd1d1; border-radius: 4px; background: #fff; }
+/* The address to keep: wide enough to read, dark text on white with a clear border (it sat on the amber heading
+   as a narrow, near-empty box) */
+.pl-page .pl-group-keep { min-width: 280px; max-width: 460px; font-size: 13px; font-weight: 500; color: #2c3e50;
+  padding: 6px 8px; border: 1px solid #7f8c8d; border-radius: 4px; background: #fff; cursor: pointer; }
+.pl-page .pl-group-keep:focus { outline: 2px solid #f0b27a; outline-offset: 1px; border-color: #2c3e50; }
+.pl-page .pl-group-none { font-size: 12px; color: #9a6700; }
 .pl-page .pl-con-row.pl-in-group td:first-child { box-shadow: inset 4px 0 0 #f0b27a; }
 
 /* Column mapping, round 2: mapped fields as chips (green = found by the rules, blue = set by hand), only the
@@ -2043,6 +2052,12 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .pl-page .pl-con-bar.pl-con-clear .pl-con-toggle { background: #27ae60; }
 .pl-page .pl-con-bar.pl-con-clear .pl-con-toggle:hover { background: #1e8449; }
 .fx-open .fx-hide-btn { margin-left: 2px; }
+/* The consignment count (To check progress) on the floating Open Excel box: amber while something's left, green when done */
+.fx-open .fx-con-state { margin-left: 2px; border: 1px solid #f0b27a; border-radius: 18px; padding: 6px 12px; background: #fef5e7;
+  color: #9a6700; font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.fx-open .fx-con-state:hover { background: #fdebd0; }
+.fx-open .fx-con-state.fx-con-clear { border-color: #76d7c4; background: #e8f8f5; color: #117a65; }
+.pl-page .pl-layout-tab { margin: 28px 0 10px; }
 .fx-open .fx-hide-btn[hidden] { display: none; }
 
 /* Matching page: packing labels left without a courier label, with their pages */

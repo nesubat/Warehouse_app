@@ -92,3 +92,28 @@ def test_a_country_written_after_the_suburb_is_read_as_the_country():
     # Australian addresses read as before
     assert read('34 Robinson St North, Wiley Park NSW 2195') == ('Wiley Park', 'NSW', '2195', '')
     assert read('Shop 4, 12 Main St, Richmond VIC 3121, Australia') == ('Richmond', 'VIC', '3121', 'Australia')
+
+
+def test_a_postcode_is_filled_only_when_the_suburb_leaves_no_doubt(monkeypatch):
+    """postcode_for: a suburb that is one place with one postcode gets it (and its state); a name in several states
+    needs the state; one New Zealand has too needs the state; several postcodes, an NZ address or an unknown suburb
+    are left to the user (the why says what to do, or is blank when the usual check says it)."""
+    from engine.addresses import address_reference as ref
+    au = _places((1, "TOOWOOMBA", "QLD", ["4350"]), (2, "RICHMOND", "VIC", ["3121"]), (3, "RICHMOND", "NSW", ["2753"]),
+                 (4, "ALBANY", "WA", ["6330"]), (5, "BLACKTOWN", "NSW", ["2148", "2147"]))
+    nz = _places((9, "ALBANY", "", []))
+    monkeypatch.setattr(ref, "_db", lambda country: {"AU": au, "NZ": nz}.get(country))
+    fill = lambda *a: ref.postcode_for(*a)  # noqa: E731
+    assert fill("Toowoomba", "", "") == ({'postcode': '4350', 'state': 'QLD', 'place': 'TOOWOOMBA QLD 4350'}, '')
+    assert fill("TOOWOOMBA", "QLD", "AU")[0]['postcode'] == '4350'
+    none, why = fill("Richmond", "", "")
+    assert none is None and why.startswith("There's a RICHMOND in NSW, VIC")
+    assert fill("Richmond", "VIC", "")[0]['postcode'] == '3121'  # the state decides
+    none, why = fill("Albany", "", "AU")
+    assert none is None and "Australia and in New Zealand" in why
+    assert fill("Albany", "WA", "")[0]['postcode'] == '6330'  # an Australian state says it's the Australian one
+    none, why = fill("Blacktown", "NSW", "")
+    assert none is None and "more than one postcode (2147, 2148)" in why
+    assert fill("Albany", "", "NZ") == (None, '')  # LINZ has no postcodes
+    assert fill("Toowooba", "QLD", "") == (None, '')  # not on record: the official data check offers the fixes
+    assert fill("Toowoomba", "NSW", "") == (None, '')  # not in that state: the check says so

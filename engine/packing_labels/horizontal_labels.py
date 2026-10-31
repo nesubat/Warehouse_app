@@ -25,11 +25,13 @@ INK = (0.2, 0.2, 0.2)  # the divider caption
 
 
 def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=None, addresses=None, report=None,
-                               serials=None, add_dividers=True, notes=None, group_by_code=True, on_progress=None):
+                               serials=None, add_dividers=True, notes=None, group_by_code=True, on_progress=None,
+                               layouts=None):
     """pack_groups: every selected tab's groups, combined in tab order, each tab already in packing-sheet order
     (horizontal_distribution.read_horizontal). notes: {(tab_no, pack_no): [issue dicts]} shown on the audit page.
     Returns generate_packing_labels()'s page info, with the page numbers of the final PDF.
-    on_progress(done, total, step): as generate_packing_labels; drawing is most of the work, the reordering the rest."""
+    on_progress(done, total, step): as generate_packing_labels; drawing is most of the work, the reordering the rest.
+    layouts: {pack_key: block order}, each tab's own item-box layout (generate_packing_labels)."""
     notes = notes or {}
     if not group_by_code:
         # Not grouped by allocation: each pack's labels in the sheet's store order, no dividers. The code boxes stay:
@@ -43,7 +45,7 @@ def generate_horizontal_labels(pack_groups, output_pdf_path, attribute_order=Non
     try:
         drawn = (lambda d, t, step: on_progress(0.85 * d / max(t, 1), 1, step)) if on_progress else None
         info = generate_packing_labels(pack_groups, tmp.name, attribute_order, addresses, None, serials, None,
-                                       on_progress=drawn)
+                                       on_progress=drawn, layouts=layouts)
         labels = fitz.open(tmp.name)
         out = fitz.open()
         report_pages = draw_report_pages(out, report, at=0) if report else 0

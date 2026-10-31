@@ -56,6 +56,16 @@ DEFAULT_GROUPS = [
     ('TNT (NSW) SPECIALISED (TAILGATE)', [('TNTNSWSPEC', 'TNT (NSW) SPECIALISED (TAILGATE)')]),
 ]
 
+# A courier's own delivery area, offered in the consignment preview's State filter next to the states, so "Apply to
+# shown" can give one courier's service to just the consignments it takes. By postcode (Australian addresses only),
+# inclusive ranges. Flash Couriers delivers in Greater Metro Sydney; Flash publishes no postcode list, so this is
+# Australia Post's eParcel Sydney metro (1000-1920 PO boxes, 2000-2239, 2555-2574, 2740-2786): check it with Flash and
+# change the ranges here if theirs differ.
+REGION_FILTERS = [
+    {'id': 'flash-nsw', 'name': 'Flash-NSW', 'title': 'Greater Metro Sydney: Flash Couriers delivers there',
+     'postcodes': [[1000, 1920], [2000, 2239], [2555, 2574], [2740, 2786]]},
+]
+
 OWN_GROUP = '__own__'  # update_service: take the service out of its group, on its own
 CODE_RE = re.compile(r'^[A-Z0-9][A-Z0-9_-]{0,19}$')
 LOGO_MAX_BYTES = 5 * 1024 * 1024

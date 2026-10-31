@@ -431,6 +431,9 @@
                             <select id="courier-state-filter">
                                 <option value="">All states</option>
                                 {% for st in courier.states %}<option value="{{ st }}">{{ st }}</option>{% endfor %}
+                                {% if courier.regions %}<optgroup label="Courier areas">
+                                    {% for r in courier.regions %}<option value="region:{{ r.id }}" data-postcodes="{{ r.postcodes|tojson|forceescape }}" title="{{ r.title }}">{{ r.name }}</option>{% endfor %}
+                                </optgroup>{% endif %}
                             </select>
                         </div>
                         <div class="input-field pl-filter-text">
@@ -466,19 +469,23 @@
                                     <span class="pl-group-title">🔀 <strong>{{ c.group.receiver }}</strong>: {{ c.group.size }} consignments at different addresses
                                         <span class="pl-group-hint">{% if c.group.similar %}— they look like one place written differently{% else %}— check: some really differ{% endif %}</span>
                                         {% if c.group.services|length > 1 %}<span class="pl-group-services" title="Merging gives them all the service of the address you keep">different services: {{ c.group.services|join(', ') }}</span>{% endif %}</span>
-                                    <label class="pl-group-keep-label">Keep
+                                    {% set addressed = c.group.members|rejectattr('address', 'equalto', 'no address')|list %}
+                                    <label class="pl-group-keep-label"{% if not addressed %} hidden{% endif %}>Keep
                                         <select class="pl-group-keep" aria-label="Address to keep for {{ c.group.receiver }}">
-                                            {% for m in c.group.members %}{% if not m.no_address %}<option value="{{ loop.index0 }}">#{{ m.number }} {{ m.address }}</option>{% endif %}{% endfor %}
+                                            {# complete addresses first, so the one picked to start with can be sent #}
+                                            {% for m in c.group.members %}{% if m.address != 'no address' and not m.no_address %}<option value="{{ loop.index0 }}">#{{ m.number }} {{ m.address }}</option>{% endif %}{% endfor %}
+                                            {% for m in c.group.members %}{% if m.address != 'no address' and m.no_address %}<option value="{{ loop.index0 }}">#{{ m.number }} {{ m.address }} (no postcode)</option>{% endif %}{% endfor %}
                                         </select>
                                     </label>
-                                    <button type="button" class="pl-btn-small pl-group-merge" data-group="{{ c.group.members|tojson|forceescape }}">Merge into one</button>
+                                    <span class="pl-group-none issue-detail"{% if addressed %} hidden{% endif %}>None of them has an address yet: give one an address with ✏️, then merge.</span>
+                                    <button type="button" class="pl-btn-small pl-group-merge" data-group="{{ c.group.members|tojson|forceescape }}"{% if not addressed %} disabled{% endif %}>Merge into one</button>
                                     <button type="button" class="pl-btn-small pl-btn-plain pl-group-separate" data-group="{{ c.group.members|tojson|forceescape }}"
                                             title="They're different places with the same name: keep each consignment at its own address">Keep separate</button>
                                 </div>
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' and not c.collect %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-missing="{{ '' if c.collect else missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' and not c.collect %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-postcode="{{ d.postcode }}" data-original="{{ c.original_json }}" data-missing="{{ '' if c.collect else missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
@@ -487,7 +494,8 @@
                                 <span class="pl-show-receiver">{{ d.receiver }}</span>
                                 <div class="issue-detail pl-show-contact">{% if d.contact %}Attn {{ d.contact }}{% endif %}</div>
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
-                                <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
+                                <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source in ('book', 'official') %} hidden{% endif %}>Edited</span>
+                                <span class="pl-courier-tag pl-tag-filled" title="{{ c.filled }}. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'official' %} hidden{% endif %}>Postcode filled</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
                                 {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="Not in the address book yet: it's saved there when you generate. Open ✏️ to compare with saved addresses.">New address</span>{% endif %}
                                 {% if c.collect %}<span class="pl-courier-tag pl-tag-collect" title="The file says these packs are collected. Not in the courier CSV; each label's courier region says &quot;{{ c.collect }}&quot; and its pack number. Type an address in ✏️ to send them instead.">{{ c.collect|title }}</span>
@@ -510,6 +518,7 @@
                             <td class="pl-address-cell">
                                 <div class="pl-fold"><div class="pl-fold-inner">
                                 <div class="pl-show-address">{% if c.address %}{{ address_parts(d) }}{% else %}<span class="pl-no-address-text">No address — left out of the courier CSV</span>{% endif %}</div>
+                                {% if c.fill_note %}<div class="issue-detail pl-fill-note">Postcode not filled in: {{ c.fill_note }}.</div>{% endif %}
                                 </div></div>
                                 <div class="pl-unfold pl-editor" inert><div class="pl-fold-inner">
                                     <div class="pl-edit-address">
@@ -549,7 +558,7 @@
                                 <div class="pl-ref" aria-live="polite"></div>
                                 <div class="pl-items-label">Items <span class="pl-items-count">{{ c.cartons|length }}</span></div>
                                 <div class="pl-items">{% for x in c.cartons %}
-                                <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
+                                <div class="pl-carton">{% if courier_mode %}<strong class="pl-carton-ref">{{ x.ref_code }}</strong> <span class="pl-carton-store">{{ x.store }}</span>{% else %}{{ x.label_name or x.item_reference }}{% endif %} <span class="issue-detail pl-carton-spec">{{ x.packing_spec }}</span>
                                     <div class="issue-detail pl-carton-facts">
                                         {% if x.size_cm %}{{ x.size_cm|join(' × ') }} cm{% else %}<span class="pl-no-size">no size</span>{% endif %}
                                         · {{ x.item_type }}
@@ -557,7 +566,7 @@
                                     <label class="pl-weight-field" title="From Packing Specs: {{ x.weight_default }} kg">Weight
                                         <input type="text" inputmode="decimal" class="pl-weight-input{% if x.weight_kg != x.weight_default %} pl-weight-changed{% endif %}"
                                                data-pack="{{ x.pack_key }}" data-default="{{ x.weight_default }}" value="{{ x.weight_kg }}"
-                                               aria-label="Weight in kg of {{ x.item_reference }}"> kg
+                                               aria-label="Weight in kg of {{ x.label_name or x.item_reference }}"> kg
                                     </label>
                                 </div>{% endfor %}</div>
                             </td>
@@ -576,14 +585,21 @@
                 </div>
                 {% endif %}
 
-                {# Cell layout and its live preview: after the tab cards and the courier check (generation isn't locked here) #}
+                {# Cell layout and its live preview, one per tab: after the tab cards and the courier check (generation isn't
+                   locked here). Each tab has its own blocks and order: its rows of the file differ ('row_4' is Kinds in one tab
+                   and something else in another), and its live preview shows its own first package group to check #}
                 {% if not courier_mode %}
+                {% set ok_tabs = previews|rejectattr('error')|list %}
+                {% for bp in ok_tabs %}
+                {% set fh = bp.found_headers %}
+                {% set cp = (cell_previews or {}).get(bp.sheet_name) %}
+                {% if ok_tabs|length > 1 %}<h3 class="pl-layout-tab">Cell layout · tab {{ bp.sheet_name }}</h3>{% endif %}
                 <!-- Cell layout configurator: blocks pool, cell order, live preview -->
-                <div class="pl-configurator">
-                    
+                <div class="pl-configurator" data-tab="{{ bp.sheet_name }}">
+
                     {# Horizontal files: a 'Kinds' row of the sheet goes in after the description and an 'Item Number' row
                        after the dimensions by default (when the file has them); every other row waits on the left #}
-                    {% set extra_rows = previews[0].found_headers.get('Extra rows') or [] %}
+                    {% set extra_rows = fh.get('Extra rows') or [] %}
                     {% set lay = namespace(kinds=None, item_no=None) %}
                     {% if horizontal_mode %}{% for x in extra_rows %}
                     {% if not lay.kinds and 'kind' in x.label|lower %}{% set lay.kinds = x %}
@@ -593,33 +609,33 @@
                     <!-- LEFT COLUMN: MAPPED HEADERS -->
                     <div class="pl-config-col">
                         <h4 class="pl-config-title">1. Mapped Headers</h4>
-                        
+
                         <!-- Fixed Section -->
                         <p class="pl-config-label pl-config-label-first">Page Info (Fixed Bottom-Left)</p>
                         <div class="pl-fixed-badges">
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Packing Spec') %}found{% else %}missing{% endif %}">Packing Spec</span>
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Store Name') %}found{% else %}missing{% endif %}">Store Name</span>
-                            <span class="fixed-badge {% if previews[0].found_headers.get('Address Info') %}found{% else %}missing{% endif %}">Address Info</span>
+                            <span class="fixed-badge {% if fh.get('Packing Spec') %}found{% else %}missing{% endif %}">Packing Spec</span>
+                            <span class="fixed-badge {% if fh.get('Store Name') %}found{% else %}missing{% endif %}">Store Name</span>
+                            <span class="fixed-badge {% if fh.get('Address Info') %}found{% else %}missing{% endif %}">Address Info</span>
                         </div>
-                        
+
                         <!-- Draggable Available Section -->
                         <p class="pl-config-label">Available Layout Blocks (Drag Right ➔)</p>
-                        <div id="mapped-headers-list" class="drag-container pl-headers-pool">
-                            
+                        <div class="drag-container pl-headers-pool">
+
                             <!-- INDIVIDUAL BLOCKS: Material, Install, Notes (if found and not default) -->
-                            {% if previews[0].found_headers.get('Material') %}
+                            {% if fh.get('Material') %}
                             <div class="sortable-item" draggable="true" data-id="material"><span class="badge-text">Material</span>
                                 <div class="cell-only-styling pl-cell-text">Material</div>
                             </div>
                             {% endif %}
-                            
-                            {% if previews[0].found_headers.get('Install') %}
+
+                            {% if fh.get('Install') %}
                             <div class="sortable-item" draggable="true" data-id="install"><span class="badge-text">Install</span>
                                 <div class="cell-only-styling pl-cell-install">Install</div>
                             </div>
                             {% endif %}
-                            
-                            {% if previews[0].found_headers.get('Notes') %}
+
+                            {% if fh.get('Notes') %}
                             <div class="sortable-item" draggable="true" data-id="notes"><span class="badge-text">Notes</span>
                                 <div class="cell-only-styling pl-cell-text">Notes</div>
                             </div>
@@ -631,7 +647,7 @@
                                 <div class="cell-only-styling pl-cell-text">{{ x.label }}</div>
                             </div>
                             {% endfor %}
-                            
+
                         </div>
                     </div>
 
@@ -639,11 +655,11 @@
                     <div class="pl-config-col pl-config-col-right">
                         <h4 class="pl-config-title">2. Customize Cell Layout</h4>
                         <p class="pl-config-hint">Drag blocks up/down to set the order, or drag them back to the left to remove them from the cell.</p>
-                        
-                        <div id="attribute-list" class="drag-container">
-                            
+
+                        <div class="drag-container pl-attr-list">
+
                             <!-- DEFAULT 5 SLOTS (Replaces with Empty Field if not found) -->
-                            {% if previews[0].found_headers.get('Thumbnail') %}
+                            {% if fh.get('Thumbnail') %}
                             <div class="sortable-item" draggable="true" data-id="thumbnail"><span class="badge-text">Thumbnail</span>
                                 <div class="cell-only-styling pl-cell-thumb">
                                     <div class="pl-cell-thumb-box">📷 Image Thumbnail</div>
@@ -651,7 +667,7 @@
                             </div>
                             {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
 
-                            {% if previews[0].found_headers.get('Description') %}
+                            {% if fh.get('Description') %}
                             <div class="sortable-item" draggable="true" data-id="desc"><span class="badge-text">Description</span>
                                 <div class="cell-only-styling pl-cell-desc">Description Text Goes Here</div>
                             </div>
@@ -663,7 +679,7 @@
                             </div>
                             {% endif %}
 
-                            {% if previews[0].found_headers.get('Dimensions') %}
+                            {% if fh.get('Dimensions') %}
                             <div class="sortable-item" draggable="true" data-id="dimension"><span class="badge-text">Dimensions</span>
                                 <div class="cell-only-styling pl-cell-dim">Dimensions</div>
                             </div>
@@ -675,7 +691,7 @@
                             </div>
                             {% endif %}
 
-                            {% if previews[0].found_headers.get('Job Number') %}
+                            {% if fh.get('Job Number') %}
                             <div class="sortable-item" draggable="true" data-id="job_no"><span class="badge-text">Job Number</span>
                                 <div class="cell-only-styling pl-cell-job"><div class="pl-cell-job-bar">Job Number</div></div>
                             </div>
@@ -685,35 +701,37 @@
                                 <div class="cell-only-styling pl-cell-barcode"><div class="pl-cell-barcode-bars" aria-hidden="true"></div><div class="pl-cell-barcode-text">J000000-00 K1</div></div>
                             </div>
 
-                            {% if previews[0].found_headers.get('Quantity') %}
+                            {% if fh.get('Quantity') %}
                             <div class="sortable-item" draggable="true" data-id="qty"><span class="badge-text">Quantity</span>
                                 <div class="cell-only-styling pl-cell-qty">
                                     <div class="pl-cell-qty-box">Quantity</div>
                                 </div>
                             </div>
                             {% else %}<div class="sortable-item empty-field" draggable="true" data-id="empty"><span class="badge-text">Empty Field</span><div class="cell-only-styling pl-cell-empty">Empty Field (Drag Here)</div></div>{% endif %}
-                            
+
                         </div>
-                        <input type="hidden" name="attribute_order" id="attribute_order" value="">
+                        {# This tab's order: app._tab_layouts reads it at Generate #}
+                        <input type="hidden" name="attribute_order::{{ bp.sheet_name }}" class="pl-attr-order" value="">
                     </div>
 
-                    <!-- LIVE PREVIEW: the first package group's item boxes, redrawn as the blocks are dragged (script.js section 10) -->
+                    <!-- LIVE PREVIEW: this tab's first package group's item boxes, redrawn as the blocks are dragged (script.js section 10) -->
                     <div class="pl-config-col pl-config-col-preview">
                         <h4 class="pl-config-title">3. Live Preview</h4>
-                        {% if cell_preview and cell_preview['items'] %}
+                        {% if cp and cp['items'] %}
                         <p class="pl-config-hint">
-                            First package group: <strong>{{ cell_preview.store or 'No store name' }}</strong> · {{ cell_preview.spec }}.
-                            {% if cell_preview.total_items > cell_preview['items']|length %}Showing the first {{ cell_preview['items']|length }} of {{ cell_preview.total_items }} boxes (page 1).
-                            {% else %}{{ cell_preview.total_items }} box{{ 'es' if cell_preview.total_items != 1 }}.{% endif %}
+                            First package group{% if ok_tabs|length > 1 %} of {{ bp.sheet_name }}{% endif %}: <strong>{{ cp.store or 'No store name' }}</strong> · {{ cp.spec }}.
+                            {% if cp.total_items > cp['items']|length %}Showing the first {{ cp['items']|length }} of {{ cp.total_items }} boxes (page 1).
+                            {% else %}{{ cp.total_items }} box{{ 'es' if cp.total_items != 1 }}.{% endif %}
                             Drawn to the same sizes as the PDF.
                         </p>
-                        <div id="pl-cell-preview" class="pl-cell-preview" aria-label="Live preview of the item boxes"
-                             data-cells='{{ cell_preview|tojson }}'></div>
+                        <div class="pl-cell-preview" aria-label="Live preview of the item boxes of {{ bp.sheet_name }}"
+                             data-cells='{{ cp|tojson }}'></div>
                         {% else %}
                         <p class="pl-config-hint">No items to preview in the first package group.</p>
                         {% endif %}
                     </div>
                 </div>
+                {% endfor %}
                 {% endif %}
 
 
@@ -804,6 +822,7 @@
             {% endif %}
             {% endif %}
             {% if sheets_note %}<div class="warning-box pl-success-left-out">{{ sheets_note }}</div>{% endif %}
+            {% with generated=true %}{% include '_shared_jobs.html' %}{% endwith %}
 
             <div class="success-actions actions-grid">
             {% for file in generated_files %}

@@ -897,6 +897,44 @@ def assess(address):
     return result
 
 
+def postcode_for(suburb, state='', country=''):
+    """The postcode of a suburb written without one, when the official data leaves no doubt about it: the suburb is
+    one place in Australia (the state written with it decides between places of that name) and that place has one
+    postcode. A suburb New Zealand has too needs the state to say it's the Australian one; New Zealand addresses
+    aren't filled (LINZ has no postcodes).
+    Returns ({'postcode', 'state', 'place': 'TOOWOOMBA QLD 4350'}, '') or (None, why it's left to the user). The why
+    is '' when the suburb isn't on record (or not in that state, or no data is loaded): the usual check says that."""
+    name, st = _key(suburb), _key(state)
+    country = {'AUSTRALIA': 'AU', 'NEW ZEALAND': 'NZ'}.get(_key(country), _key(country))
+    if not name or country not in ('', 'AU'):
+        return None, ''
+    au = _db('AU')
+    if au is None:
+        return None, ''
+    ids = ([i for (i,) in au.execute("SELECT id FROM locality WHERE key = ?", (name,))] or
+           [i for (i,) in au.execute("SELECT DISTINCT locality FROM locality_name WHERE key = ?", (name,))])
+    places = [l for l in _localities(au, ids) if l['postcodes']]
+    title = " ".join(str(suburb).split()).upper()
+    if st:
+        places = [l for l in places if l['state'] == st]
+    elif places:
+        nz = _db('NZ')
+        if nz is not None and nz.execute("SELECT 1 FROM locality_name WHERE key = ? LIMIT 1", (name,)).fetchone():
+            return None, f"{title} is a place in Australia and in New Zealand: put in the state, or pick one below"
+    if not places:
+        return None, ''
+    found = sorted({(l['state'], p) for l in places for p in l['postcodes']})
+    states = sorted({s for s, _ in found})
+    if len(states) > 1:
+        return None, f"There's a {title} in {', '.join(states)}: put in the state, or pick one below"
+    if len(found) > 1:
+        pcs = [p for _, p in found]
+        return None, (f"{title} {states[0]} has more than one postcode ({', '.join(pcs[:4])}{' …' if len(pcs) > 4 else ''}): "
+                      "pick the right one")
+    (state_found, postcode), = found
+    return {'postcode': postcode, 'state': state_found, 'place': f"{places[0]['name']} {state_found} {postcode}"}, ''
+
+
 def _none(country, message=''):
     return {'level': 'none', 'country': country, 'message': message, 'fields': {}, 'options': []}
 

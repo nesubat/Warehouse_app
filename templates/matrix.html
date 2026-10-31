@@ -191,16 +191,7 @@
         <h2 class="success-title">🎉 Matrices Successfully Generated!</h2>
         <p>Your distro file has been safely parsed. Download your outputs below:</p>
 
-        {% if shared_job_warnings %}
-        <div class="warning-box shared-job-warning">
-            ⚠️ These job numbers appear in more than one pack group. The files were still generated, but please check them:
-            <ul>
-                {% for warning in shared_job_warnings %}
-                <li>{{ warning }}</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
+        {% with generated=true %}{% include '_shared_jobs.html' %}{% endwith %}
 
         <div class="success-actions actions-grid">
         {% for file in generated_files %}

@@ -5,6 +5,7 @@ and the whole Packing Labels page (upload -> preview -> generate) through Flask'
     pytest -q
 """
 import copy
+import html
 import json
 import os
 import random
@@ -355,11 +356,11 @@ def test_page_offers_layout_blocks_and_previews_code_box_first(client, files):
     form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale"],
             "selected_tabs": ["Spring Sale"], "header_row_Spring Sale": "8", "preview": "1"}
     page = c.post("/packing-labels/horizontal", data=form, follow_redirects=True).data.decode()
-    cell = page[page.index('id="attribute-list"'):page.index('id="attribute_order"')]
+    cell = page[page.index('class="drag-container pl-attr-list"'):page.index('class="pl-attr-order"')]
     for block in ("thumbnail", "desc", "dimension", "job_no", "barcode", "qty"):
         assert f'data-id="{block}"' in cell, block
     assert 'data-id="empty"' not in cell  # no "Empty Field" slots
-    assert 'data-id="install"' in page[page.index('id="mapped-headers-list"'):page.index('id="attribute-list"')]
+    assert 'data-id="install"' in page[page.index('class="drag-container pl-headers-pool"'):page.index('class="drag-container pl-attr-list"')]
     preview = json.loads(re.search(r"data-cells='(.*?)'", page, re.DOTALL).group(1))
     first, item = preview["items"][0], preview["items"][1]
     assert first["job_no"].startswith("Code for Pack") and not first["modules"]  # the code box: no barcode
@@ -682,7 +683,7 @@ def test_kinds_and_item_number_rows_go_in_the_item_box_by_default(client, tmp_pa
     form = {"filename": app_module.secure_filename(FINAL), "all_tabs": ["Spring Sale"], "selected_tabs": ["Spring Sale"],
             "header_row_Spring Sale": "8", "preview": "1"}
     page = c.post("/packing-labels/horizontal", data=form, follow_redirects=True).data.decode()
-    layout = page[page.index('id="attribute-list"'):page.index('id="attribute_order"')]
+    layout = page[page.index('class="drag-container pl-attr-list"'):page.index('class="pl-attr-order"')]
     order = re.findall(r'data-id="([^"]+)"', layout)
     assert order.index("desc") + 1 == order.index("row_5") and order.index("dimension") + 1 == order.index("row_2")
     assert "row_1" not in order and 'data-id="row_1"' in page  # Finish waits on the left
@@ -1510,3 +1511,155 @@ def test_sub_group_reads_packs_whose_names_have_quotes(client, monkeypatch):
         f"start_item_{tab}_{pack}[]": ["1", "4"], f"end_item_{tab}_{pack}[]": ["3", "6"]})
     assert r.status_code == 302
     assert got == {tab: {"item_row": 9, "packs": {pack: [[1, 3], [4, 6]]}}}
+
+
+def _highpoint_file(tmp_path, other_address=False, clear=("Spring Sale", "Easter")):
+    """The sample Final file + Signature Links with Highpoint's postcode cleared (F10) in the tabs named;
+    other_address: Easter's Highpoint at another street too (one store at two addresses)."""
+    import openpyxl
+    final, sig = tmp_path / FINAL, tmp_path / SIG
+    codes = build_final_file(final)
+    build_signature_links(sig, codes)
+    wb = openpyxl.load_workbook(final)
+    for tab in clear:
+        assert wb[tab]["A10"].value == "Highpoint" and wb[tab]["D10"].value == "Maribyrnong"
+        wb[tab]["F10"] = None
+    if other_address:
+        wb["Easter"]["C10"] = "Shop 9, Highpoint Shopping Centre"
+    wb.save(final)
+    return final, sig
+
+
+def _preview_page(client, final, sig):
+    c, app_module, projects = client
+    with open(final, "rb") as f, open(sig, "rb") as s:
+        c.post("/packing-labels/horizontal", data={"file": (f, final.name), "signature_file": (s, sig.name)},
+               content_type="multipart/form-data", follow_redirects=True)
+    form = {"filename": app_module.secure_filename(final.name), "all_tabs": ["Spring Sale", "Easter"],
+            "selected_tabs": ["Spring Sale", "Easter"], "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    return form, c.post("/packing-labels/horizontal", data={**form, "preview": "1"}, follow_redirects=True).data.decode()
+
+
+def _generate(client, form, edits=None, extra=None, page=False):
+    """Generate from the preview's form; the Open360 CSV's text (page: (folder, result page) instead)."""
+    c, app_module, projects = client
+    gen = {**form, "generate": "1", "who_pays": "S", "service_code": app_module.SERVICE_STORE.services()[0]['code'],
+           "reference": "J476699", "project_name": "Spring rollout", "courier_csv": ["open360"],
+           "attribute_order": "thumbnail,desc,dimension,job_no,barcode,qty", "consignment_edits": json.dumps(edits or {}),
+           **(extra or {})}
+    r = c.post("/packing-labels/horizontal", data=gen, follow_redirects=True).data.decode()
+    assert "Labels Successfully Generated" in r, r[:1500]
+    folder = next(p for p in projects.iterdir() if p.is_dir())
+    if page:
+        return folder, r
+    return open(folder / next(n for n in os.listdir(folder) if n.endswith("Open360.csv")), encoding="utf-8").read()
+
+
+def _official_data(monkeypatch, app_module, fills):
+    """Official data that knows only the suburbs in fills ({SUBURB: (fill, why)}) and finds every address fine."""
+    ref = app_module.address_reference
+    monkeypatch.setattr(ref, "available", lambda: True)
+    monkeypatch.setattr(ref, "postcode_for", lambda suburb, state='', country='': fills.get(suburb.upper(), (None, '')))
+    monkeypatch.setattr(ref, "assess", lambda a: {'level': 'ok', 'message': '', 'fields': {}, 'options': [], 'country': 'AU'})
+
+
+def test_a_postcode_the_official_data_is_sure_of_is_filled_in_and_one_it_isnt_says_why(client, tmp_path, monkeypatch):
+    """A suburb with no postcode: filled in from the official data when it's one place with one postcode, tagged
+    "Postcode filled" (not "Edited") and sent back with the page; Generate puts it in the courier CSV. One it can't be
+    sure of keeps "No address" and says why under the address."""
+    c, app_module, projects = client
+    final, sig = _highpoint_file(tmp_path)
+    _official_data(monkeypatch, app_module, {"MARIBYRNONG": ({'postcode': '3032', 'state': 'VIC', 'place': 'MARIBYRNONG VIC 3032'}, '')})
+    form, preview = _preview_page(client, final, sig)
+    row = preview[preview.index('Highpoint</span>') - 3000:preview.index('Highpoint</span>') + 6000]
+    assert 'pl-tag-filled" title="From the official data: MARIBYRNONG VIC 3032' in row
+    shown = r'pl-tag-filled" title="[^"]*">Postcode filled'  # the tag, not hidden
+    assert len(re.findall(shown, preview)) == 1 and re.search(shown, row) and "No address —" not in row
+    edits = json.loads(html.unescape(re.search(r'name="consignment_edits" value="([^"]*)"', preview).group(1)))
+    filled = [e for e in edits.values() if e.get('source') == 'official']
+    assert len(filled) == 1 and filled[0]['postcode'] == '3032'  # one Excel address, in both tabs
+    rows = _generate(client, form)  # the page's edits not sent: Generate fills it the same way
+    assert re.search(r"02T2P1[A-Z]{4} Highpoint", rows) and "3032" in rows
+
+    # Not sure: left to the user, with the reason
+    _official_data(monkeypatch, app_module, {"MARIBYRNONG": (None, "There's a MARIBYRNONG in NSW, VIC: put in the state, or pick one below")})
+    _, preview = _preview_page(client, final, sig)
+    assert "Postcode not filled in: There&#39;s a MARIBYRNONG in NSW, VIC" in preview
+    assert not re.search(shown, preview)
+
+
+def test_item_cards_are_named_as_the_packing_label_prints_the_store(client, files):
+    final, sig, _ = files
+    form, preview = _preview_page(client, final, sig)
+    assert "03T1P2. Chadstone" in preview and "01T2P1. Corio Village" in preview  # serial T tab P pack. store
+    assert "Label 1 - Chadstone" not in preview
+
+
+def test_the_state_filter_offers_flash_nsw_by_postcode(client, files):
+    final, sig, _ = files
+    _, preview = _preview_page(client, final, sig)
+    option = re.search(r'<option value="region:flash-nsw" data-postcodes="([^"]*)"[^>]*>Flash-NSW</option>', preview)
+    assert option and [2000, 2239] in json.loads(html.unescape(option.group(1)))
+    assert 'data-postcode="3214"' in preview  # each row's postcode, for the filter
+
+
+def test_keep_lists_an_address_without_a_postcode_and_generate_merges_what_the_page_merged(client, tmp_path, monkeypatch):
+    """One store at two addresses, one without a postcode: the Keep list offers both (that one marked), so it's never
+    an empty box. Merge into one is done on the page (no preview); the edits it makes go with Generate, which makes
+    them one consignment at the kept address."""
+    c, app_module, projects = client
+    final, sig = _highpoint_file(tmp_path, other_address=True, clear=("Easter",))
+    _official_data(monkeypatch, app_module, {})
+    form, preview = _preview_page(client, final, sig)
+    head = preview[preview.index('class="pl-group-row'):]
+    head = head[:head.index('</tr>')]
+    options = re.findall(r'<option value="\d+">([^<]*)</option>', head)
+    assert "Rosamond Rd" in options[0] and "(no postcode)" not in options[0]  # a complete address picked to start with
+    assert any("Shop 9, Highpoint Shopping Centre" in o and o.endswith("(no postcode)") for o in options)
+    group = json.loads(html.unescape(re.search(r'pl-group-merge" data-group="([^"]*)"', head).group(1)))
+    keep = next(m for m in group if not m['no_address'])
+    edits = {sid: {**keep['fields'], 'checked': True} for m in group for sid in m['sources']}  # what the page sends
+    rows = _generate(client, form, edits)
+    easter = next(line for line in rows.splitlines() if re.search(r"02T2P1[A-Z]{4} Highpoint", line))
+    assert "3032" in easter and "Rosamond" in easter  # in the CSV, at the kept address
+
+
+def test_each_tab_has_its_own_cell_layout_and_live_preview(client, files):
+    """A cell layout per tab (its rows of the file differ from another tab's): each with its own blocks, order field
+    and live preview of its own first package group; Generate draws each tab's packs with that tab's layout."""
+    c, app_module, projects = client
+    final, sig, _ = files
+    form, preview = _preview_page(client, final, sig)
+    assert preview.count('class="pl-configurator"') == 2
+    assert 'name="attribute_order::Spring Sale"' in preview and 'name="attribute_order::Easter"' in preview
+    cells = [json.loads(html.unescape(x)) for x in re.findall(r"data-cells='(.*?)'", preview, re.DOTALL)]
+    assert [x["items"][1]["job_no"][:7] for x in cells] == ["J476699", "J476700"]  # each tab's own first pack
+    assert "Cell layout · tab Spring Sale" in preview and "Cell layout · tab Easter" in preview
+    # Easter without descriptions or barcodes; Spring Sale with them
+    folder, _ = _generate(client, form, extra={"attribute_order::Spring Sale": "desc,job_no,barcode,qty",
+                                               "attribute_order::Easter": "job_no,qty"}, page=True)
+    names = os.listdir(folder)
+    texts = [p.get_text() for p in fitz.open(folder / next(n for n in names if n.startswith("Packing Labels Only")))]
+    labelmap = json.load(open(folder / next(n for n in names if n.endswith(".labelmap.json"))))
+    pages = {pk["open360_code"][:6]: [texts[p - 1] for p in pk["pdf_pages"]] for packs in labelmap["stores"].values() for pk in packs}
+    assert "A1 poster" in pages["01T1P1"][0] and "Egg hunt poster" not in pages["01T2P1"][0]
+    assert "J476700-01" in pages["01T2P1"][0]  # the job number still there
+
+
+def test_tab_layouts_are_read_per_tab():
+    import app as app_module
+    form = {"attribute_order::A": "desc,empty,job_no", "attribute_order::B": "", "attribute_order": "qty"}
+    assert app_module._tab_layouts(form, ["A", "B", "C"]) == {"A": ["desc", "job_no"]}  # B and C: the page's order
+
+
+def test_the_labels_download_page_warns_about_a_job_number_in_more_than_one_pack(client, tmp_path):
+    """Generate Labels (horizontal): the warning the Blueprint Previews gave, again on the download page, as Packing
+    Sheets' download page has it. The labels are still made."""
+    c, app_module, projects = client
+    final = tmp_path / "Spring rollout.xlsx"
+    _shared_job_file(final)
+    _, preview, result = _run_without_signature(client, final, "Shared jobs")
+    assert "You can still generate, but please check them first" in _text(preview)
+    text = _text(result)
+    assert "These job numbers appear in more than one pack group. The files were still generated" in text
+    assert text.count(SHARED) == 1

@@ -1,9 +1,9 @@
-{# Job numbers in more than one pack group, at the top of the Blueprint Previews (Packing Sheets, and horizontal
-   labels): the warning the Packing Sheets download page gives, before anything is made. A warning only, as there:
-   Generate still goes ahead. shared_job_warnings: app._shared_jobs. #}
+{# Job numbers in more than one pack group: at the top of the Blueprint Previews (Packing Sheets, and horizontal labels)
+   before anything is made, and again on both download pages (included with generated=true). A warning only: Generate
+   still goes ahead. shared_job_warnings: app._shared_jobs / matrix_engine.find_shared_job_numbers. #}
 {% if shared_job_warnings %}
 <div class="warning-box shared-job-warning">
-    ⚠️ These job numbers appear in more than one pack group. You can still generate, but please check them first:
+    ⚠️ These job numbers appear in more than one pack group. {% if generated %}The files were still generated, but please check them:{% else %}You can still generate, but please check them first:{% endif %}
     <ul>
         {% for warning in shared_job_warnings %}
         <li>{{ warning }}</li>

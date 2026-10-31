@@ -26,7 +26,7 @@ from engine.core.core_math import job_series, JOB_NUMBER, unused_name, clean_fil
 from engine.packing_sheets.subgroup_engine import execute_subgroups, SubgroupValidationError
 from engine.packing_labels.packing_label_generator import (_address_key, parse_packing_data, generate_packing_labels, PackCheckError, _norm, MAPPABLE_FIELDS,
                                      group_issues, issue_where, issue_text, _row_ranges,
-                                     detect_columns, header_columns, similar_addresses, cell_preview)
+                                     detect_columns, header_columns, similar_addresses, cell_preview, label_title)
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
 from engine.addresses.address_book import AddressBook, AddressBookError
 from engine.addresses.address_import import build_review, apply_review, all_label_maps, ImportProblem
@@ -48,7 +48,7 @@ from engine.courier.courier_export import (collect_summary, unique_codes, build_
                             source_destinations, sendable, fill_store_names,
                             EDITABLE_FIELDS, load_service_usage, service_options, record_service_usage,
                             write_csv_recipe, csv_from_recipe, RECIPE_SUFFIX, CSV_KINDS)
-from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES, LOGO_DIR_NAME, LEGACY_LOGO_DIR_NAME
+from engine.courier.courier_services import ServiceStore, ServiceError, LOGO_MAX_BYTES, LOGO_DIR_NAME, LEGACY_LOGO_DIR_NAME, REGION_FILTERS
 import openpyxl
 from engine.core import app_log, project_record, log_view, progress, env_file
 from engine.packing_labels.horizontal_distribution import read_horizontal, read_signature_file
@@ -1991,6 +1991,18 @@ def _edits_field(form):
     return data if isinstance(data, dict) else {}
 
 
+def _tab_layouts(form, tabs):
+    """Each tab's item-box layout, as its own Customize Cell Layout set it ('attribute_order::<tab>': the blocks top
+    to bottom). A tab's rows of the file differ from another's ('row_4' is Kinds in one, a description in another),
+    so each has its own. A tab with none sent uses the page's 'attribute_order'. {tab: [blocks]}"""
+    out = {}
+    for tab in tabs:
+        blocks = [b for b in str(form.get(f'attribute_order::{tab}') or '').split(',') if b and b != 'empty']
+        if blocks:
+            out[tab] = blocks
+    return out
+
+
 def _consignment_edits(form):
     """Edits made in the preview's consignment table, sent back as JSON in a hidden field."""
     return {str(k): v for k, v in _edits_field(form).items() if isinstance(v, dict)}
@@ -2074,6 +2086,54 @@ def _mapping_view(filepath, header_row, tab, choices, mode='labels'):
     return {'header_row': header_row, 'columns': columns, 'items': items, 'by_hand': sum(1 for i in items if i['chosen'])}
 
 
+def _label_serials(pack_groups, tab_of, horizontal):
+    """Each pack's serial in its tab, in the distribution file's order: '01T1', '02T1' ... '01T2' (horizontal files:
+    '03T1P2', the store's number in its tab, T + the tab, P + the pack). It's printed before the store name on the
+    packing label (label_title), starts the label's Open360 Item Reference, and names the preview's item cards.
+    tab_of: {pack key: its tab's number among the selected tabs}."""
+    if horizontal:
+        return {key: g['serial'] for key, g in pack_groups.items()}
+    per_tab = Counter(tab_of.values())
+    seen, serials = Counter(), {}
+    for key in pack_groups:
+        n = tab_of[key]
+        seen[n] += 1
+        serials[key] = f"{seen[n]:0{max(2, len(str(per_tab[n])))}d}T{n}"
+    return serials
+
+
+def _postcode_fills(pack_groups, edits, log=None):
+    """Postcodes the official data fills in by itself (address_reference.postcode_for): every Excel address with a
+    suburb and no postcode, not edited by the user (nor reset to Excel after a fill: 'no_fill'), whose suburb is one
+    place with one postcode (the state written decides between places of that name; a suburb New Zealand has too
+    needs the state). Each is an edit like a click on its "Use ..." fix, tagged 'official', with 'filled' saying what
+    was filled; the preview sends it back, so Generate gets the same.
+    Returns (edits with the fills, {consignment id: why its postcode was left to the user})."""
+    if not address_reference.available():
+        return edits, {}
+    out, notes, filled = dict(edits), {}, 0
+    for sid, dest in source_destinations(pack_groups).items():
+        edit = edits.get(sid) or {}
+        if dest['postcode'] or not dest['suburb'] or edit.get('no_fill') or any(k in edit for k in EDITABLE_FIELDS):
+            continue
+        try:
+            fill, why = address_reference.postcode_for(dest['suburb'], dest['state'], dest['country'])
+        except Exception as e:  # the address is left as it is: the usual checks still flag it
+            log_book.warning("Postcode lookup failed for %s: %s", one_line(dest), e)
+            continue
+        if fill:
+            out[sid] = {**edit, **{k: dest[k] for k in EDITABLE_FIELDS}, 'postcode': fill['postcode'],
+                        'state': fill['state'], 'source': 'official', 'filled': f"From the official data: {fill['place']}"}
+            filled += 1
+        elif why:
+            notes[sid] = why
+    if log and (filled or notes):
+        log.info("  postcodes filled from the official data: %d; left to the user: %d", filled, len(notes))
+        for why in notes.values():
+            log.info("    postcode not filled: %s", why)
+    return out, notes
+
+
 def _receiver_groups(consignments, separate=()):
     """Consignments for the same receiver (a store, or an installer) at different addresses, put next to each other
     so they can be merged into one in the preview. Names count as the same when they're equal ignoring capitals,
@@ -2119,7 +2179,7 @@ def _receiver_groups(consignments, separate=()):
         elif len(members) > 1:
             addressed = [m for m in members if not m.get('no_address')]
             similar = all(similar_addresses(one_line(addressed[0]['destination']), one_line(m['destination'])) for m in addressed[1:])
-            info = [{'number': m['number'], 'receiver': m['destination']['receiver'],
+            info = [{'number': m['number'], 'id': m.get('id', ''), 'receiver': m['destination']['receiver'],
                      'address': one_line(m['destination']) or 'no address', 'cartons': len(m['cartons']),
                      'no_address': bool(m.get('no_address')),
                      'service': m.get('service_code') or '', 'service_used': m.get('service_code_used') or '',
@@ -3343,7 +3403,7 @@ def _distribution_page(mode):
         log.info("  file saved %s; open in Excel: %s", file_note['saved_at'], excel or 'no')
         previews = []
         header_rows = {}  # each tab's header row as a number (a blank, 0 or text one is read as row 1)
-        first_tab_groups = None  # the first readable tab's packs: its first pack is the live cell preview
+        tab_groups = {}  # each tab's packs as read here: its live cell preview, and the consignments (read once)
         for tab in selected_tabs:
             choices = _column_choices(request.form, tab, mode)
             try:
@@ -3364,8 +3424,7 @@ def _distribution_page(mode):
                               tab, header_row, total_packs, total_stores, last_row, len(warnings))
                 for w in warnings:  # each on its own line, where it is and what it is, for the Logs page
                     (log.warning if w.get('major') else log.info)("    needs a look: %s", issue_text(w))
-                if first_tab_groups is None and pack_groups:
-                    first_tab_groups = pack_groups
+                tab_groups[tab] = pack_groups
 
                 previews.append({
                     'sheet_name': tab, 
@@ -3398,17 +3457,19 @@ def _distribution_page(mode):
 
         courier = None
         if previews and not any(p['error'] for p in previews):
-            combined = {}
+            combined, tab_of = {}, {}
             for tab in selected_tabs:
-                groups, _, _, _ = _read_tab(filepath, header_rows[tab], tab, _column_choices(request.form, tab, mode), mode,
-                                            selected_tabs.index(tab) + 1)
+                groups = tab_groups[tab]
                 combined.update({f"{tab} - {k}": v for k, v in groups.items()})
+                tab_of.update({f"{tab} - {k}": selected_tabs.index(tab) + 1 for k in groups})
                 if courier_mode:
                     _import_refs(groups, selected_tabs.index(tab) + 1)
-            # The Excel address as written; what the address book knows is offered in the row, never filled in by itself
+            # The Excel address as written; what the address book knows is offered in the row, never filled in by itself.
+            # Asked before the postcodes are filled, so a saved (verified) address is still offered for those rows
             edits = _consignment_edits(request.form)
             edits.pop('__offered__', None)
             book_options = _book_options(combined, edits)
+            edits, fill_notes = _postcode_fills(combined, edits, log)
             services = SERVICE_STORE.services()
             options = service_options(load_service_usage(SERVICE_USAGE_FILE, {x['code'] for x in services}), services)
             most_used = options[0]['code'] if options and options[0]['used'] else ''
@@ -3419,6 +3480,13 @@ def _distribution_page(mode):
                                                                          SPEC_STORE.resolver(), weights)
             if courier_mode:
                 _import_item_refs(cartons, combined)
+            elif horizontal_mode:  # each item card named as its packing label prints it ('145T2P1. Rebel Karrinyup')
+                serials = _label_serials(combined, tab_of, horizontal_mode)
+                for x in cartons:
+                    x['label_name'] = label_title(serials.get(x['pack_key']), x['store'])
+            for c in consignments:  # the postcode the official data filled in, or why it couldn't
+                c['filled'] = (edits.get(c['id']) or {}).get('filled', '') if c['edit_source'] == 'official' else ''
+                c['fill_note'] = fill_notes.get(c['id'], '') if c.get('no_address') else ''
             kept_apart = {sid for sid, e in edits.items() if isinstance(e, dict) and e.get('separate')}
             consignments = _receiver_groups(_check_against_book(consignments, edits, book_options), kept_apart)  # one receiver's next to each other
             # A store kept at its different addresses on purpose: the file's warning about its addresses goes too
@@ -3455,6 +3523,8 @@ def _distribution_page(mode):
                                   'original_json': json.dumps({k: c['original'][k] for k in EDITABLE_FIELDS + ('authority_to_leave',)})}
                                  for c in consignments],
                 'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
+                # Couriers' own areas in the State filter ('Flash-NSW': Greater Metro Sydney), by postcode
+                'regions': REGION_FILTERS,
                 'carton_count': len(cartons),
                 'weights_json': json.dumps(weights),
                 'spec_gaps': any(x['spec_kind'] in ('unknown', 'incomplete') for x in cartons),
@@ -3477,16 +3547,16 @@ def _distribution_page(mode):
                 'code_dividers': request.form.get('code_dividers', '1') == '1',
             }
 
-        preview_cells = None
-        if not courier_mode and first_tab_groups:
+        preview_cells = {}  # each tab's first package group, for its own live preview under its own cell layout
+        if not courier_mode:
             try:
-                preview_cells = cell_preview(first_tab_groups)
+                preview_cells = {tab: cell_preview(groups) for tab, groups in tab_groups.items() if groups}
             except Exception:
                 log.exception("  live cell preview could not be built")
 
         signature = _signature_for(filepath) if horizontal_mode else None
         return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, previews=previews, courier=courier,
-                               file_note=file_note, cell_preview=preview_cells,
+                               file_note=file_note, cell_previews=preview_cells,
                                signature_note=_signature_note(signature) if horizontal_mode else None,
                                shared_job_warnings=_shared_jobs(previews, log) if horizontal_mode else [])
 
@@ -3556,23 +3626,15 @@ def _distribution_page(mode):
                     combined_pack_groups[f"{tab} - {key}"] = val
                     tab_of[f"{tab} - {key}"] = selected_tabs.index(tab) + 1  # T1 = the first selected tab, to the right
 
-            # Each pack's serial in its tab, in the distribution file's order: '01T1', '02T1' ... '01T2'. It's printed
-            # before the store name on the packing label and starts the label's Open360 Item Reference
-            per_tab = Counter(tab_of.values())
-            seen = Counter()
-            serials = {}
-            for key in combined_pack_groups:
-                n = tab_of[key]
-                seen[n] += 1
-                serials[key] = f"{seen[n]:0{max(2, len(str(per_tab[n])))}d}T{n}"
-            if horizontal_mode:  # '03T1P2': the store's number in its tab, T + the tab, P + the pack
-                serials = {key: g['serial'] for key, g in combined_pack_groups.items()}
+            serials = _label_serials(combined_pack_groups, tab_of, horizontal_mode)
 
             # 2. Courier consignments, checked before anything is written or moved
             progress.stage("Checking the consignments and addresses", 15, 20)
             fixed = {k: request.form.get(k, '').strip() for k in ('who_pays', 'charge_account', 'service_code')}
             reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
-            consignments, cartons, courier_warnings = build_consignments(combined_pack_groups, _consignment_edits(request.form),
+            # Postcodes the official data fills in by itself, as in the preview (the page sends them back already)
+            edits, _ = _postcode_fills(combined_pack_groups, _consignment_edits(request.form), log)
+            consignments, cartons, courier_warnings = build_consignments(combined_pack_groups, edits,
                                                                          fixed['service_code'], SPEC_STORE.resolver(),
                                                                          _carton_weights(request.form))
             if courier_mode:
@@ -3660,15 +3722,18 @@ def _distribution_page(mode):
                                             ref_issues, _collect_lines(collect_summary(all_consignments, combined_pack_groups)))
                 progress.stage("Drawing the packing labels", 20, 90)
                 with app_log.step(log, f"  packing labels PDF {output_pdf_name}"):
+                    # Each tab's own item-box layout (its Customize Cell Layout), for every pack of that tab
+                    tab_layouts = _tab_layouts(request.form, selected_tabs)
+                    layouts = {k: tab_layouts[selected_tabs[n - 1]] for k, n in tab_of.items() if selected_tabs[n - 1] in tab_layouts}
                     if horizontal_mode:  # packing-sheet order: an audit page per pack, a divider per code
                         page_info = generate_horizontal_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses,
                                                                report, serials, add_dividers=request.form.get('code_dividers') == '1',
                                                                group_by_code=request.form.get('label_grouping', 'code') != 'store',
-                                                               notes=pack_notes, on_progress=progress.tick)
+                                                               notes=pack_notes, on_progress=progress.tick, layouts=layouts)
                     else:
                         page_info = generate_packing_labels(combined_pack_groups, output_pdf, attribute_order, label_addresses, report,
                                                             serials, {k: (n, selected_tabs[n - 1]) for k, n in tab_of.items()},
-                                                            tab_notes=tab_notes, on_progress=progress.tick)
+                                                            tab_notes=tab_notes, on_progress=progress.tick, layouts=layouts)
                 log.info("    %d page(s), %d report page(s)", len(fitz.open(output_pdf)), page_info.get('report_pages', 0))
 
                 # 6. The courier CSVs chosen (TIG Open360's bulk upload and / or OpenFreight's), and the label map used to
@@ -3762,8 +3827,11 @@ def _distribution_page(mode):
             left_out = [x for x in all_cartons if x not in cartons and not x.get('collect')]  # collected: by design
             summary = {'items': len(cartons), 'consignments': len(consignments), 'left_out': [
                 f"{x['item_reference']} ({x['packing_spec']}) - {x['store']}" for x in left_out]} if courier_mode else None
+            # Job numbers in more than one pack (horizontal files): warned about on the Blueprint Previews, and again here
+            shared = _shared_jobs([{'sheet_name': t, 'blueprint': blueprints.get(t)} for t in selected_tabs], log) \
+                if horizontal_mode else []
             return show(generation_complete=True, project_folder=final_folder_name, generated_files=output_files,
-                        summary=summary, sheets_note=sheets_note)
+                        summary=summary, sheets_note=sheets_note, shared_job_warnings=shared)
 
         except Exception as e:
             log.exception("Generate FAILED after %.2fs (project folder undone)", time.perf_counter() - started)

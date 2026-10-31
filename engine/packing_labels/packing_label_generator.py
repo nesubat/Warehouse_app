@@ -1339,6 +1339,13 @@ def _thumb_data_url(data, max_px):
         return None
 
 
+def label_title(serial, store):
+    """The store name as the packing label prints it under the courier logo: its serial first ('145T2P1. Rebel
+    Karrinyup'; '01T1. Blue Star Moorabbin' on vertical files), else the name alone. The consignment preview's item
+    cards show the same, so a card and its label read alike."""
+    return f"{serial}. {store}" if serial else store
+
+
 def cell_preview(pack_groups, max_px=360):
     """The first pack group's item cells for the page's live layout preview (script.js section 10). The browser
     draws them with the same sizes and rules as _layout_cell/_draw_cell, so this hands it the cell size in pt and,
@@ -1375,8 +1382,11 @@ def cell_preview(pack_groups, max_px=360):
 
 
 def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", attribute_order=None, addresses=None,
-                            report=None, serials=None, tabs=None, tab_notes=None, on_progress=None):
+                            report=None, serials=None, tabs=None, tab_notes=None, on_progress=None, layouts=None):
     """Draws the PDF. Returns where each pack landed: {'pages': {pack_key: [0-based page indexes]}, ...}.
+
+    layouts: {pack_key: item-box block order} for packs whose tab has its own layout (the preview's Customize Cell
+    Layout, one per tab: its rows of the file differ); any other pack uses attribute_order.
 
     addresses: {pack_key: {'address', 'receiver', 'contact', 'sent'}} as finalised in the consignment preview
     (address book, edits); a plain address string also works. A pack going to an installer gets a red
@@ -1409,9 +1419,14 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     for g in pack_groups.values():
         store_boxes[_norm(g['store_name'])] += split_count(g.get('pack_spec_name', ''))[0]
     boxes_seen = Counter()
-    # One item-box layout for the whole job (every box is CELL_W x CELL_H): the same block at the same place in each
-    plan = plan_cells([it for g in pack_groups.values() for it in list(g.get('code_cells') or []) + g['items']],
-                      attribute_order, fitz.Rect(0, 0, CELL_W, CELL_H))
+    # One item-box plan per layout (every box is CELL_W x CELL_H): the same block at the same place in each box of
+    # every pack with that layout (a tab's own, or the job's)
+    layouts = layouts or {}
+    order_of = lambda key: layouts.get(key) or attribute_order  # noqa: E731
+    same_layout = {}
+    for key, g in pack_groups.items():
+        same_layout.setdefault(tuple(order_of(key)), []).extend(list(g.get('code_cells') or []) + g['items'])
+    plans = {order: plan_cells(cells, list(order), fitz.Rect(0, 0, CELL_W, CELL_H)) for order, cells in same_layout.items()}
     page_map, copies = {}, {}
     serials, tabs = serials or {}, tabs or {}
 
@@ -1474,10 +1489,12 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
         # Horizontal files: the packing-sheet code boxes go first. Drawn only, so they never count as items,
         # units, job numbers or barcode kinds anywhere else
         items = list(group_data.get('code_cells') or []) + group_data['items']
+        cell_order = order_of(pack_key)
+        plan = plans[tuple(cell_order)]
         total_items = len(items)
         store = group_data['store_name']
         # '01T1. Blue Star Moorabbin': the label's serial in its tab before the name, on every page of the pack
-        shown_name = f"{serials[pack_key]}. {store}" if serials.get(pack_key) else store
+        shown_name = label_title(serials.get(pack_key), store)
         spec = group_data.get('pack_spec_name', '')
         label_text = f"LABEL {group_data['label_no']} OF {group_data['label_total']}"
         info = addresses.get(pack_key) or {}
@@ -1606,7 +1623,7 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                         cy0 = MARGIN + r * (CELL_H + GAP)
                         cell = fitz.Rect(cx0, cy0, cx0 + CELL_W, cy0 + CELL_H)
                         _round_rect(page, cell, CELL_RADIUS, color=(0, 0, 0), width=0.75)
-                        _draw_cell(page, items[current_item_idx], attribute_order, cell, plan)
+                        _draw_cell(page, items[current_item_idx], cell_order, cell, plan)
                         current_item_idx += 1
                 if boxes > 1:  # region C: the item grid, right of the courier region on page 1, above the footer after
                     grid = fitz.Rect(grid_x0, MARGIN, A4_W - MARGIN, A4_H - MARGIN - (0 if page_num == 1 else CHIP_H + GAP))

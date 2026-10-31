@@ -747,15 +747,19 @@ document.addEventListener('DOMContentLoaded', function() {
 // =========================================
 // 10. LABEL MAKER DRAG AND DROP CONFIGURATOR + LIVE CELL PREVIEW
 // =========================================
-// The cell's blocks are dragged between #mapped-headers-list (not used) and #attribute-list (top to bottom
-// = the order on the label). The order goes to the server in #attribute_order. While a block is dragged,
-// the other blocks slide out of its way, and the live preview (#pl-cell-preview) redraws the first package
-// group's item boxes with the order as it stands - the same sizes and rules as the PDF
-// (packing_label_generator._layout_cell / _draw_cell), drawn on canvases so it keeps up with the mouse.
+// One configurator per tab (.pl-configurator, data-tab): each tab has its own blocks, as its rows of the file differ.
+// A tab's blocks are dragged between its .pl-headers-pool (not used) and its .pl-attr-list (top to bottom = the order
+// on the label); the order goes to the server in its .pl-attr-order ('attribute_order::<tab>'). A block stays in its
+// own tab's configurator. While a block is dragged, the other blocks slide out of its way, and the tab's live preview
+// (.pl-cell-preview) redraws its first package group's item boxes with the order as it stands - the same sizes and
+// rules as the PDF (packing_label_generator._layout_cell / _draw_cell), drawn on canvases so it keeps up with the mouse.
 document.addEventListener("DOMContentLoaded", function() {
-    const layoutList = document.getElementById('attribute-list');
-    const headersList = document.getElementById('mapped-headers-list');
-    const hiddenInput = document.getElementById('attribute_order');
+    document.querySelectorAll('.pl-configurator').forEach(configurator);
+});
+function configurator(root) {
+    const layoutList = root.querySelector('.pl-attr-list');
+    const headersList = root.querySelector('.pl-headers-pool');
+    const hiddenInput = root.querySelector('.pl-attr-order');
 
     if (!layoutList || !hiddenInput) return;
     const lists = [layoutList, headersList].filter(Boolean);
@@ -765,7 +769,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const updateHiddenInput = () => { hiddenInput.value = currentOrder().join(','); };
     updateHiddenInput();
 
-    const preview = cellPreview(() => currentOrder().filter(id => id && id !== 'empty'));
+    const preview = cellPreview(root.querySelector('.pl-cell-preview'), () => currentOrder().filter(id => id && id !== 'empty'));
 
     // Any change to the cell's blocks (a drag in progress included): keep the order and the preview up to date
     new MutationObserver(() => { updateHiddenInput(); preview.schedule(); }).observe(layoutList, { childList: true });
@@ -830,14 +834,13 @@ document.addEventListener("DOMContentLoaded", function() {
                        { duration: 160, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)' });
         });
     }
-});
+}
 
-// The live cell preview: draws each item box of the first package group (#pl-cell-preview's data-cells, from
+// The live cell preview: draws each item box of a tab's first package group (its .pl-cell-preview's data-cells, from
 // packing_label_generator.cell_preview) on its own canvas, in PDF points, following _layout_cell and
 // _draw_cell line for line. getOrder() gives the blocks top to bottom. Returns { schedule }: redraws once
 // on the next animation frame however often it's asked.
-function cellPreview(getOrder) {
-    const box = document.getElementById('pl-cell-preview');
+function cellPreview(box, getOrder) {
     let data = null;
     try { data = box ? JSON.parse(box.dataset.cells || 'null') : null; } catch (e) { data = null; }
     if (!box || !data || !data.items || !data.items.length) return { schedule: () => {} };
@@ -1120,6 +1123,7 @@ document.addEventListener('DOMContentLoaded', function () {
         renderAddressParts(row.querySelector('.pl-show-address'), d);
         row.dataset.missing = missingParts(d).join(',');
         row.dataset.state = (d.state || '').toUpperCase();
+        row.dataset.postcode = String(d.postcode || '').trim();
         row.dataset.country = country;
         document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
     }
@@ -1141,6 +1145,7 @@ document.addEventListener('DOMContentLoaded', function () {
         return d;
     }
 
+    const currentOf = new Map();  // row -> its address as it stands (Excel + edits), for merging
     rows.forEach((row) => {
         const id = row.dataset.id;
         const original = JSON.parse(row.dataset.original);
@@ -1149,6 +1154,7 @@ document.addEventListener('DOMContentLoaded', function () {
             ADDRESS.concat('authority_to_leave').forEach((k) => { if (edits[id] && k in edits[id]) d[k] = edits[id][k]; });
             return d;
         };
+        currentOf.set(row, current);
         // ✏️ opens the row in place: the receiver and the address fold away and their fields unfold where they were
         // shown (styles.css .pl-fold / .pl-unfold). What's folded is inert: no tabbing into hidden fields.
         const folds = [...row.querySelectorAll('.pl-fold')], unfolds = [...row.querySelectorAll('.pl-unfold')];
@@ -1169,7 +1175,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // What an edit carries over from before: the service picked, Keep separate (same-name groups) and the
         // Keep as is choices (they name the exact address they're for, so a changed address simply doesn't match)
-        const carried = (key) => Object.fromEntries(['service_code', 'separate', 'ref_keep', 'book_keep']
+        const carried = (key) => Object.fromEntries(['service_code', 'separate', 'ref_keep', 'book_keep', 'no_fill']
             .filter((k) => edits[key] && edits[key][k]).map((k) => [k, edits[key][k]]));
 
         row.querySelector('.pl-edit-save').addEventListener('click', () => {
@@ -1180,11 +1186,15 @@ document.addEventListener('DOMContentLoaded', function () {
             // Saving counts as checked, so a row that isn't in the address book stops being flagged
             // (kept through Update Previews; the address is saved to the book on Generate)
             const checked = row.classList.contains('pl-needs-check') || (edits[id] && edits[id].checked) ? { checked: true } : {};
+            const wasFilled = !!(edits[id] && edits[id].source === 'official');
             edits[id] = changed ? { ...keep, ...checked, ...d } : { ...keep, ...checked };
+            if (wasFilled && !changed) edits[id].no_fill = true;  // back to the Excel address: not filled in again
             tidy(id);
             show(row, changed ? d : original);
             row.querySelector('.pl-tag-edited').hidden = !changed;
             row.querySelector('.pl-tag-book').hidden = true;
+            row.querySelector('.pl-tag-filled').hidden = true;
+            refreshGroup(row);
             markChecked(row);
             if (d.postcode) markAddressed(row);
             close();
@@ -1205,6 +1215,8 @@ document.addEventListener('DOMContentLoaded', function () {
             show(row, d);
             row.querySelector('.pl-tag-edited').hidden = fromBook;
             row.querySelector('.pl-tag-book').hidden = !fromBook;
+            row.querySelector('.pl-tag-filled').hidden = true;
+            refreshGroup(row);
             if (fromBook) row.querySelector('.pl-book-opts').replaceChildren();
             if (editing()) fill(row, d);  // the open editor shows what was just applied
             markChecked(row);
@@ -1325,12 +1337,23 @@ document.addEventListener('DOMContentLoaded', function () {
         return parts.join(' ').toLowerCase();
     }
 
+    // A courier's area in the State filter ('Flash-NSW'): Australian consignments whose postcode is in its ranges
+    function inArea(option) {
+        let ranges = [];
+        try { ranges = JSON.parse(option.dataset.postcodes || '[]'); } catch (e) { ranges = []; }
+        return (row) => {
+            const pc = row.dataset.postcode || '';
+            return (row.dataset.country || 'AU') === 'AU' && /^\d{4}$/.test(pc) &&
+                ranges.some(([from, to]) => Number(pc) >= from && Number(pc) <= to);
+        };
+    }
     function applyFilters() {
         const state = stateFilter.value;
+        const area = state.startsWith('region:') ? inArea(stateFilter.selectedOptions[0]) : null;
         const text = textFilter.value.trim().toLowerCase();
         let shown = 0;
         rows.forEach((row) => {
-            const visible = (!state || row.dataset.state === state) &&
+            const visible = (!state || (area ? area(row) : row.dataset.state === state)) &&
                             (!text || searchText(row).includes(text));
             row.hidden = !visible;
             if (visible) shown += 1;
@@ -1342,6 +1365,99 @@ document.addEventListener('DOMContentLoaded', function () {
         countLabel.textContent = shown === rows.length ? `${rows.length} consignments` : `Showing ${shown} of ${rows.length}`;
         applyBtn.textContent = shown === rows.length ? 'Apply to all' : `Apply to ${shown} shown`;
     }
+    // One receiver's consignments at different addresses, under a heading. Merge into one happens on the page at
+    // once: the address picked goes on every one of them (as an edit, like ✏️), their items move into the kept row and
+    // the other rows go. Nothing is sent until Generate (or Update Previews), where build_consignments makes them one
+    // consignment because they now share an address. Keep separate: each stays at its own address, the heading goes.
+    const oneLine = (d) => ['line1', 'line2', 'suburb', 'state', 'postcode'].map((k) => d[k]).filter(Boolean).join(', ');
+    const groupRows = (head) => rows.filter((r) => r.dataset.group === head.dataset.group);
+    // The Keep list follows the rows: an address typed or fixed in a member row since the page opened is offered
+    function refreshGroup(row) {
+        const head = row.dataset.group && document.querySelector(`.pl-group-row[data-group="${row.dataset.group}"]`);
+        if (!head) return;
+        const group = JSON.parse(head.querySelector('.pl-group-merge').dataset.group);
+        const select = head.querySelector('.pl-group-keep');
+        const was = select.value;
+        select.replaceChildren();
+        const offered = group.map((m, i) => {
+            const r = rows.find((x) => x.dataset.id === m.id);
+            return r && { m, i, d: currentOf.get(r)() };
+        }).filter((x) => x && oneLine(x.d));
+        offered.sort((a, b) => !a.d.postcode - !b.d.postcode);  // complete addresses first, as the page starts
+        offered.forEach(({ m, i, d }) => {
+            const o = document.createElement('option');
+            o.value = String(i);
+            o.textContent = `#${m.number} ${oneLine(d)}${d.postcode ? '' : ' (no postcode)'}`;
+            select.append(o);
+        });
+        if ([...select.options].some((o) => o.value === was)) select.value = was;
+        const any = select.options.length > 0;
+        select.closest('.pl-group-keep-label').hidden = !any;
+        head.querySelector('.pl-group-none').hidden = any;
+        head.querySelector('.pl-group-merge').disabled = !any;
+    }
+    function removeRow(row) {
+        row.remove();
+        rows.splice(rows.indexOf(row), 1);
+        document.dispatchEvent(new CustomEvent('pl-row-removed', { detail: { row } }));  // the To check list drops it
+    }
+    function endGroup(head) {
+        groupRows(head).forEach((r) => { r.classList.remove('pl-in-group'); delete r.dataset.group; });
+        head.remove();
+    }
+    document.querySelectorAll('.pl-group-row').forEach((head) => {
+        const select = head.querySelector('.pl-group-keep');
+        select.addEventListener('focus', () => refreshGroup(head));
+        head.querySelector('.pl-group-merge').addEventListener('click', (e) => {
+            const group = JSON.parse(e.currentTarget.dataset.group);
+            if (!select.options.length) return;
+            const keep = group[Number(select.value)];
+            const pairs = group.map((m) => [m, rows.find((r) => r.dataset.id === m.id)]).filter(([, r]) => r);
+            const members = pairs.map(([, r]) => r);
+            const numberOf = (r) => pairs.find(([, x]) => x === r)[0].number;
+            const keepRow = members.find((r) => r.dataset.id === keep.id);
+            if (!keepRow) return;
+            // They become one consignment, so one service: the kept row's. Say so when theirs differ.
+            const serviceOf = (r) => r.querySelector('.pl-service-input').value || mainService.value;
+            const services = [...new Set(members.map(serviceOf).filter(Boolean))];
+            if (services.length > 1 && !confirm(`These consignments use different services: ${members.map((r) => `#${numberOf(r)} ${serviceOf(r) || '-'}`).join(', ')}.\n\n`
+                + `Merged, they all go with the service of the address you keep (#${keep.number}: ${serviceOf(keepRow) || '-'}). Merge?`)) return;
+            const kept = currentOf.get(keepRow)();
+            const fields = Object.fromEntries(['line1', 'line2', 'suburb', 'state', 'postcode', 'country'].map((k) => [k, kept[k] || '']));
+            const service = keepRow.querySelector('.pl-service-input').value;
+            group.forEach((m) => m.sources.forEach((sid) => {
+                const edit = { ...(edits[sid] || {}), checked: true, ...fields };
+                delete edit.source; delete edit.filled;  // the address is now the one picked here
+                if (service) edit.service_code = service; else delete edit.service_code;  // '' = same as main
+                edits[sid] = edit;
+            }));
+            save();
+            // The kept row takes every item; the others go
+            const items = keepRow.querySelector('.pl-items');
+            const others = members.filter((r) => r !== keepRow);
+            others.forEach((r) => { r.querySelectorAll('.pl-carton').forEach((x) => items.append(x)); removeRow(r); });
+            keepRow.querySelector('.pl-items-count').textContent = items.querySelectorAll('.pl-carton').length;
+            const note = document.createElement('div');
+            note.className = 'issue-detail pl-merged-note';
+            note.textContent = `Merged with ${others.map((r) => `#${numberOf(r)}`).join(', ')}: one consignment when you generate.`;
+            keepRow.querySelector('.pl-show-address').after(note);
+            endGroup(head);
+            show(keepRow, kept);
+            markChecked(keepRow);
+            if (kept.postcode) markAddressed(keepRow);
+            applyFilters();
+        });
+        head.querySelector('.pl-group-separate').addEventListener('click', (e) => {
+            const group = JSON.parse(e.currentTarget.dataset.group);
+            group.forEach((m) => m.sources.forEach((sid) => { editOf(sid).separate = true; }));
+            save();
+            endGroup(head);
+            // The file's warning about this store's addresses goes from the To check list too
+            document.dispatchEvent(new CustomEvent('pl-kept-separate', { detail: { receiver: group[0].receiver } }));
+            applyFilters();
+        });
+    });
+
     stateFilter.addEventListener('change', applyFilters);
     textFilter.addEventListener('input', applyFilters);
     textFilter.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
@@ -2650,47 +2766,7 @@ document.addEventListener('DOMContentLoaded', function () {
         store(all);
     });
 
-    // One receiver's consignments at different addresses sit next to each other under a heading: the address picked
-    // there goes on all of them (as an edit, like ✏️) and the preview is updated at once, so they become one
-    const editsField = document.getElementById('consignment-edits');
-    const preview = form.querySelector('button[name="preview"]');
-    document.querySelectorAll('.pl-group-merge').forEach((button) => {
-        button.addEventListener('click', () => {
-            if (!editsField || !preview) return;
-            const group = JSON.parse(button.dataset.group);
-            const picked = button.closest('.pl-group-head').querySelector('.pl-group-keep');
-            const keep = group[picked ? Number(picked.value) : 0];
-            // They become one consignment, so one service: the kept address's. Say so when theirs differed.
-            const services = [...new Set(group.map((m) => m.service_used).filter(Boolean))];
-            if (services.length > 1 && !confirm(`These consignments use different services: ${group.map((m) => `#${m.number} ${m.service_used}`).join(', ')}.\n\n`
-                + `Merged, they all go with the service of the address you keep (#${keep.number}: ${keep.service_used}). Merge?`)) return;
-            let edits = {};
-            try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
-            group.forEach((member) => member.sources.forEach((id) => {
-                edits[id] = { ...(edits[id] || {}), checked: true, ...keep.fields };
-                if (keep.service) edits[id].service_code = keep.service; else delete edits[id].service_code;  // '' = same as main
-            }));
-            editsField.value = JSON.stringify(edits);
-            button.disabled = true;
-            button.textContent = 'Merging…';
-            form.requestSubmit(preview);
-        });
-    });
-    // Or they're different places with the same name: each stays at its own address and the heading goes
-    document.querySelectorAll('.pl-group-separate').forEach((button) => {
-        button.addEventListener('click', () => {
-            if (!editsField || !preview) return;
-            let edits = {};
-            try { edits = JSON.parse(editsField.value || '{}') || {}; } catch (e) { edits = {}; }
-            JSON.parse(button.dataset.group).forEach((member) => member.sources.forEach((id) => {
-                edits[id] = { ...(edits[id] || {}), separate: true };
-            }));
-            editsField.value = JSON.stringify(edits);
-            button.disabled = true;
-            button.textContent = 'Keeping separate…';
-            form.requestSubmit(preview);
-        });
-    });
+    // Merge into one and Keep separate (one receiver at different addresses): section 11, on the page at once
 });
 
 // =========================================
@@ -3337,13 +3413,35 @@ document.addEventListener('DOMContentLoaded', function () {
         };
         window.addEventListener('scroll', syncFloating, { passive: true });
     }
+    // The same count on the floating Open Excel box, in sight wherever the page is scrolled; a click goes to the To
+    // check list (or to the table's bar when there's nothing left in it)
+    let fxState = null;
+    if (fx && bar) {
+        fxState = document.createElement('button');
+        fxState.type = 'button';
+        fxState.className = 'fx-con-state';
+        fxState.title = 'Go to the To check list';
+        fxState.addEventListener('click', () => (panel.hidden ? bar : panel).scrollIntoView({ block: 'start', behavior: 'smooth' }));
+        fx.insertBefore(fxState, fx.querySelector('.fx-hide-btn'));  // before Hide consignments, else at the end
+    }
     function tableState(clear) {
         if (!bar) return;
         const n = rows.length, s = n === 1 ? '' : 's';
-        bar.classList.toggle('pl-con-clear', clear || (progress.total > 0 && !progress.left));
+        const done = clear || (progress.total > 0 && !progress.left);
+        bar.classList.toggle('pl-con-clear', done);
         stateText.textContent = clear ? `✓ All ${n} consignment${s} check out` + (progress.total ? ` (${progress.total} fixed)` : '')
             : progress.left ? `${n} consignment${s}: ${progress.left} of ${progress.total} still to check (see To check above)`
             : `✓ All ${n} consignment${s} check out · the file still has something in To check above`;
+        if (fxState) {
+            const text = clear ? `✓ All ${n} consignment${s} check out`
+                : progress.left ? `${n} consignment${s}: ${progress.left} of ${progress.total} still to check`
+                : `✓ All ${n} consignment${s} check out · the file has something to check`;
+            fxState.classList.toggle('fx-con-clear', done);
+            if (fxState.textContent !== text) {
+                fxState.textContent = text;
+                window.dispatchEvent(new Event('resize'));  // the floating box re-checks what it might cover
+            }
+        }
         if (!decided) { decided = true; showTable(!clear); }
     }
     const list = panel.querySelector('.pl-issues-list');
@@ -3571,6 +3669,18 @@ document.addEventListener('DOMContentLoaded', function () {
         panel.hidden = !list.children.length;
         tableState(!tiers.fix.length && !tiers.check.length);  // 'not in the address book yet' isn't a problem
     }
+    document.addEventListener('pl-row-removed', (e) => {
+        const i = rows.indexOf(e.detail.row);
+        if (i >= 0) rows.splice(i, 1);
+        ever.delete(e.detail.row);
+    });
+    document.addEventListener('pl-kept-separate', (e) => {
+        const norm = (t) => String(t || '').toLowerCase().replace(/[^0-9a-z]+/g, ' ').trim().replace(/\s+/g, ' ');
+        const name = norm(e.detail.receiver);
+        review.file = (review.file || []).filter((g) => !(norm(g.text).startsWith(`${name} store address`) ||
+                                                          norm(g.text).startsWith(`${name} installer addresses`)));
+        soon();
+    });
     let timer = null;
     const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 60); };
     // Every change to a row (a fix, Keep as is, a Save, an option used) updates the list
