@@ -1663,3 +1663,43 @@ def test_the_labels_download_page_warns_about_a_job_number_in_more_than_one_pack
     text = _text(result)
     assert "These job numbers appear in more than one pack group. The files were still generated" in text
     assert text.count(SHARED) == 1
+
+
+TAB_BOX = re.compile(r'<input type="checkbox" name="selected_tabs" value="([^"]+)"\s*(checked)?>')
+
+
+def _tab_boxes(page):
+    return {m.group(1): bool(m.group(2)) for m in TAB_BOX.finditer(page)}
+
+
+def test_tabs_start_unticked_and_auto_map_with_none_ticked_says_so(client, files):
+    """Every page with tab tick boxes starts with none ticked: the user picks the tabs. A Label Plugin still fills in
+    the header rows. Auto-Map / Map Blueprints with nothing ticked asks for a tab instead of quietly showing nothing,
+    and the tabs that were ticked stay ticked after a preview."""
+    c, app_module, projects = client
+    final, sig, _ = files
+    name = app_module.secure_filename(final.name)
+    tabs = {"Spring Sale": False, "Easter": False}
+    for url, with_sig in (("/packing-labels/horizontal", True), ("/packing-labels/horizontal", False),
+                          ("/packing-labels", False), ("/courier-import", False), ("/matrix", False)):
+        with open(final, "rb") as f, open(sig, "rb") as s:
+            data = {"file": (f, final.name), **({"signature_file": (s, sig.name)} if with_sig else {})}
+            page = c.post(url, data=data, content_type="multipart/form-data", follow_redirects=True).data.decode()
+        assert _tab_boxes(page) == tabs, (url, with_sig)
+        if with_sig:
+            assert page.count('value="8"') == 2  # header rows from the Label Plugin
+    form = {"filename": name, "all_tabs": list(tabs), "header_row_Spring Sale": "8", "header_row_Easter": "8"}
+    for url in ("/packing-labels/horizontal", "/packing-labels", "/courier-import"):
+        for action in ("preview", "generate"):
+            page = c.post(url, data={**form, action: "1"}, follow_redirects=True).data.decode()
+            assert "No tab is ticked: tick the tabs to read above, then click Auto-Map." in page, (url, action)
+            assert _tab_boxes(page) == tabs and 'id="preview-section"' not in page
+    page = c.post("/preview", data={"filename": name, "all_tabs": list(tabs)}, follow_redirects=True).data.decode()
+    assert "No tab is ticked: tick the tabs to map above, then click Map Blueprints." in page
+    page = c.post("/packing-labels/horizontal", data={**form, "selected_tabs": ["Easter"], "preview": "1"},
+                  follow_redirects=True).data.decode()
+    assert _tab_boxes(page) == {"Spring Sale": False, "Easter": True} and "No tab is ticked" not in page
+    assert 'id="preview-section"' in page
+    page = c.post("/preview", data={"filename": name, "all_tabs": list(tabs), "selected_tabs": ["Easter"]},
+                  follow_redirects=True).data.decode()
+    assert _tab_boxes(page) == {"Spring Sale": False, "Easter": True} and "No tab is ticked" not in page

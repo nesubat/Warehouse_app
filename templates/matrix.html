@@ -59,7 +59,7 @@
         <div class="tab-card">
             <label class="tab-title">
                 <input type="checkbox" name="selected_tabs" value="{{ tab }}" 
-                       {% if not user_inputs or user_inputs[tab].selected %}checked{% endif %}>
+                       {% if user_inputs and user_inputs[tab].selected %}checked{% endif %}>
                 Tab: {{ tab }}
             </label>
             
@@ -79,7 +79,8 @@
             </div>
         </div>
         {% endfor %}
-        
+        {% if no_tabs %}<div class="warning-box">No tab is ticked: tick the tabs to map above, then click Map Blueprints.</div>{% endif %}
+
         <button type="submit" class="btn-full">Map Blueprints</button>
     </form>
     {% endif %}

@@ -464,7 +464,7 @@ def preview():
     log_sheets.info("Preview ready in %.2fs", time.perf_counter() - started)
 
     return _show('matrix.html', _at='/matrix', tabs=all_tabs, previews=previews, filename=filename, user_inputs=user_inputs,
-                 blueprints_json=blueprints_json, shared_job_warnings=shared_job_warnings)
+                 blueprints_json=blueprints_json, shared_job_warnings=shared_job_warnings, no_tabs=not selected_tabs)
 
 @app.route('/generate', methods=['POST'])
 def generate():
@@ -3202,7 +3202,8 @@ def _signature_note(signature):
 def _keep_signature_upload(upload, filepath, tabs):
     """Keeps the Signature Links file sent with a horizontal distribution file next to it (an older one is
     removed, so a re-scan without one doesn't use it). upload: the uploaded file, or a project's file path. With a Label Plugin tab, the tabs it describes come
-    ticked with their header rows filled in. Returns (user_inputs or None, error text or None)."""
+    with their header rows filled in, still unticked: the user ticks the tabs to use, as on Packing Sheets.
+    Returns (user_inputs or None, error text or None)."""
     path = _signature_path(filepath)
     if os.path.exists(path):
         os.remove(path)
@@ -3231,7 +3232,7 @@ def _keep_signature_upload(upload, filepath, tabs):
         t = plugin.get(tab)
         above = (t['first_row'] - 1 if t and t.get('first_row') else
                  max([r for r in (t.get('pack_group_row'), t.get('job_id_row')) if r] or [1]) if t else 1)
-        inputs[tab] = {'selected': bool(t), 'header_row': str(above)}
+        inputs[tab] = {'selected': False, 'header_row': str(above)}
     return inputs, None
 
 
@@ -3390,6 +3391,11 @@ def _distribution_page(mode):
             'selected': tab in selected_tabs,
             'header_row': request.form.get(f'header_row_{tab}', '1')
         }
+
+    # Tabs start unticked, so Auto-Map (or Generate) with none ticked says so instead of quietly showing nothing
+    if not selected_tabs and ('preview' in request.form or 'generate' in request.form):
+        log.info("%s %s: no tab ticked", 'Generate' if 'generate' in request.form else 'Preview', filename)
+        return show(tabs=all_tabs, filename=filename, user_inputs=user_inputs, no_tabs=True)
 
     # Action: Update Previews
     if 'preview' in request.form:

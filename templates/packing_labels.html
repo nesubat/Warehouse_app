@@ -254,7 +254,7 @@
             <div class="tab-card">
                 <label class="tab-title">
                     <input type="checkbox" name="selected_tabs" value="{{ tab }}" 
-                           {% if not user_inputs or user_inputs[tab].selected %}checked{% endif %}>
+                           {% if user_inputs and user_inputs[tab].selected %}checked{% endif %}>
                     Tab: {{ tab }}
                 </label>
                 
@@ -266,7 +266,8 @@
                 </div>
             </div>
             {% endfor %}
-            
+            {% if no_tabs %}<div class="warning-box">No tab is ticked: tick the tabs to read above, then click Auto-Map.</div>{% endif %}
+
             <button type="submit" name="preview" class="btn-full pl-btn-preview">Auto-Map</button>
 
             <!-- STEP 3: PREVIEW & GENERATE -->
