@@ -33,6 +33,9 @@ from engine.courier.packing_specs import SpecStore, parse_formula, likely_meant,
 from engine.courier.courier_import import read_allocation, scan_columns, mapping_fields, reference_in_sheets, PACK_FIELD, \
     FIELD_NAMES as IMPORT_FIELD_NAMES
 from engine.addresses import address_reference
+from engine.addresses.cloud_sync import CloudSync, SyncError
+from engine.addresses.collectors import (KYLE_COLOUR, PALETTE, STANDARD, CLIENT_COLOUR, RESERVED, name_key,
+                                         label_text as collector_label)
 from engine.core import data_transfer
 from engine.addresses.address_book import one_line as address_one_line
 from engine.packing_labels.label_stitcher import (read_courier_csv, courier_csv_names, address_changes, plan_stitch, render_stitch, match_session, packing_slots, StitchError, render_label,
@@ -40,7 +43,7 @@ from engine.packing_labels.label_stitcher import (read_courier_csv, courier_csv_
 import threading
 from collections import Counter
 import secrets
-from engine.courier.courier_export import (collect_note, unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
+from engine.courier.courier_export import (unique_codes, build_consignments, detect_series, write_label_map, one_line, DEFAULT_FIXED,
                             write_courier_csv, open360_item_references, clean_export, load_export_defaults,
                             save_export_defaults, EXPORT_DEFAULTS, open360_items, write_open360_csv,
                             source_destinations, sendable, fill_store_names,
@@ -167,6 +170,13 @@ def _help_url(url):
         url = f"https://{url}"
     return url if re.match(r'https?://[^\s"<>]+$', url, re.I) else ''
 
+
+# The shared address book (cloud_sync.py, docs/CENTRAL_ADDRESS_BOOK.md): on when .env has its address and key. It
+# reads ADDRESS_BOOK each time, so tests that swap the book swap it here too
+SYNC = CloudSync(lambda: ADDRESS_BOOK, os.environ.get('WAREHOUSE_SYNC_URL'), os.environ.get('WAREHOUSE_SYNC_KEY'),
+                 os.path.join(BASE_DIR, 'data', 'sync_settings.json'))
+if not SYNC.configured:
+    log_app.info("Shared address book: off - no WAREHOUSE_SYNC_URL / WAREHOUSE_SYNC_KEY in .env")
 
 HELP_URL = _help_url(os.environ.get('WAREHOUSE_HELP_URL'))
 # Said once at start (terminal and Logs page): whether the Help link is on, and why not. Never the address itself
@@ -2074,8 +2084,9 @@ def _book_options(pack_groups, edits):
       - an address with no name in it: who the book has at that address
       - a receiver with no address in the file: the receiver's saved addresses (up to 3)
       - a receiver whose Excel address isn't what the book has for them: the receiver's saved addresses (up to 2,
-        verified first), the same name or a near-identical spelling, so a store that moved or was spelt differently
-        shows its saved address with what differs marked
+        verified first), so a store that moved or was spelt differently shows its saved address with what differs marked
+    A street from the address book, verified or not, is offered only for the same store: the saved receiver has the
+    same name (capitals and punctuation aside), never just a similar one ('Macpac Rouse Hill' isn't 'ROUSE HILL').
     Excel addresses the user has already edited in this preview get none, nor do ones kept as is ('book_keep')."""
     sources = source_destinations(pack_groups)
     ask = [sid for sid in sources if not any(k in edits.get(sid, {}) for k in EDITABLE_FIELDS)
@@ -2085,7 +2096,8 @@ def _book_options(pack_groups, edits):
         learned = ADDRESS_BOOK.lookup_aliases(ask)
         for sid in ask:
             dest = sources[sid]
-            if sid in learned:
+            same_store = lambda e: _norm(e.get('receiver')) == _norm(dest['receiver'])  # noqa: E731
+            if sid in learned and (not dest['receiver'] or same_store(learned[sid])):
                 options[sid] = [(learned[sid], "Saved for this Excel spelling")]
             elif dest['postcode'] and not dest['receiver']:
                 here = ADDRESS_BOOK.at_address(dest)
@@ -2094,7 +2106,7 @@ def _book_options(pack_groups, edits):
             elif dest['postcode'] and dest['receiver']:
                 # The receiver is saved, at another address (or this one spelt differently): offer theirs, unless
                 # the book already holds this exact address for them
-                saved = ADDRESS_BOOK.receiver_entries(dest['receiver'])
+                saved = [e for e in ADDRESS_BOOK.receiver_entries(dest['receiver']) if same_store(e)]
                 if saved and not any(_same_place(e, dest) for e in saved):
                     seen, found = set(), []
                     for e in saved:
@@ -2135,7 +2147,9 @@ def _unfixed_preview_problems(consignments, refs):
     for c in consignments:
         d = c['destination']
         problems = []
-        if c.get('no_address'):
+        if c['collection']['on']:
+            pass  # collected from the warehouse: no address needed
+        elif c.get('no_address'):
             problems.append("No address: left out of the courier CSV")
         else:
             au = (d.get('country') or 'AU').upper() == 'AU'
@@ -2277,6 +2291,45 @@ def _locality_hints(dest, ref):
 
 
 
+def _verified_place(suburb, state, country):
+    """build_consignments' verified_place: the postcode (and state) the courier-verified addresses settle, or None."""
+    try:
+        return ADDRESS_BOOK.verified_place(suburb, state, country)
+    except Exception as e:  # the book can't be read: the file's postcode stays, and the official data checks it
+        log_book.warning("Verified postcode lookup failed for %s %s: %s", suburb, state, e)
+        return None
+
+
+def _verified_choices(dest):
+    """One-click choices when the verified addresses don't settle a suburb: they give it different postcodes, or
+    have it only in another state. [hint with 'fields': {'state', 'postcode'}], at most 4."""
+    try:
+        places = ADDRESS_BOOK.verified_places(dest.get('suburb'), dest.get('country') or 'AU')
+    except Exception as e:
+        log_book.warning("Verified places lookup failed for %s: %s", one_line(dest), e)
+        return []
+    have = ((dest.get('state') or '').upper(), dest.get('postcode') or '')
+    out = []
+    for p in places[:4]:
+        if (p['state'], p['postcode']) == have:
+            continue
+        out.append({'field': 'postcode', 'value': p['postcode'], 'fields': {'state': p['state'], 'postcode': p['postcode']},
+                    'label': f"{dest.get('suburb', '').upper()} {p['state']} {p['postcode']}".strip(),
+                    'why': f"in {p['verified']} verified address{'es' if p['verified'] != 1 else ''}", 'verified': True})
+    return out
+
+
+def _collectors_for_page():
+    """The preview's "Collect from warehouse" data: {'saved': [{'name', 'key', 'fill', 'ink'}], 'palette': [...]}."""
+    try:
+        saved = [{k: c[k] for k in ('name', 'key', 'fill', 'ink')} for c in ADDRESS_BOOK.collectors()]
+    except Exception as e:
+        log_book.warning("Couldn't read who collects: %s", e)
+        saved = []
+    return {'saved': saved, 'palette': PALETTE, 'kyle': KYLE_COLOUR, 'standard': STANDARD, 'client': CLIENT_COLOUR,
+            'reserved': sorted(RESERVED)}
+
+
 SUGGESTION_FIELDS = EDITABLE_FIELDS + ('authority_to_leave',)
 
 
@@ -2292,14 +2345,19 @@ def _same_place(a, b):
     return _address_key(one_line(pick(a))) == _address_key(one_line(pick(b)))
 
 
-def _reference_for(dest, edit=None, here=None):
+def _reference_for(dest, edit=None, here=None, postcode_from=None, collected=False):
     """What the official address data says about a consignment address, after the address book has had its say:
-      verified  an address-book entry here was verified by the courier portal: nothing more is checked
+      verified  an address-book entry here was verified by the courier portal, or its postcode was put in from the
+                verified addresses (postcode_from, build_consignments): nothing more is checked
       kept      the user chose to keep this exact address as is (in this preview, or before in the book)
       ok / note / mismatch / none   address_reference.assess(), with 'soft' when the address is saved in the book
-                (not verified): the official data's view is then only a note, the book's address may well be right"""
-    if not address_reference.available() or not any(dest.get(k) for k in ('postcode', 'suburb', 'line1', 'line2')):
+                (not verified): the official data's view is then only a note, the book's address may well be right
+    collected: packs collected from the warehouse: nothing is sent, nothing checked ('none')."""
+    if collected or not address_reference.available() or not any(dest.get(k) for k in ('postcode', 'suburb', 'line1', 'line2')):
         return {'level': 'none', 'message': '', 'fields': {}, 'options': []}
+    if postcode_from:
+        return {'level': 'verified', 'fields': {}, 'options': [],
+                'message': f"Postcode {postcode_from[1]} from your verified addresses in {dest.get('suburb', '')}"}
     try:
         here = ADDRESS_BOOK.at_address(dest) if here is None else here
     except Exception as e:
@@ -2350,6 +2408,9 @@ def _check_against_book(consignments, edits, book_options=None):
             c['suggestions'] = _closest(d, cache)
         except Exception as e:
             log_book.exception("Address book suggestions failed for #%s: %s", c.get('number'), e)
+        if c['collection']['on']:
+            c['book'] = 'collect'  # collected from the warehouse: nothing is sent, so nothing to check
+            continue
         if c.get('no_address'):
             c['book'] = 'missing'
             continue
@@ -2380,13 +2441,23 @@ def _check_against_book(consignments, edits, book_options=None):
         # A row with no postcode (no complete address yet) is checked too: what it has (a suburb and state, or an
         # address line with the suburb in it) is often all the official data needs to offer the rest in one click
         # ('No postcode: WILEY PARK NSW is 2195'), with no address book entry needed.
-        # Packs collected rather than sent ('Kyle collect from warehouse') have no address to check: a note on the label
-        c['collect'] = collect_note(c['destination'].get('raw') or one_line(c['destination'])) if c.get('no_address') else ''
-        c['ref'] = ({'level': 'none', 'message': '', 'fields': {}, 'options': []} if c['collect']
-                    else _reference_for(c['destination'], edits.get(c['id'], {})))
+        # Packs collected rather than sent (the "Collect from warehouse" box) have no address to check: a note on the
+        # label. A postcode put in from the verified addresses settles it: the official data isn't asked.
+        c['ref'] = _reference_for(c['destination'], edits.get(c['id'], {}), postcode_from=c.get('postcode_from'),
+                                  collected=c['collection']['on'])
         # What the saved addresses say about its suburb: only fields left empty or the official data can't check
         # (a row with no postcode included: its suburb may be all it needs to be completed)
         c['locality_hints'] = [] if c['ref']['level'] == 'verified' else _locality_hints(c['destination'], c['ref'])
+        if not c.get('postcode_from') and not c['collection']['on'] and c['destination'].get('suburb'):
+            # Verified addresses that give this suburb more than one postcode (or another state): each one a click
+            choices = _verified_choices(c['destination'])
+            if choices:
+                c['locality_hints'] = choices + [h for h in c['locality_hints'] if h['field'] not in ('state', 'postcode')]
+        # Book first: the same store's saved address is offered; the official data's street suggestions only when the
+        # book has none for it. Held back, not lost: "Keep as is" on the book's address brings them up (script.js)
+        c['ref_held'] = None
+        if c['book_options'] and c['ref']['level'] == 'note' and not c['ref'].get('soft'):
+            c['ref_held'], c['ref'] = c['ref'], {'level': 'none', 'message': '', 'fields': {}, 'options': []}
     if address_reference.available():
         levels = Counter(c['ref']['level'] + ('-saved' if c['ref'].get('soft') else '') for c in consignments)
         log_book.info("  official address data: %s in %.2fs", ", ".join(f"{k} {v}" for k, v in sorted(levels.items())),
@@ -2488,7 +2559,49 @@ def packing_specs_page():
 
 @app.route('/address-book')
 def address_book_page():
-    return render_template('address_book.html', total=ADDRESS_BOOK.count())
+    return render_template('address_book.html', total=ADDRESS_BOOK.count(), collectors=ADDRESS_BOOK.collectors(),
+                           shared=SYNC.configured, shared_name=SYNC.user_name() if SYNC.configured else '')
+
+
+# ---------- the shared address book (cloud_sync.py) ----------
+# Status is read-only; the name and Sync now are POSTs, guarded by same_origin_only.
+
+@app.route('/api/shared-book/status')
+def api_shared_book_status():
+    try:
+        return SYNC.status()
+    except Exception as e:
+        log_book.warning("Shared address book status: %s", e)
+        return {'configured': SYNC.configured, 'error': str(e)}
+
+
+@app.route('/api/shared-book/name', methods=['POST'])
+def api_shared_book_name():
+    try:
+        name = SYNC.set_user_name((request.get_json(silent=True) or {}).get('name'))
+    except ValueError as e:
+        return {'error': str(e)}, 400
+    return {'user_name': name}
+
+
+@app.route('/api/shared-book/sync', methods=['POST'])
+def api_shared_book_sync():
+    try:
+        done = SYNC.sync_now()
+    except SyncError as e:
+        return {'error': str(e), **SYNC.status()}, 502
+    return {**done, **SYNC.status()}
+
+
+@app.route('/api/collectors/delete', methods=['POST'])
+def api_collector_delete():
+    """Removes a name from who collects (a typo, someone who left): its colour is free for the next new name.
+    Kyle stays. A POST, so same_origin_only guards it."""
+    key = str((request.get_json(silent=True) or {}).get('key') or '')
+    if ADDRESS_BOOK.delete_collector(key):
+        log_book.info("Collector %r removed", key)
+        return {'ok': True}
+    return {'error': "That name can't be removed."}, 400
 
 
 # --- BACK UP OR MOVE THE APP'S DATA (data_transfer.py) ---
@@ -2993,8 +3106,8 @@ def _signature_note(signature):
 
 def _keep_signature_upload(upload, filepath, tabs):
     """Keeps the Signature Links file sent with a horizontal distribution file next to it (an older one is
-    removed, so a re-scan without one doesn't use it). upload: the uploaded file, or a project's file path. With a Label Plugin tab, the tabs it describes come
-    ticked with their header rows filled in. Returns (user_inputs or None, error text or None)."""
+    removed, so a re-scan without one doesn't use it). upload: the uploaded file, or a project's file path. With a Label Plugin tab, the tabs it describes get
+    their header rows filled in (left unticked, as every tab is). Returns (user_inputs or None, error text or None)."""
     path = _signature_path(filepath)
     if os.path.exists(path):
         os.remove(path)
@@ -3023,7 +3136,8 @@ def _keep_signature_upload(upload, filepath, tabs):
         t = plugin.get(tab)
         above = (t['first_row'] - 1 if t and t.get('first_row') else
                  max([r for r in (t.get('pack_group_row'), t.get('job_id_row')) if r] or [1]) if t else 1)
-        inputs[tab] = {'selected': bool(t), 'header_row': str(above)}
+        # Header rows filled in from the Label Plugin; every tab starts unticked, as in every tool: the user picks them
+        inputs[tab] = {'selected': False, 'header_row': str(above)}
     return inputs, None
 
 
@@ -3141,6 +3255,9 @@ def _distribution_page(mode):
 
     # Action: Update Previews
     if 'preview' in request.form:
+        # The shared address book's latest, if the last pull is over a minute old: a few seconds at most, then the
+        # preview goes on with this computer's copy
+        SYNC.pull_if_stale()
         log.info("Preview %s: tabs %s", filename, selected_tabs)
         started = time.perf_counter()
         # The upload may be open in Excel (the Open button): changes not saved yet are saved first, so the preview
@@ -3222,7 +3339,7 @@ def _distribution_page(mode):
                      **{k: request.form[k] for k in ('who_pays', 'charge_account', 'service_code', 'reference') if k in request.form}}
             weights = _carton_weights(request.form)
             consignments, cartons, courier_warnings = build_consignments(combined, edits, fixed['service_code'],
-                                                                         SPEC_STORE.resolver(), weights)
+                                                                         SPEC_STORE.resolver(), weights, _verified_place)
             if courier_mode:
                 _import_item_refs(cartons, combined)
             kept_apart = {sid for sid, e in edits.items() if isinstance(e, dict) and e.get('separate')}
@@ -3260,8 +3377,11 @@ def _distribution_page(mode):
                                                  or f"{c['original']['receiver']} (no address in the file)",
                                   'original_json': json.dumps({k: c['original'][k] for k in EDITABLE_FIELDS + ('authority_to_leave',)})}
                                  for c in consignments],
-                'states': sorted({c['destination']['state'] for c in consignments if c['destination']['state']}),
                 'carton_count': len(cartons),
+                # "Collect from warehouse": the saved names and their colours, and the colours a new name can get, so
+                # the page shows a typed name's colour straight away (script.js section 30, collectors.assign)
+                'collectors': _collectors_for_page(),
+                'collected': sum(1 for c in consignments if c['collection']['on']),
                 'weights_json': json.dumps(weights),
                 'spec_gaps': any(x['spec_kind'] in ('unknown', 'incomplete') for x in cartons),
                 'unverified': sum(c['book'] == 'unverified' for c in consignments),
@@ -3376,7 +3496,7 @@ def _distribution_page(mode):
             reference = request.form.get('reference', '').strip() or detect_series(combined_pack_groups)[0]
             consignments, cartons, courier_warnings = build_consignments(combined_pack_groups, _consignment_edits(request.form),
                                                                          fixed['service_code'], SPEC_STORE.resolver(),
-                                                                         _carton_weights(request.form))
+                                                                         _carton_weights(request.form), _verified_place)
             if courier_mode:
                 _import_item_refs(cartons, combined_pack_groups)
             all_consignments, all_cartons = consignments, cartons
@@ -3430,18 +3550,31 @@ def _distribution_page(mode):
                 # Each label shows who and where its consignment goes (after address-book fills and ✏️ edits),
                 # exactly as in the preview, not the raw Excel text. Every pack gets its label, sent or not.
                 by_number = {c['number']: c for c in all_consignments}
+                # Who collects from the warehouse: new names are saved with their colour, so the next project's labels
+                # show the same colour for the same person (collectors.py)
+                collected = [c for c in all_consignments if c['collection']['on']]
+                try:
+                    colours = ADDRESS_BOOK.remember_collectors([c['collection']['name'] for c in collected])
+                except Exception as e:  # a label in Kyle's yellow is better than no labels: said in the log
+                    log_book.exception("Couldn't save who collects: %s", e)
+                    colours = {}
                 label_addresses = {}
                 for x in all_cartons:
                     c = by_number[x['consignment']]
                     d = c['destination']
+                    col = c['collection']
+                    colour = colours.get(name_key(col['name'])) or (KYLE_COLOUR if not col['name'] else {})
                     label_addresses[x['pack_key']] = {'address': one_line(d), 'receiver': d['receiver'], 'contact': d['contact'],
-                                                      'sent': not c.get('no_address'),
-                                                      # 'KYLE TO COLLECT': collected, not sent (its courier region says so)
-                                                      'collect': collect_note(d.get('raw') or one_line(d)) if c.get('no_address') else ''}
+                                                      'sent': not c.get('no_address') and not col['on'],
+                                                      # 'KYLE TO COLLECT': collected, not sent (its courier region says so,
+                                                      # filled with that person's colour)
+                                                      'collect': collector_label(col['name']) if col['on'] else '',
+                                                      'collect_colour': colour if col['on'] else None}
                 shipment_reference = reference  # the Open360 Shipment Reference is the Consignment Reference
                 ref_issues = []
                 edits_now = _consignment_edits(request.form)
-                refs = {c['number']: _reference_for(c['destination'], edits_now.get(c['id'], {}))
+                refs = {c['number']: _reference_for(c['destination'], edits_now.get(c['id'], {}), postcode_from=c.get('postcode_from'),
+                                                    collected=c['collection']['on'])
                         for c in all_consignments if not c.get('no_address')}
                 for c in consignments:
                     r = refs[c['number']]
@@ -3642,6 +3775,9 @@ if __name__ == '__main__':
     # The Flask debugger runs any code typed into its error page: only on request (set WAREHOUSE_DEBUG=1), never in
     # the .exe, and never reachable from another computer (no host= here: 127.0.0.1 only)
     debug = os.environ.get('WAREHOUSE_DEBUG') == '1' and not getattr(sys, 'frozen', False)
+    # The shared address book syncs in the background (only in the server, not the debug watcher)
+    if not debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        SYNC.start()
     app.run(debug=debug, port=PORT)
 
     

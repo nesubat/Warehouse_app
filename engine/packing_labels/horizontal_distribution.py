@@ -33,7 +33,7 @@ from openpyxl.utils.cell import column_index_from_string
 from engine.packing_labels.packing_label_generator import (extract_rich_value_images, _floating_image_cell, _issue, _row_ranges, _norm,
                                                             with_stores,
                                      is_install_flag, PackCheckError, ADDRESS_FIELDS, _header_field,
-                                     dim_part, dim_unit, join_dimensions)
+                                     dim_part, dim_unit, join_dimensions, DIMENSION_WORDS, ARTWORK_WORDS)
 from engine.courier.courier_import import (detect_import_columns, detect_pack_columns, apply_choices, _merged_spans, _header_cells,
                             NO_PACK, TOTAL_ROW)
 from engine.courier.courier_export import attn_text
@@ -47,10 +47,10 @@ CODE_HEADER = re.compile(r'^\s*code\s+for\s+(.+?)\s*$', re.I)
 SUB_RANGE = re.compile(r'^(.*?):\s*(\d+\s*-\s*\d+)$')
 ROW_LABELS = (  # label text left of the items, above the header -> item field
     ('desc', r'desc|item\s*name|^item$|^name$'),
-    ('dimension', r'size|dimension|dims'),
+    ('dimension', DIMENSION_WORDS),  # the same words as vertical headers (packing_label_generator)
     ('material', r'material|substrate'),
     ('notes', r'note|comment'),
-    ('thumbnail', r'art\s*work|image|thumb|visual|picture'),
+    ('thumbnail', ARTWORK_WORDS),
     ('pack_spec', r'pack(ing)?\s*spec|carton|box\s*type'),
 )
 

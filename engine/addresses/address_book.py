@@ -6,6 +6,8 @@ Stored in one SQLite file (data/address_book.db):
   addresses_fts  full-text index over the address fields (kept in sync by triggers) for instant search
   aliases        raw address spellings seen in Excel -> the address they were saved as, so the next file
                  with the same messy spelling gets the clean (possibly hand-corrected) address
+  collectors     who collects packs from the warehouse and the colour of their labels' courier region (collectors.py):
+                 a name keeps its colour in every project; Kyle's red on yellow is his alone
 
 SQLite was chosen because it needs no server, ships with Python, keeps memory low (only queried rows are
 loaded) and stays fast at hundreds of thousands of rows. Everything goes through the AddressBook class, so
@@ -18,6 +20,7 @@ import sqlite3
 import threading
 import time
 
+from engine.addresses.collectors import HEX, KYLE, KYLE_COLOUR, RESERVED, assign, clean_name, name_key, standard_colour
 from engine.packing_labels.packing_label_generator import _address_key, _norm, normalize_postcode
 
 FIELDS = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave')
@@ -64,7 +67,7 @@ CREATE TRIGGER IF NOT EXISTS addresses_ad AFTER DELETE ON addresses BEGIN
     INSERT INTO addresses_fts(addresses_fts, rowid, receiver, contact, line1, line2, suburb, state, postcode)
     VALUES ('delete', old.id, old.receiver, old.contact, old.line1, old.line2, old.suburb, old.state, old.postcode);
 END;
-CREATE TRIGGER IF NOT EXISTS addresses_au AFTER UPDATE ON addresses BEGIN
+CREATE TRIGGER IF NOT EXISTS addresses_au AFTER UPDATE OF receiver, contact, line1, line2, suburb, state, postcode ON addresses BEGIN
     INSERT INTO addresses_fts(addresses_fts, rowid, receiver, contact, line1, line2, suburb, state, postcode)
     VALUES ('delete', old.id, old.receiver, old.contact, old.line1, old.line2, old.suburb, old.state, old.postcode);
     INSERT INTO addresses_fts(rowid, receiver, contact, line1, line2, suburb, state, postcode)
@@ -76,6 +79,17 @@ CREATE TABLE IF NOT EXISTS aliases (
     address_id INTEGER NOT NULL REFERENCES addresses(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS aliases_address ON aliases (address_id);
+
+CREATE TABLE IF NOT EXISTS collectors (
+    name_key     TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    fill         TEXT NOT NULL,
+    ink          TEXT NOT NULL,
+    use_count    INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL,
+    last_used_at REAL
+);
 """
 
 
@@ -151,11 +165,17 @@ class AddressBook:
                 if column not in have:
                     db.execute(f"ALTER TABLE addresses ADD COLUMN {column} {kind}")
         self._add_contact_key()
+        self._sync_setup()
         with self._connect() as db:
             self._pad_short_postcodes(db)
             # Suburbs are kept in capitals; entries saved before that are upper-cased (matching ignores case,
             # so keys and learned spellings are unchanged)
             db.execute("UPDATE addresses SET suburb = UPPER(suburb) WHERE suburb != UPPER(suburb)")
+            # Kyle is always there; the standard colours (Kyle, Gessie, 'client') are theirs alone (collectors.py)
+            now = time.time()
+            db.execute("INSERT OR IGNORE INTO collectors (name_key, name, fill, ink, created_at, updated_at) "
+                       "VALUES (?, 'Kyle', ?, ?, ?, ?)", (KYLE, KYLE_COLOUR['fill'], KYLE_COLOUR['ink'], now, now))
+            self._standard_colours(db)
 
     # One connection per thread: Flask serves requests on several threads, and WAL mode lets
     # searches run while a Generate is writing.
@@ -198,6 +218,71 @@ class AddressBook:
                 db.execute("INSERT INTO addresses_fts(addresses_fts) VALUES ('rebuild')")
         finally:
             db.execute("PRAGMA foreign_keys=ON")
+
+    def _sync_setup(self):
+        """What the shared address book needs (cloud_sync.py), added to any book:
+          gid         the entry's id in every computer's book and the shared one (made here for entries without one)
+          dirty       changed here and not pushed yet; changed_at: when (the latest change wins between computers)
+          tombstones  entries deleted on this computer: a pull doesn't bring them back (deleting is local only)
+          sync_quiet  a row while a pull writes, so the triggers don't take those writes for changes made here
+        The triggers flag only real changes: a Generate re-saving an address as it was isn't one, or every Generate
+        would push old copies over newer ones from other computers."""
+        db = self._connect()
+        have = {c[1] for c in db.execute("PRAGMA table_info(addresses)")}
+        alias_cols = {c[1] for c in db.execute("PRAGMA table_info(aliases)")}
+        now_sql = "((julianday('now') - 2440587.5) * 86400.0)"
+        watched = ('receiver', 'contact', 'line1', 'line2', 'suburb', 'state', 'postcode', 'country', 'authority_to_leave',
+                   'verified_at')
+        changed = " OR ".join(f"OLD.{c} IS NOT NEW.{c}" for c in watched)
+        # The search index's update trigger: only when a searched field changes. The sync columns change in triggers
+        # of their own, and a search update fired from those (before the index has the new row) corrupts the index
+        au = db.execute("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'addresses_au'").fetchone()
+        if au and 'UPDATE OF' not in au[0]:
+            with db:
+                db.execute("DROP TRIGGER addresses_au")
+                db.executescript(SCHEMA[SCHEMA.index("CREATE TRIGGER IF NOT EXISTS addresses_au"):SCHEMA.index("END;", SCHEMA.index(
+                    "CREATE TRIGGER IF NOT EXISTS addresses_au")) + 4])
+        with db:
+            for column, kind in (('gid', 'TEXT'), ('dirty', 'INTEGER NOT NULL DEFAULT 0'), ('changed_at', 'REAL')):
+                if column not in have:
+                    db.execute(f"ALTER TABLE addresses ADD COLUMN {column} {kind}")
+            for column, kind in (('dirty', 'INTEGER NOT NULL DEFAULT 0'), ('changed_at', 'REAL')):
+                if column not in alias_cols:
+                    db.execute(f"ALTER TABLE aliases ADD COLUMN {column} {kind}")
+            if 'dirty' not in alias_cols:  # spellings learned before syncing existed: shared on the first push
+                db.execute(f"UPDATE aliases SET dirty = 1, changed_at = {now_sql}")
+            # Entries from before syncing: each gets its id, and goes up on the first push (the first sync merges
+            # every computer's book into the shared one: matching entries become one)
+            db.execute("UPDATE addresses SET gid = lower(hex(randomblob(16))), dirty = 1, "
+                       "changed_at = COALESCE(changed_at, updated_at, created_at) WHERE gid IS NULL")
+            db.executescript(f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS addresses_gid ON addresses (gid);
+                CREATE INDEX IF NOT EXISTS addresses_dirty ON addresses (dirty) WHERE dirty = 1;
+                CREATE TABLE IF NOT EXISTS sync_quiet (on_ INTEGER);
+                CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS tombstones (gid TEXT PRIMARY KEY, deleted_at REAL NOT NULL);
+                CREATE TRIGGER IF NOT EXISTS addresses_sync_ins AFTER INSERT ON addresses
+                    WHEN NOT EXISTS (SELECT 1 FROM sync_quiet) BEGIN
+                    UPDATE addresses SET gid = COALESCE(NEW.gid, lower(hex(randomblob(16)))), dirty = 1,
+                        changed_at = {now_sql} WHERE id = NEW.id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS addresses_sync_upd AFTER UPDATE ON addresses
+                    WHEN NOT EXISTS (SELECT 1 FROM sync_quiet) AND ({changed}) BEGIN
+                    UPDATE addresses SET dirty = 1, changed_at = {now_sql} WHERE id = NEW.id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS addresses_sync_del AFTER DELETE ON addresses
+                    WHEN NOT EXISTS (SELECT 1 FROM sync_quiet) AND OLD.gid IS NOT NULL BEGIN
+                    INSERT OR REPLACE INTO tombstones (gid, deleted_at) VALUES (OLD.gid, {now_sql});
+                END;
+                CREATE TRIGGER IF NOT EXISTS aliases_sync_ins AFTER INSERT ON aliases
+                    WHEN NOT EXISTS (SELECT 1 FROM sync_quiet) BEGIN
+                    UPDATE aliases SET dirty = 1, changed_at = {now_sql} WHERE source_key = NEW.source_key;
+                END;
+                CREATE TRIGGER IF NOT EXISTS aliases_sync_upd AFTER UPDATE OF address_id ON aliases
+                    WHEN NOT EXISTS (SELECT 1 FROM sync_quiet) AND OLD.address_id IS NOT NEW.address_id BEGIN
+                    UPDATE aliases SET dirty = 1, changed_at = {now_sql} WHERE source_key = NEW.source_key;
+                END;
+            """)
 
     @staticmethod
     def _pad_short_postcodes(db):
@@ -399,6 +484,85 @@ class AddressBook:
                " GROUP BY suburb, state, country ORDER BY verified DESC, entries DESC LIMIT 10")
         args = (str(postcode or '').strip(),) + ((country,) if country else ())
         return [dict(r) for r in self._connect().execute(sql, args).fetchall()]
+
+    def verified_places(self, suburb, country='AU'):
+        """[{'state', 'postcode', 'verified'}] the courier-verified addresses give this suburb, most verified first."""
+        sub = str(suburb or '').strip().upper()
+        if not sub:
+            return []
+        rows = self._connect().execute(
+            "SELECT state, postcode, COUNT(*) AS verified FROM addresses WHERE suburb = ? AND postcode != '' "
+            "AND verified_at IS NOT NULL AND country = ? GROUP BY state, postcode ORDER BY verified DESC, state, postcode",
+            (sub, str(country or '').strip().upper() or 'AU')).fetchall()
+        return [dict(r) for r in rows]
+
+    def verified_place(self, suburb, state='', country='AU'):
+        """{'postcode', 'state'} the verified addresses settle for this suburb, or None: verified addresses are the last
+        word ('BRISBANE' verified as QLD 4001 -> every BRISBANE gets 4001, and QLD when it has no state).
+          - with a state: that state's verified addresses in the suburb, when they all have one postcode
+          - with no state: when every verified address in the suburb has the same state and postcode
+        Verified addresses with different postcodes, or only in another state (there's a RICHMOND in four states),
+        settle nothing: the preview offers them as one-click choices instead (verified_places)."""
+        rows = self.verified_places(suburb, country)
+        st = str(state or '').strip().upper()
+        if st:
+            rows = [r for r in rows if r['state'] == st]
+        places = {(r['state'], r['postcode']) for r in rows}
+        if len(places) != 1:
+            return None
+        found_state, postcode = places.pop()
+        return {'postcode': postcode, 'state': st or found_state}
+
+    # ---------- who collects from the warehouse (collectors.py) ----------
+
+    @staticmethod
+    def _standard_colours(db):
+        """Standard names get their standard colour; any other name holding one of those colours loses its entry (it's
+        given a colour of its own again the next time it's used)."""
+        for r in db.execute("SELECT name_key, fill FROM collectors").fetchall():
+            std = standard_colour(r['name_key'])
+            if std:
+                db.execute("UPDATE collectors SET fill = ?, ink = ? WHERE name_key = ?", (std['fill'], std['ink'], r['name_key']))
+            elif r['fill'] in RESERVED:
+                db.execute("DELETE FROM collectors WHERE name_key = ?", (r['name_key'],))
+
+    def collectors(self):
+        """[{'name', 'key', 'fill', 'ink', 'use_count', 'last_used_at'}], Kyle first, then the most used."""
+        rows = self._connect().execute(
+            "SELECT * FROM collectors ORDER BY name_key != ?, use_count DESC, name", (KYLE,)).fetchall()
+        # Colours go into the pages' styles: only '#RRGGBB' ever leaves here (a hand-edited or synced row can't inject)
+        safe = lambda v, d: v.upper() if HEX.match(str(v or '').upper()) else d  # noqa: E731
+        return [{'name': r['name'], 'key': r['name_key'], 'fill': safe(r['fill'], '#D5DBDF'), 'ink': safe(r['ink'], '#1C2B33'),
+                 'use_count': r['use_count'], 'last_used_at': r['last_used_at']} for r in rows]
+
+    def collector_colours(self, names):
+        """{name key: {'fill', 'ink'}} for these names: a saved name's own colour; a new name the colour it will be
+        saved with (collectors.assign), without saving it."""
+        saved = {c['key']: {'fill': c['fill'], 'ink': c['ink']} for c in self.collectors()}
+        return assign(names, saved)
+
+    def remember_collectors(self, names):
+        """Saves new names with their colours and counts one more use of each (on Generate). Returns
+        collector_colours(names), the colours the labels were drawn with."""
+        names = [clean_name(n) for n in names if name_key(n)]
+        colours = self.collector_colours(names)
+        now = time.time()
+        with self._connect() as db:
+            for name in dict.fromkeys(names):
+                key, colour = name_key(name), colours[name_key(name)]
+                db.execute("INSERT INTO collectors (name_key, name, fill, ink, use_count, created_at, updated_at, last_used_at) "
+                           "VALUES (?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(name_key) DO UPDATE SET "
+                           "use_count = use_count + 1, last_used_at = excluded.last_used_at",
+                           (key, name, colour['fill'], colour['ink'], now, now, now))
+            self._standard_colours(db)
+        return colours
+
+    def delete_collector(self, key):
+        """Removes a name (a typo, someone who left). Kyle stays. Its colour becomes free for the next new name."""
+        if not key or key == KYLE:
+            return False
+        with self._connect() as db:
+            return db.execute("DELETE FROM collectors WHERE name_key = ?", (key,)).rowcount > 0
 
     def localities_starting(self, text, limit=8):
         """Suburbs saved in the book that start like this ('frank' -> FRANKTON NZ 9300), for typing suggestions."""

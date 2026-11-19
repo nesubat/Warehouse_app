@@ -59,7 +59,7 @@
         <div class="tab-card">
             <label class="tab-title">
                 <input type="checkbox" name="selected_tabs" value="{{ tab }}" 
-                       {% if not user_inputs or user_inputs[tab].selected %}checked{% endif %}>
+                       {% if user_inputs and user_inputs[tab] and user_inputs[tab].selected %}checked{% endif %}>
                 Tab: {{ tab }}
             </label>
             

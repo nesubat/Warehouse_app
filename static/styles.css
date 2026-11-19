@@ -1431,7 +1431,6 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 /* Consignments with no address (receiver name only): listed first, red */
 .pl-page .pl-missing-note { background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; padding: 10px 12px; margin: 14px 0 0; font-size: 13px; color: #922b21; }
 .pl-page .pl-tag-missing { border-color: #e74c3c; color: #c0392b; background: #fdedec; margin-left: 4px; }
-.pl-page .pl-tag-collect { border-color: #c0392b; color: #c0392b; background: #fff2a8; margin-left: 4px; font-weight: 600; }
 .pl-page .pl-con-row.pl-no-address > td { background: #fef5f4; }
 .pl-page .pl-con-row.pl-no-address > td:first-child { box-shadow: inset 4px 0 0 #e74c3c; }
 .pl-page .pl-no-address-text { color: #c0392b; font-style: italic; }
@@ -2180,3 +2179,73 @@ a.ab-btn { display: inline-block; text-decoration: none; }
 .lg-focus-note { margin: 0 0 16px; padding: 12px 16px; background: #fdedec; border: 1px solid #f5b7b1; border-radius: 6px; color: #78281f; }
 .lg-focus-note p { margin: 0 0 8px; }
 .lg-item.lg-focus { box-shadow: 0 0 0 3px #e74c3c; scroll-margin-top: 90px; }
+
+/* Consignment filters like Excel's (script.js section 30): a button that opens a list of tick boxes */
+.pl-page .pl-xf { position: relative; }
+.pl-page .pl-xf-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: bold; color: #7f8c8d; text-transform: uppercase; letter-spacing: 0.5px; }
+.pl-page .pl-xf-btn { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 130px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; background: #fff; font-size: 15px; color: #2c3e50; cursor: pointer; }
+.pl-page .pl-xf-btn:hover { border-color: #95a5a6; }
+.pl-page .pl-xf-btn:focus-visible { outline: 2px solid #3498db; outline-offset: 1px; }
+.pl-page .pl-xf-caret { color: #7f8c8d; font-size: 12px; transition: transform .15s ease; }
+.pl-page .pl-xf-btn[aria-expanded="true"] .pl-xf-caret { transform: rotate(180deg); }
+.pl-page .pl-xf-active .pl-xf-btn { border-color: #2980b9; background: #eaf4fc; color: #1f6391; font-weight: 600; }
+.pl-page .pl-xf-active .pl-xf-label { color: #2980b9; }
+.pl-page .pl-xf-pop { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; width: 260px; max-width: calc(100vw - 32px); background: #fff; border: 1px solid #bdc3c7; border-radius: 6px; box-shadow: 0 8px 24px rgba(44, 62, 80, .18); padding: 8px; animation: pl-xf-in .12s ease-out; }
+@keyframes pl-xf-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.pl-page .pl-xf-search { width: 100%; box-sizing: border-box; padding: 7px 9px; margin-bottom: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.pl-page .pl-xf-list { max-height: 260px; overflow-y: auto; border: 1px solid #ecf0f1; border-radius: 4px; padding: 4px 0; }
+.pl-page .pl-xf .pl-xf-option { display: flex; align-items: center; gap: 8px; margin: 0; padding: 5px 8px; font-size: 14px; font-weight: 400; letter-spacing: 0; text-transform: none; color: #2c3e50; cursor: pointer; user-select: none; }
+.pl-page .pl-xf-option:hover { background: #f4f8fb; }
+.pl-page .pl-xf-option input { margin: 0; width: 15px; height: 15px; flex: none; cursor: pointer; }
+.pl-page .pl-xf-option span:first-of-type { flex: 1; }
+.pl-page .pl-xf .pl-xf-all { border-bottom: 1px solid #ecf0f1; font-weight: 600; margin-bottom: 2px; }
+.pl-page .pl-xf-count { color: #95a5a6; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pl-page .pl-xf-none { margin: 6px 8px; color: #95a5a6; font-size: 13px; }
+.pl-page .pl-xf-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.pl-page .pl-xf-foot button:disabled { opacity: .5; cursor: default; }
+
+/* Collect from warehouse (script.js section 30): the tick box on every consignment and, ticked, who collects with a
+   small copy of the label's courier region in that person's colour */
+.pl-page .pl-collect { margin-top: 6px; }
+.pl-page .pl-collect-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; font-weight: 400; text-transform: none; letter-spacing: 0; color: #7f8c8d; cursor: pointer; user-select: none; }
+.pl-page .pl-collect-toggle input { margin: 0; width: 14px; height: 14px; cursor: pointer; }
+.pl-page .pl-collect-on .pl-collect-toggle { color: #2c3e50; font-weight: 600; }
+.pl-page .pl-collect-who { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; animation: pl-xf-in .15s ease-out; }
+.pl-page .pl-collect-name { width: 100%; max-width: 220px; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+.pl-page .pl-collect-name:focus { outline: 2px solid #3498db; outline-offset: 0; border-color: #3498db; }
+.pl-page .pl-collect-region { --collect-fill: #FFEB40; --collect-ink: #CC0000; position: relative; max-width: 220px; box-sizing: border-box; padding: 8px 10px; border: 2px solid var(--collect-ink); border-radius: 4px; background: var(--collect-fill); color: var(--collect-ink); font-weight: 800; font-size: 13px; letter-spacing: .02em; text-align: center; transition: background-color .2s ease, color .2s ease, border-color .2s ease; }
+.pl-page .pl-collect-new { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px; background: rgba(255, 255, 255, .7); color: #2c3e50; font-size: 10px; font-weight: 600; letter-spacing: 0; vertical-align: middle; }
+/* A collected consignment: its address and items are kept, but quieter (nothing is sent), and the address checks
+   and "New address" are put away: nothing goes to the courier or the address book */
+.pl-page .pl-collected .pl-ref, .pl-page .pl-collected .pl-book-opts, .pl-page .pl-collected .pl-book-hints,
+.pl-page .pl-collected .pl-tag-check { display: none; }
+.pl-page .pl-collected .pl-address-cell, .pl-page .pl-collected .pl-service-input { opacity: .55; }
+.pl-page .pl-collected .pl-address-cell:hover, .pl-page .pl-collected .pl-address-cell:focus-within { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+    .pl-page .pl-xf-pop, .pl-page .pl-collect-who { animation: none; }
+    .pl-page .pl-collect-region, .pl-page .pl-xf-caret { transition: none; }
+}
+
+/* Address Book: the 📍 Map link by each receiver, and who collects from the warehouse */
+.ab-page .ab-map { font-size: 12px; font-weight: 600; color: #2980b9; text-decoration: none; white-space: nowrap; }
+.ab-page .ab-map:hover, .ab-page .ab-map:focus-visible { text-decoration: underline; }
+.ab-page .col-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.ab-page .col-item { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid #ecf0f1; border-radius: 6px; background: #fff; }
+.ab-page .col-swatch { flex: 1; padding: 8px 10px; border: 2px solid var(--collect-ink); border-radius: 4px; background: var(--collect-fill); color: var(--collect-ink); font-weight: 800; font-size: 13px; text-align: center; }
+.ab-page .col-used { color: #7f8c8d; font-size: 12px; white-space: nowrap; }
+.pl-page .pl-map { margin-left: 6px; font-size: 12px; font-weight: 600; color: #2980b9; text-decoration: none; white-space: nowrap; }
+.pl-page .pl-map:hover, .pl-page .pl-map:focus-visible { text-decoration: underline; }
+
+/* The shared address book's bar (Address Book page, script.js section 31) */
+.ab-page .sb-bar { margin: 0 0 16px; padding: 10px 14px; border: 1px solid #d6eaf8; border-left: 4px solid #3498db; border-radius: 6px; background: #f4f9fd; }
+.ab-page .sb-bar.sb-problem { border-color: #f5d7a1; border-left-color: #e67e22; background: #fff8ec; }
+.ab-page .sb-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.ab-page .sb-title { font-weight: 700; color: #2c3e50; }
+.ab-page .sb-state { flex: 1; color: #5d6d7e; font-size: 13px; }
+.ab-page .sb-name { margin-top: 10px; }
+.ab-page .sb-name label { display: block; font-weight: 600; font-size: 13px; color: #2c3e50; margin-bottom: 6px; }
+.ab-page .sb-hint { font-weight: 400; color: #7f8c8d; }
+.ab-page .sb-name-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.ab-page .sb-name-row input { flex: 0 1 280px; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.ab-page .sb-user { margin: 8px 0 0; font-size: 13px; color: #5d6d7e; }
+.ab-page .sb-link { border: 0; background: none; padding: 0; color: #2980b9; font: inherit; text-decoration: underline; cursor: pointer; }

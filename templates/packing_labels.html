@@ -254,7 +254,7 @@
             <div class="tab-card">
                 <label class="tab-title">
                     <input type="checkbox" name="selected_tabs" value="{{ tab }}" 
-                           {% if not user_inputs or user_inputs[tab].selected %}checked{% endif %}>
+                           {% if user_inputs and user_inputs[tab] and user_inputs[tab].selected %}checked{% endif %}>
                     Tab: {{ tab }}
                 </label>
                 
@@ -355,6 +355,9 @@
                     <p class="pl-config-hint">{{ courier.carton_count }} {{ 'items' if courier_mode else 'cartons' }} in {{ courier.consignments|length }} consignments. Packs going to the same address share one consignment. Use ✏️ to correct an address, then 🔄 Update Previews to regroup.</p>
                     <input type="hidden" id="consignment-edits" name="consignment_edits" value="{{ courier.edits_json }}">
                     <input type="hidden" id="carton-weights" name="carton_weights" value="{{ courier.weights_json }}">
+                    {# Who collects from the warehouse: saved names and colours, for the rows' Collect boxes (script.js section 30) #}
+                    <div id="pl-collectors" data-collectors="{{ courier.collectors|tojson|forceescape }}" hidden></div>
+                    <datalist id="pl-collector-names">{% for p in courier.collectors.saved %}<option value="{{ p.name }}"></option>{% endfor %}</datalist>
 
                     <div class="pl-courier-fields">
                         <div class="input-field">
@@ -397,13 +400,17 @@
                                 <span class="pl-add-service-msg issue-detail" role="status" aria-live="polite"></span>
                             </div>
                         </div>
-                        <div class="input-field">
-                            <label for="courier-state-filter">State</label>
-                            <select id="courier-state-filter">
-                                <option value="">All states</option>
-                                {% for st in courier.states %}<option value="{{ st }}">{{ st }}</option>{% endfor %}
-                            </select>
+                        {# Filters that work like Excel's: tick any number of values; built by script.js (section 30) from
+                           the rows, so a fixed address moves to its new state straight away #}
+                        {% for key, label in [('state', 'State'), ('country', 'Country'), ('packages', 'Packages')] %}
+                        <div class="input-field pl-xf" data-filter="{{ key }}">
+                            <span class="pl-xf-label" id="xf-{{ key }}-label">{{ label }}</span>
+                            <button type="button" class="pl-xf-btn" aria-haspopup="true" aria-expanded="false" aria-labelledby="xf-{{ key }}-label xf-{{ key }}-value">
+                                <span class="pl-xf-value" id="xf-{{ key }}-value">All</span><span class="pl-xf-caret" aria-hidden="true">▾</span>
+                            </button>
+                            <div class="pl-xf-pop" role="dialog" aria-label="Filter by {{ label|lower }}" hidden></div>
                         </div>
+                        {% endfor %}
                         <div class="input-field pl-filter-text">
                             <label for="courier-text-filter">Filter</label>
                             <input type="search" id="courier-text-filter" placeholder="Receiver, suburb, postcode, store…">
@@ -449,22 +456,39 @@
                             </td>
                         </tr>
                         {% endif %}
-                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-original="{{ c.original_json }}" data-missing="{{ missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}">
+                        {% set col = c.collection %}
+                        <tr class="pl-con-row{% if c.book == 'unverified' %} pl-needs-check{% elif c.book == 'missing' %} pl-no-address{% endif %}{% if c.group %} pl-in-group{% endif %}{% if col.on %} pl-collected{% endif %}" data-id="{{ c.id }}"{% if c.group %} data-group="{{ c.group.id }}"{% endif %} data-country="{{ (d.country or 'AU')|upper }}" data-state="{{ d.state }}" data-packages="{{ c.packages }}" data-blank="{{ 1 if c.no_address else '' }}" data-original="{{ c.original_json }}" data-missing="{{ '' if col.on else missing_parts(d).strip(',') }}" data-ref="{{ (c.ref or {})|tojson|forceescape }}"{% if c.ref_held %} data-ref-held="{{ c.ref_held|tojson|forceescape }}"{% endif %}>
                             <td class="pl-courier-num">
                                 <button type="button" class="pl-edit-btn" title="Edit address" aria-label="Edit address of consignment {{ c.number }}">✏️</button>{{ c.number }}
                             </td>
                             <td class="pl-who-cell">
                                 <div class="pl-fold"><div class="pl-fold-inner">
                                 <span class="pl-show-receiver">{{ d.receiver }}</span>
+                                {# 📍 Map: Google Maps searched for this receiver and address in a new tab (script.js keeps it
+                                   up to date after an edit: mapsUrl) #}
+                                <a class="pl-map" href="https://www.google.com/maps/search/?api=1&amp;query={{ [d.receiver, d.line1, d.line2, d.suburb, d.state, d.postcode, {'AU': 'Australia', 'NZ': 'New Zealand'}.get((d.country or 'AU')|upper, d.country)]|select|join(', ')|urlencode }}"
+                                   target="_blank" rel="noopener noreferrer" title="Search Google Maps for this receiver and address (opens a new tab)">📍 Map</a>
                                 <div class="issue-detail pl-show-contact">{% if d.contact %}Attn {{ d.contact }}{% endif %}</div>
                                 <span class="pl-courier-tag pl-show-atl"{% if not d.authority_to_leave %} hidden{% endif %}>ATL</span>
                                 <span class="pl-courier-tag pl-tag-edited"{% if not c.edited or c.edit_source == 'book' %} hidden{% endif %}>Edited</span>
                                 <span class="pl-courier-tag pl-tag-book" title="Filled in from the address book. Use ✏️ → Reset to Excel to undo."{% if c.edit_source != 'book' %} hidden{% endif %}>Address book</span>
                                 {% if c.book == 'unverified' %}<span class="pl-courier-tag pl-tag-check" title="Not in the address book yet: it's saved there when you generate. Open ✏️ to compare with saved addresses.">New address</span>{% endif %}
-                                {% if c.collect %}<span class="pl-courier-tag pl-tag-collect" title="The file says these packs are collected. Not in the courier CSV; each label's courier region says &quot;{{ c.collect }}&quot; and its pack number. Type an address in ✏️ to send them instead.">{{ c.collect|title }}</span>
-                                {% elif c.book == 'missing' %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in.">No address</span>{% endif %}
+                                {% if c.no_address %}<span class="pl-courier-tag pl-tag-missing" title="No address in the file. Open ✏️ to pick a saved address or type one in."{% if col.on %} hidden{% endif %}>No address</span>{% endif %}
+                                {% if c.postcode_from %}<span class="pl-courier-tag pl-tag-book" title="Your verified addresses give {{ d.suburb }} this {{ 'state and postcode' if c.state_from else 'postcode' }}, so it was put in{% if c.postcode_from[0] and c.postcode_from[0] != c.postcode_from[1] %} (the file said {{ c.postcode_from[0] }}){% endif %}. Use ✏️ to change it.">{{ (c.state_from ~ ' ') if c.state_from }}{{ c.postcode_from[1] }} from verified</span>{% endif %}
                                 {% if c.book_note %}<div class="issue-detail pl-also-for">{{ c.book_note }}</div>{% endif %}
                                 </div></div>
+                                {# Collected from the warehouse instead of sent: ticked by itself only when the address says Kyle
+                                   collects; the rest by hand (a name the file gives is filled in). The name fills the label's courier region in that person's colour (script.js section 30) #}
+                                <div class="pl-collect{% if col.on %} pl-collect-on{% endif %}" data-auto="{{ 1 if col.auto else '' }}">
+                                    <label class="pl-collect-toggle" title="Not sent by courier: left out of the courier CSV; each label's courier region names who collects">
+                                        <input type="checkbox" class="pl-collect-check"{% if col.on %} checked{% endif %} aria-label="Collect consignment {{ c.number }} from the warehouse"> Collect from warehouse
+                                    </label>
+                                    <div class="pl-collect-who"{% if not col.on %} hidden{% endif %}>
+                                        <input type="text" class="pl-collect-name" list="pl-collector-names" maxlength="40" value="{{ col.name or col.suggested }}"
+                                               placeholder="Who collects?" autocomplete="off" aria-label="Who collects consignment {{ c.number }}">
+                                        <div class="pl-collect-region" aria-live="polite" title="The courier region of these labels"><span class="pl-collect-text"></span><span class="pl-collect-new" hidden>new colour</span></div>
+                                    </div>
+                                </div>
                                 {# ✏️: the receiver and Attn open into fields where they're shown #}
                                 <div class="pl-unfold" inert><div class="pl-fold-inner pl-edit-who">
                                     {% for field, label in [('receiver', 'Receiver Name'), ('contact', 'Contact (Attn)')] %}

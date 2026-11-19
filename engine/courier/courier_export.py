@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import date
 
 from engine.packing_labels.packing_label_generator import _address_key, _norm, assign_label_numbers, assign_barcodes, normalize_postcode, STREET_TYPES
-from engine.courier.packing_specs import SpecStore, MAX_KG, _num as _round_to
+from engine.courier.packing_specs import SpecStore, MAX_KG, _num as _round_to, split_count
 
 AU_STATES = {'VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
 # New Zealand regions: the official ISO 3166-2:NZ codes, plus the codes Toll's portal uses
@@ -375,6 +375,24 @@ def collect_receiver(text):
     return note.capitalize()
 
 
+def collection(dest, edit=None):
+    """Whether a consignment's packs are collected from the warehouse, and by whom: {'on', 'name', 'auto', 'suggested'}.
+    Every consignment has the preview's "Collect from warehouse" box. It ticks itself (auto) only when the address
+    says Kyle collects and has no postcode ('Kyle collect from warehouse'); everyone else is ticked by hand. Another
+    name the file gives ('John Smith will collect') is 'suggested': filled in for the user if they tick the box.
+    The box ticked or unticked by hand (edit 'collect': True / False, 'collect_by': name) wins."""
+    from engine.addresses.collectors import KYLE, clean_name, name_key
+    edit, dest = edit or {}, dest or {}
+    note = '' if dest.get('postcode') else collect_note(dest.get('raw') or one_line(dest))
+    named = clean_name(note[:-len(" TO COLLECT")]) if note.endswith(" TO COLLECT") else ''
+    if 'collect' in edit:
+        on = bool(edit['collect'])
+        name = clean_name(edit['collect_by'] if 'collect_by' in edit else named) if on else ''
+        return {'on': on, 'name': name, 'auto': False, 'suggested': named}
+    auto_on = name_key(named) == KYLE
+    return {'on': auto_on, 'name': named if auto_on else '', 'auto': auto_on, 'suggested': named}
+
+
 def _looks_like_address(text):
     """A whole address ('Andrew, 27 Sirius Rd, Lane Cove NSW 2067') rather than a store name."""
     p = parse_address_text(text)
@@ -539,14 +557,22 @@ def source_destinations(pack_groups):
     return found
 
 
-def build_consignments(pack_groups, edits=None, default_service='', resolve_spec=None, weights=None):
+def build_consignments(pack_groups, edits=None, default_service='', resolve_spec=None, weights=None, verified_place=None):
     """Groups packs by delivery address. Returns (consignments, cartons, warnings).
 
     edits: {consignment id: {address fields..., 'service_code': ...}} from the preview table. The id is the
     address as read from Excel, so it stays the same however often the preview is refreshed. Edits apply before
     grouping, so changing an address to match another consignment's merges them, as the courier would.
     resolve_spec: Packing Spec text -> size/weight/item type (SpecStore.resolver(); built-in defaults if None).
-    weights: {pack key: kg} typed in the preview's weight boxes."""
+    weights: {pack key: kg} typed in the preview's weight boxes.
+    verified_place: (suburb, state, country) -> {'postcode', 'state'} the courier-verified addresses settle for that
+    suburb, or None (AddressBook.verified_place). Put in straight away, before grouping, over the file's postcode or
+    none, and the state when there was none: verified addresses are the last word. Not over a postcode typed in ✏️,
+    and not on an address with no street. The consignment keeps 'postcode_from' = (what the file said, the verified
+    postcode) and 'state_from' (the state put in, or None) for the preview's tag.
+
+    Each consignment gets 'collection' (collection(): collected from the warehouse, by whom) and 'packages', its
+    boxes counted ('2 x OB…' is two)."""
     edits, weights = edits or {}, weights or {}
     resolve_spec = resolve_spec or SpecStore(None).resolver()
     # A pack named after its street (no name in its address cell) takes the receiver the address book or an
@@ -577,15 +603,28 @@ def build_consignments(pack_groups, edits=None, default_service='', resolve_spec
         weight = carton_weight(weights.get(key), spec['weight_kg'])
         edit = edits.get(source_id, {})
         final = _apply_edit(dest, edit)
+        edited = final is not dest
+        postcode_from = state_from = None
+        if verified_place and 'postcode' not in edit and final['suburb'] and (final['line1'] or final['line2']):
+            place = verified_place(final['suburb'], final['state'], final['country']) or {}
+            pc = normalize_postcode(place.get('postcode') or '', final['country'])
+            if pc and pc != final['postcode']:
+                postcode_from = (final['postcode'], pc)
+                final = {**final, 'postcode': pc}
+            if place.get('state') and not final['state'] and 'state' not in edit:
+                state_from = place['state']
+                final = {**final, 'state': place['state']}
+                postcode_from = postcode_from or (final['postcode'], final['postcode'])
         # Packs still without a postcode stay apart (one consignment per receiver) until an address is given
         addr_key = _address_key(one_line(final)) if final['postcode'] else source_id
         if addr_key not in consignments:
             consignments[addr_key] = {
                 'number': len(consignments) + 1, 'id': source_id,
-                'destination': final, 'original': dest, 'edited': final is not dest,
-                'edit_source': edit.get('source', '') if final is not dest else '',
+                'destination': final, 'original': dest, 'edited': edited,
+                'edit_source': edit.get('source', '') if edited else '',
                 'service_code': _tidy(edit.get('service_code')),
                 'no_address': not final['postcode'],
+                'postcode_from': postcode_from, 'state_from': state_from,
                 'cartons': [],
             }
         con = consignments[addr_key]
@@ -606,9 +645,15 @@ def build_consignments(pack_groups, edits=None, default_service='', resolve_spec
     cons = list(consignments.values())
     for c in cons:
         c['service_code_used'] = c['service_code'] or _tidy(default_service)
+        c['collection'] = collection(c['destination'], edits.get(c['id'], {}))
+        c['packages'] = sum(split_count(x['packing_spec'])[0] for x in c['cartons'])
     if skipped:
         warnings.append(f"No store / receiver name and no address, left out of the courier CSV: {'; '.join(skipped)}")
-    missing = [c for c in cons if c['no_address']]
+    collected = [c for c in cons if c['collection']['on']]
+    if collected:
+        warnings.append(f"Collected from the warehouse, not in the courier CSV: "
+                        f"{', '.join(f'#{c['number']} {c['destination']['receiver']}' for c in collected)}.")
+    missing = [c for c in cons if c['no_address'] and not c['collection']['on']]
     if missing:
         warnings.append(f"No address for {len(missing)} consignment{'s' if len(missing) != 1 else ''} "
                         f"({', '.join(f'#{c['number']} {c['destination']['receiver']}' for c in missing)}): pick a saved address "
@@ -653,9 +698,9 @@ def dispatch_date(today=None):
 
 
 def sendable(consignments, cartons):
-    """The consignments (and their cartons) that have an address: those still without one are left out of
-    the courier CSV, the label map and the address book."""
-    keep = [c for c in consignments if not c.get('no_address')]
+    """The consignments (and their cartons) that have an address and aren't collected from the warehouse: the rest
+    are left out of the courier CSV, the label map and the address book."""
+    keep = [c for c in consignments if not c.get('no_address') and not (c.get('collection') or {}).get('on')]
     numbers = {c['number'] for c in keep}
     return keep, [x for x in cartons if x['consignment'] in numbers]
 

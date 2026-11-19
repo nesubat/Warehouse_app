@@ -15,7 +15,8 @@ row of one box; that merge defines the box. Required columns: Packing Spec, Job 
 - Store rows below; quantities in the grid; a TOTAL row may follow.
 - Packing Spec per store per pack: a column headed with the pack's number (`1`, `P1`), or the stock columns
   Packing Sheets was given; `x` or blank means no pack.
-- Item details (Description, Size, Artwork …) in labelled rows above the header.
+- Item details (Description, Size, Artwork …) in labelled rows above the header. Size = Dimensions and Artwork = Thumbnail
+  (= Image / Picture / Visual) in both layouts: one word list, `DIMENSION_WORDS` / `ARTWORK_WORDS` in packing_label_generator.
 
 ## What Packing Sheets adds
 - **Final file**: a column at the start of each selected pack, job-row header `Code for Pack <name>`, each store's

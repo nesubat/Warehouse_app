@@ -33,7 +33,10 @@ Code is grouped by feature under `engine/`; `app.py` (routes) stays at the top a
   `courier_services.py` the service list and each group's logo (`data/courier_services.json`; all logos in
   `data/courier logos/`: `<group id>.png` cut by `logo_sheet.py`, dropped ones `logo-<hash>.png`); Stitch Labels puts the logo in the label's slot.
 - `engine/addresses/`: `address_book.py`, `address_match.py`, `address_import.py` (bulk update), `address_reference.py`
-  (official G-NAF / LINZ data).
+  (official G-NAF / LINZ data), `collectors.py` (who collects from the warehouse and their courier-region colour; Kyle's
+  red on yellow, Gessie blue, 'client' green are standard; script.js section 30 copies its rules, change both together),
+  `cloud_sync.py` (the shared address book: syncs `address_book.db` with the Apps Script in `cloud/apps_script/Code.gs`;
+  setup in `docs/CENTRAL_ADDRESS_BOOK.md`; the merge rule is in both files, change both together).
 - `engine/packing_labels/label_stitcher.py` puts courier labels on packing labels by the code in their Item Ref.
 - `app.py` routes. Packing Labels, horizontal labels and Courier Import share `_distribution_page(mode)`.
 

@@ -1104,7 +1104,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const rows = [...document.querySelectorAll('.pl-con-row')];
     const mainService = document.getElementById('service_code');
     const applyBtn = document.getElementById('apply-service');
-    const stateFilter = document.getElementById('courier-state-filter');
     const textFilter = document.getElementById('courier-text-filter');
     const countLabel = document.getElementById('courier-filter-count');
 
@@ -1113,11 +1112,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function show(row, d) {
         row.querySelector('.pl-show-receiver').textContent = d.receiver;
+        const map = row.querySelector('.pl-map');
+        if (map) map.href = mapsUrl(d);  // follows the address as it's edited
         row.querySelector('.pl-show-contact').textContent = d.contact ? 'Attn ' + d.contact : '';
         row.querySelector('.pl-show-atl').hidden = !d.authority_to_leave;
         const country = (d.country || 'AU').toUpperCase();
         renderAddressParts(row.querySelector('.pl-show-address'), d);
-        row.dataset.missing = missingParts(d).join(',');
+        row.dataset.missing = row.classList.contains('pl-collected') ? '' : missingParts(d).join(',');  // collected: no address needed
         row.dataset.state = (d.state || '').toUpperCase();
         row.dataset.country = country;
         document.dispatchEvent(new CustomEvent('pl-countries-changed'));  // the export details' count follows
@@ -1168,8 +1169,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // What an edit carries over from before: the service picked, Keep separate (same-name groups) and the
         // Keep as is choices (they name the exact address they're for, so a changed address simply doesn't match)
-        const carried = (key) => Object.fromEntries(['service_code', 'separate', 'ref_keep', 'book_keep']
-            .filter((k) => edits[key] && edits[key][k]).map((k) => [k, edits[key][k]]));
+        const carried = (key) => Object.fromEntries(['service_code', 'separate', 'ref_keep', 'book_keep', 'collect', 'collect_by']
+            .filter((k) => edits[key] && k in edits[key] && (edits[key][k] || k === 'collect')).map((k) => [k, edits[key][k]]));
 
         row.querySelector('.pl-edit-save').addEventListener('click', () => {
             const d = read(row);
@@ -1186,6 +1187,7 @@ document.addEventListener('DOMContentLoaded', function () {
             row.querySelector('.pl-tag-book').hidden = true;
             markChecked(row);
             if (d.postcode) markAddressed(row);
+            if (d.postcode) collect.addressGiven();
             close();
             applyFilters();
             PL_REF.recheck(row, changed ? d : original, edits[id] && edits[id].ref_keep);
@@ -1208,6 +1210,7 @@ document.addEventListener('DOMContentLoaded', function () {
             if (editing()) fill(row, d);  // the open editor shows what was just applied
             markChecked(row);
             if (d.postcode) markAddressed(row);
+            if (d.postcode) collect.addressGiven();
             applyFilters();
             PL_REF.recheck(row, d, null);
         });
@@ -1217,6 +1220,11 @@ document.addEventListener('DOMContentLoaded', function () {
             editOf(id).book_keep = Object.fromEntries(['line1', 'line2', 'suburb', 'state', 'postcode'].map((k) => [k, d[k] || '']));
             save();
             row.querySelector('.pl-book-opts').replaceChildren();
+            // Book first: with its address kept as is, the official data's street suggestions held back come up now
+            if (row.dataset.refHeld) {
+                try { PL_REF.render(row, JSON.parse(row.dataset.refHeld)); } catch (e) { /* stays as it is */ }
+                delete row.dataset.refHeld;
+            }
         });
         // Keep as is: this exact address stops being flagged (the address book remembers it on Generate)
         row.addEventListener('pl-ref-keep', () => {
@@ -1250,6 +1258,19 @@ document.addEventListener('DOMContentLoaded', function () {
             if (e.key === 'Enter' && e.target.matches('input')) { e.preventDefault(); row.querySelector('.pl-edit-save').click(); }
             if (e.key === 'Escape') close();
         }));
+
+        // Collect from warehouse (section 30): ticked by hand or by itself, with who collects
+        const collect = attachCollect(row, {
+            changed(on, name) {
+                editOf(id).collect = on;
+                editOf(id).collect_by = name;
+                tidy(id);
+                // Collected: no address needed, so no "No address" or missing parts to fix; unticked, they're back
+                row.dataset.missing = on ? '' : missingParts(current()).join(',');
+                applyFilters();
+            },
+            touched: () => !!edits[id] && 'collect' in edits[id],
+        });
 
         const service = row.querySelector('.pl-service-input');
         service.addEventListener('change', () => {
@@ -1293,6 +1314,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // A row that had no address and now has one: drop the red theme (the server regroups it on refresh)
     const missingNote = document.getElementById('courier-missing-note');
     function markAddressed(row) {
+        row.dataset.blank = '';  // has an address now: unticking Collect doesn't bring "No address" back
         if (!row.classList.contains('pl-no-address')) return;
         row.classList.remove('pl-no-address');
         const tag = row.querySelector('.pl-tag-missing');
@@ -1306,7 +1328,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // The text a row shows: not the ✏️ editor's labels, other receivers' saved addresses offered as options, or
     // anything hidden, so a search (and "Apply to N shown") finds the consignments it names and no others
     // A drop-down (the service) shows only what's chosen, not its whole list
-    const SEARCH_SKIP = '.pl-editor, .pl-book-opts, .pl-ref, [hidden], select';
+    const SEARCH_SKIP = '.pl-editor, .pl-book-opts, .pl-ref, [hidden], select, .pl-collect-toggle, .pl-collect-new, .pl-map';
     function searchText(row) {
         const parts = [];
         const shown = (el) => {
@@ -1324,12 +1346,28 @@ document.addEventListener('DOMContentLoaded', function () {
         return parts.join(' ').toLowerCase();
     }
 
+    // State, Country and Packages: filters like Excel's (section 30), each reading its value from the rows as they
+    // are now. Packages: one box (the StarTrack FPP ones), two or more, or collected from the warehouse.
+    function filterValue(key, row) {
+        if (key === 'packages') {
+            if (row.classList.contains('pl-collected')) return 'collect';
+            return Number(row.dataset.packages) === 1 ? 'fpp' : 'multi';
+        }
+        return row.dataset[key] || '';
+    }
+    const PACKAGES = { fpp: '1 package · StarTrack FPP', multi: '2 or more packages', collect: 'Collect from warehouse' };
+    const filters = [...document.querySelectorAll('.pl-xf')].map((box) => plExcelFilter(box, {
+        values: () => rows.map((r) => filterValue(box.dataset.filter, r)),
+        label: box.dataset.filter === 'packages' ? (v) => PACKAGES[v] || v : null,
+        order: box.dataset.filter === 'packages' ? Object.keys(PACKAGES) : null,
+        onChange: () => applyFilters(),
+    }));
+
     function applyFilters() {
-        const state = stateFilter.value;
         const text = textFilter.value.trim().toLowerCase();
         let shown = 0;
         rows.forEach((row) => {
-            const visible = (!state || row.dataset.state === state) &&
+            const visible = filters.every((f) => f.accepts(filterValue(f.key, row))) &&
                             (!text || searchText(row).includes(text));
             row.hidden = !visible;
             if (visible) shown += 1;
@@ -1341,7 +1379,6 @@ document.addEventListener('DOMContentLoaded', function () {
         countLabel.textContent = shown === rows.length ? `${rows.length} consignments` : `Showing ${shown} of ${rows.length}`;
         applyBtn.textContent = shown === rows.length ? 'Apply to all' : `Apply to ${shown} shown`;
     }
-    stateFilter.addEventListener('change', applyFilters);
     textFilter.addEventListener('input', applyFilters);
     textFilter.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
     applyFilters();
@@ -1473,6 +1510,15 @@ document.addEventListener('DOMContentLoaded', function () {
             v.title = `Confirmed by the courier portal on ${when(entry.verified_at)}`;
             who.append(v);
         }
+        // 📍 Map: Google Maps searched for this store and its address, in a new tab (mapsUrl)
+        const map = document.createElement('a');
+        map.className = 'ab-map';
+        map.href = mapsUrl(entry);
+        map.target = '_blank';
+        map.rel = 'noopener noreferrer';
+        map.textContent = '📍 Map';
+        map.title = 'Search Google Maps for this receiver and address (opens a new tab)';
+        who.append(' ', map);
         if (entry.contact) { const c = document.createElement('div'); c.className = 'ab-detail'; c.textContent = `Attn ${entry.contact}`; who.append(c); }
         const cells = { line1: cell([entry.line1, entry.line2].filter(Boolean).join(', ')), suburb: cell(entry.suburb),
                         state: cell(entry.state), postcode: cell(entry.postcode), country: cell(entry.country) };
@@ -1542,6 +1588,9 @@ document.addEventListener('DOMContentLoaded', function () {
         needsBtn.setAttribute('aria-pressed', String(needsOnly));
         load(true);
     });
+
+    // Sync now brought changes from the shared address book (section 31): the list shows them, unless one is being edited
+    document.addEventListener('ab-reload', () => { if (!body.querySelector('.ab-edit-row')) load(true); });
 
     async function load(reset) {
         if (reset) offset = 0;
@@ -3156,6 +3205,7 @@ document.addEventListener('DOMContentLoaded', function () {
 document.addEventListener('DOMContentLoaded', function () {
     const panel = document.getElementById('pl-issues');
     const rows = [...document.querySelectorAll('.pl-con-row')];
+    const allRows = rows;  // problems() lists only the rows not collected from the warehouse
     if (!rows.length) return;
 
     const button = (text, cls, title, onClick) => {
@@ -3204,21 +3254,26 @@ document.addEventListener('DOMContentLoaded', function () {
             hints.forEach((h) => {
                 const line = document.createElement('div');
                 line.className = 'pl-book-hint';
-                line.dataset.hintField = h.field;
-                line._fields = { [h.field]: h.value };
+                // A hint changes one field, or (verified addresses with several postcodes for the suburb) state and postcode
+                const fields = h.fields || { [h.field]: h.value };
+                line.dataset.hintField = Object.keys(fields).join(',');
+                line._fields = fields;
                 const what = document.createElement('span');
                 const strong = document.createElement('strong');
                 strong.textContent = h.label;
-                what.append('📇 Saved addresses: ', strong, ` · ${h.why}`);
-                line.append(what, button(`Use ${h.value}`, '', `Change only the ${h.field} to ${h.value}`,
-                    () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields: { [h.field]: h.value } } }))));
+                what.append(h.verified && h.fields ? '📇 Verified addresses: ' : '📇 Saved addresses: ', strong, ` · ${h.why}`);
+                const shown = Object.values(fields).join(' ');
+                line.append(what, button(`Use ${shown}`, '', `Change only the ${Object.keys(fields).join(' and ')} to ${shown}`,
+                    () => row.dispatchEvent(new CustomEvent('pl-ref-use', { detail: { fields } }))));
                 hintsBox.append(line);
             });
         }
         // A fix applied (an option, a hint, an official suggestion): hints about the fields it changed are done with
         row.addEventListener('pl-ref-use', (e) => {
             const changed = Object.keys(e.detail.fields || {});
-            if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => { if (changed.includes(l.dataset.hintField) || e.detail.source === 'book') l.remove(); });
+            if (hintsBox) hintsBox.querySelectorAll('.pl-book-hint').forEach((l) => {
+                if (l.dataset.hintField.split(',').some((f) => changed.includes(f)) || e.detail.source === 'book') l.remove();
+            });
             dedupeSuggestions(row);
         });
         dedupeSuggestions(row);
@@ -3395,6 +3450,8 @@ document.addEventListener('DOMContentLoaded', function () {
     // the address doesn't exist there), then what's worth a look, then what's only for information
     function problems() {
         const tiers = { fix: [], check: [], info: [] };
+        // Collected from the warehouse: not sent, so nothing about their address needs fixing
+        const rows = allRows.filter((r) => !r.classList.contains('pl-collected'));
         const tabs = new Set((review.file || []).map((g) => g.tab));
         (review.file || []).forEach((g) => tiers[g.major ? 'fix' : 'check'].push({
             key: `file:${g.tab}:${g.text}`, detail: g.detail, where: g.where,
@@ -4104,4 +4161,343 @@ document.addEventListener('DOMContentLoaded', function () {
         tick();
     });
     load().then(tick);
+});
+
+
+// Google Maps searched for a receiver and its address (the consignment preview and the Address Book): a free search
+// link in a new tab, no map API
+function mapsUrl(d) {
+    const country = { AU: 'Australia', NZ: 'New Zealand' }[(d.country || 'AU').toUpperCase()] || d.country;
+    const query = [d.receiver, d.line1, d.line2, d.suburb, d.state, d.postcode, country].filter(Boolean).join(', ');
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+// =========================================
+// 30. FILTERS LIKE EXCEL'S AND "COLLECT FROM WAREHOUSE" (packing labels preview)
+// =========================================
+// A filter button over the consignments (State, Country, Packages) that opens a list of the values the rows have
+// now, each with how many rows have it and a tick box, as Excel's column filter does: (Select all), a search box when
+// the list is long, any number of values ticked at once. Ticking applies straight away. Values are written with
+// textContent only: they come from the file.
+function plExcelFilter(box, { values, label, order, onChange }) {
+    const key = box.dataset.filter;
+    const button = box.querySelector('.pl-xf-btn');
+    const shown = box.querySelector('.pl-xf-value');
+    const pop = box.querySelector('.pl-xf-pop');
+    const name = (v) => (v === '' ? '(Blanks)' : (label ? label(v) : v));
+    let picked = null;  // null: everything; else the Set of values ticked
+    let query = '';
+
+    const counts = () => {
+        const c = new Map();
+        values().forEach((v) => c.set(v, (c.get(v) || 0) + 1));
+        const all = [...c.keys()];
+        all.sort(order ? (a, b) => order.indexOf(a) - order.indexOf(b)
+                       : (a, b) => (a === '') - (b === '') || a.localeCompare(b));
+        return all.map((v) => [v, c.get(v)]);
+    };
+    function caption() {
+        const all = counts().map(([v]) => v);
+        const on = picked ? all.filter((v) => picked.has(v)) : all;
+        shown.textContent = !picked ? 'All' : on.length === 0 ? 'None' : on.length <= 2 ? on.map(name).join(', ') : `${on.length} of ${all.length}`;
+        box.classList.toggle('pl-xf-active', !!picked);
+    }
+    function set(next) {
+        const all = counts().map(([v]) => v);
+        picked = next && all.every((v) => next.has(v)) ? null : next;  // everything ticked is no filter at all
+        const clear = pop.querySelector('.pl-xf-clear');
+        if (clear) clear.disabled = !picked;
+        caption();
+        onChange();
+    }
+    function tick(count, text, checked, onToggle, extra, value) {
+        const row = document.createElement('label');
+        row.className = 'pl-xf-option' + (extra ? ` ${extra}` : '');
+        row.dataset.value = value;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checked;
+        cb.addEventListener('change', () => onToggle(cb.checked));
+        const span = document.createElement('span');
+        span.textContent = text;
+        row.append(cb, span);
+        if (count != null) {
+            const n = document.createElement('span');
+            n.className = 'pl-xf-count';
+            n.textContent = count;
+            row.append(n);
+        }
+        return { row, cb };
+    }
+    function build() {
+        const list = counts();
+        pop.replaceChildren();
+        const body = document.createElement('div');
+        body.className = 'pl-xf-list';
+        function draw() {
+            // The list is drawn again after each tick: the tick box that had the focus keeps it (keyboard, Esc)
+            const had = document.activeElement && body.contains(document.activeElement)
+                ? document.activeElement.closest('.pl-xf-option').dataset.value : null;
+            body.replaceChildren();
+            const q = query.trim().toLowerCase();
+            const matching = list.filter(([v]) => !q || name(v).toLowerCase().includes(q));
+            const isOn = (v) => !picked || picked.has(v);
+            const allOn = matching.length > 0 && matching.every(([v]) => isOn(v));
+            // (Select all): the values the search shows, as Excel's "Select All Search Results"
+            const all = tick(null, q ? '(Select all shown)' : '(Select all)', allOn, (on) => {
+                const next = new Set(picked || list.map(([v]) => v));
+                matching.forEach(([v]) => (on ? next.add(v) : next.delete(v)));
+                set(next);
+                draw();
+            }, 'pl-xf-all', '(select all)');
+            all.cb.indeterminate = !allOn && matching.some(([v]) => isOn(v));
+            body.append(all.row);
+            matching.forEach(([v, n]) => body.append(tick(n, name(v), isOn(v), (on) => {
+                const next = new Set(picked || list.map(([x]) => x));
+                if (on) next.add(v); else next.delete(v);
+                set(next);
+                draw();
+            }, '', v).row));
+            if (had != null) {
+                const again = [...body.querySelectorAll('.pl-xf-option')].find((o) => o.dataset.value === had);
+                if (again) again.querySelector('input').focus({ preventScroll: true });
+            }
+            if (!matching.length) {
+                const none = document.createElement('p');
+                none.className = 'pl-xf-none';
+                none.textContent = 'No match';
+                body.append(none);
+            }
+        }
+        if (list.length > 7) {
+            const search = document.createElement('input');
+            search.type = 'search';
+            search.className = 'pl-xf-search';
+            search.placeholder = 'Search';
+            search.setAttribute('aria-label', `Search ${key} values`);
+            search.value = query;
+            search.addEventListener('input', () => { query = search.value; draw(); });
+            search.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
+            pop.append(search);
+        }
+        pop.append(body);
+        draw();
+        const foot = document.createElement('div');
+        foot.className = 'pl-xf-foot';
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'pl-btn-small pl-btn-plain pl-xf-clear';
+        clear.textContent = 'Clear filter';
+        clear.disabled = !picked;
+        clear.addEventListener('click', () => { query = ''; set(null); close(); });
+        const done = document.createElement('button');
+        done.type = 'button';
+        done.className = 'pl-btn-small';
+        done.textContent = 'Done';
+        done.addEventListener('click', () => close());
+        foot.append(clear, done);
+        pop.append(foot);
+    }
+    function open() {
+        // One list open at a time
+        document.querySelectorAll('.pl-xf-btn[aria-expanded="true"]').forEach((b) => { if (b !== button) b.click(); });
+        build();
+        pop.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+        (pop.querySelector('.pl-xf-search') || pop.querySelector('input')).focus({ preventScroll: true });
+    }
+    function close(focus = true) {
+        if (pop.hidden) return;
+        pop.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+        if (focus) button.focus({ preventScroll: true });
+    }
+    button.addEventListener('click', () => (pop.hidden ? open() : close()));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !pop.hidden) { e.preventDefault(); close(); } });
+    document.addEventListener('mousedown', (e) => { if (!box.contains(e.target)) close(false); });
+    caption();
+    return { key, accepts: (v) => !picked || picked.has(v), refresh: caption };
+}
+
+// Who collects, and their colour: the same rules as engine/addresses/collectors.py (clean_name, name_key, assign),
+// so a name typed here shows the colour Generate will draw it with. Saved names keep theirs; new names take the free
+// colours in alphabetical order; Kyle is always red on yellow.
+const PL_COLLECT = (() => {
+    let data = null;
+    const load = () => {
+        if (data) return data;
+        const el = document.getElementById('pl-collectors');
+        try { data = el ? JSON.parse(el.dataset.collectors) : null; } catch (e) { data = null; }
+        data = data || { saved: [], palette: [], kyle: { fill: '#FFEB40', ink: '#CC0000' } };
+        return data;
+    };
+    const clean = (name) => String(name || '').split(/\s+/).filter(Boolean).join(' ')
+        .replace(/\s+(?:to\s+)?collect(?:s|ing|ion)?\b.*$/i, '').replace(/^[\s\-:,.]+|[\s\-:,.]+$/g, '')
+        .split(' ').filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ').slice(0, 40);
+    const key = (name) => clean(name).toLowerCase().replace(/[^0-9a-z]+/g, ' ').trim().split(/\s+/).filter(Boolean).join(' ');
+    const label = (name) => (clean(name) ? `${clean(name).toUpperCase()} TO COLLECT` : 'TO BE COLLECTED');
+
+    // Kyle yellow, Gessie blue, any name with 'client' green: the same on every computer (collectors.standard_colour)
+    const standard = (k) => (load().standard || {})[k] || (/\bclients?\b/.test(k) ? load().client : null);
+    function colours() {
+        const d = load();
+        const saved = Object.fromEntries(d.saved.map((c) => [c.key, { fill: c.fill, ink: c.ink }]));
+        const typed = [...document.querySelectorAll('.pl-collect-on .pl-collect-name')].map((i) => key(i.value)).filter(Boolean);
+        const taken = new Set([...Object.values(saved).map((c) => c.fill), ...(d.reserved || [d.kyle.fill])]);
+        const fresh = [...new Set(typed)].filter((k) => !(k in saved) && !standard(k)).sort();
+        const free = d.palette.filter((c) => !taken.has(c.fill));
+        const out = {};
+        fresh.forEach((k, n) => { out[k] = n < free.length ? free[n] : d.palette[(n - free.length) % d.palette.length]; });
+        Object.entries(saved).forEach(([k, c]) => { out[k] = c; });
+        typed.forEach((k) => { if (standard(k)) out[k] = standard(k); });
+        out.kyle = d.kyle;
+        return { out, saved };
+    }
+    // Every collected row's courier region: its words and colour (a new name can move the colour of a new name after
+    // it alphabetically, so all are painted together)
+    function paintAll() {
+        const { out, saved } = colours();
+        document.querySelectorAll('.pl-collect').forEach((box) => {
+            const input = box.querySelector('.pl-collect-name');
+            const k = key(input.value);
+            const colour = out[k] || load().kyle;  // no one named yet: red on yellow, as before
+            const region = box.querySelector('.pl-collect-region');
+            region.querySelector('.pl-collect-text').textContent = label(input.value);
+            region.style.setProperty('--collect-fill', colour.fill);
+            region.style.setProperty('--collect-ink', colour.ink);
+            const isNew = !!k && !(k in saved) && !standard(k);  // a standard name's colour is never new
+            const badge = region.querySelector('.pl-collect-new');
+            badge.hidden = !isNew;
+            badge.title = isNew ? `${clean(input.value)} is new: this colour is kept for them from Generate on` : '';
+        });
+    }
+    return { paintAll, clean };
+})();
+
+// One row's "Collect from warehouse" box. changed(on, name) records it; touched() says whether it was set by hand.
+// addressGiven(): an address with a postcode was put in, so a box that ticked itself is unticked (sent instead).
+function attachCollect(row, { changed, touched }) {
+    const box = row.querySelector('.pl-collect');
+    if (!box) return { addressGiven() {} };
+    const check = box.querySelector('.pl-collect-check');
+    const who = box.querySelector('.pl-collect-who');
+    const input = box.querySelector('.pl-collect-name');
+    function apply(on) {
+        box.classList.toggle('pl-collect-on', on);
+        row.classList.toggle('pl-collected', on);
+        who.hidden = !on;
+        // A row with no address: "No address" (and the To check list) only while it isn't collected
+        const blank = row.dataset.blank === '1';
+        const tag = row.querySelector('.pl-tag-missing');
+        if (tag) tag.hidden = on || !blank;
+        if (row.classList.contains('pl-no-address') !== (!on && blank)) row.classList.toggle('pl-no-address', !on && blank);
+        PL_COLLECT.paintAll();
+    }
+    check.addEventListener('change', () => {
+        apply(check.checked);
+        changed(check.checked, PL_COLLECT.clean(input.value));
+        if (check.checked && !input.value.trim()) input.focus();
+    });
+    input.addEventListener('input', () => {
+        changed(true, PL_COLLECT.clean(input.value));
+        PL_COLLECT.paintAll();
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+    input.addEventListener('change', () => { input.value = PL_COLLECT.clean(input.value); PL_COLLECT.paintAll(); });
+    apply(check.checked);
+    return {
+        addressGiven() {
+            if (check.checked && box.dataset.auto && !touched()) {
+                check.checked = false;
+                apply(false);
+                changed(false, '');
+            }
+        },
+    };
+}
+
+// Address Book page: remove a name from who collects (its colour goes to the next new name). Kyle can't be removed.
+document.addEventListener('DOMContentLoaded', function () {
+    const section = document.getElementById('collectors');
+    if (!section) return;
+    const status = section.querySelector('.col-status');
+    section.querySelectorAll('.col-remove').forEach((button) => button.addEventListener('click', async () => {
+        const item = button.closest('.col-item');
+        const name = item.querySelector('.col-swatch').textContent.replace(/ TO COLLECT$/, '');
+        if (!window.confirm(`Remove ${name}? Their colour goes to the next new name.`)) return;
+        button.disabled = true;
+        try {
+            const r = await fetch(section.dataset.url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ key: item.dataset.key }) });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(data.error || 'Not removed.');
+            item.remove();
+            status.textContent = `${name} removed.`;
+        } catch (e) {
+            button.disabled = false;
+            status.textContent = e.message;
+        }
+    }));
+});
+
+// =========================================
+// 31. THE SHARED ADDRESS BOOK (Address Book page): status, your name, Sync now
+// =========================================
+// The app syncs on its own in the background (cloud_sync.py); this shows how it's going and asks once for the name
+// every change is shared with. Status text from the server goes in with textContent only.
+document.addEventListener('DOMContentLoaded', function () {
+    const box = document.getElementById('shared-book');
+    if (!box) return;
+    const stateEl = document.getElementById('sb-state');
+    const form = document.getElementById('sb-name');
+    const input = document.getElementById('sb-name-input');
+    const userLine = box.querySelector('.sb-user');
+    const userName = document.getElementById('sb-user');
+    const now = document.getElementById('sb-now');
+    const ago = (t) => {
+        if (!t) return 'never';
+        const s = Math.max(0, Math.round(Date.now() / 1000 - t));
+        return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+    };
+    function show(st) {
+        const waiting = (st.waiting || 0) + (st.waiting_spellings || 0);
+        const parts = [`Last pulled ${ago(st.last_pull)}`, `pushed ${ago(st.last_push)}`];
+        if (waiting) parts.push(`${waiting} change${waiting === 1 ? '' : 's'} waiting to go up`);
+        stateEl.textContent = st.error ? `⚠ ${st.error}` : `✓ ${parts.join(' · ')}`;
+        box.classList.toggle('sb-problem', !!st.error);
+    }
+    async function refresh() {
+        try { show(await (await fetch(box.dataset.status)).json()); } catch (e) { /* the page still works */ }
+    }
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const r = await fetch(box.dataset.name, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                  body: JSON.stringify({ name: input.value }) });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) { stateEl.textContent = `⚠ ${data.error || 'Not saved.'}`; return; }
+        userName.textContent = data.user_name;
+        form.hidden = true;
+        userLine.hidden = false;
+        now.click();  // what waited for a name goes up now
+    });
+    document.getElementById('sb-change').addEventListener('click', () => { form.hidden = false; userLine.hidden = true; input.focus(); });
+    now.addEventListener('click', async () => {
+        now.disabled = true;
+        stateEl.textContent = 'Syncing…';
+        try {
+            const r = await fetch(box.dataset.sync, { method: 'POST' });
+            const data = await r.json().catch(() => ({}));
+            show(data);
+            if (r.ok && (data.pulled || data.pushed)) {
+                stateEl.textContent += ` · ${data.pushed || 0} up, ${data.pulled || 0} down`;
+                document.dispatchEvent(new CustomEvent('ab-reload'));
+            }
+        } catch (e) {
+            stateEl.textContent = '⚠ Sync failed: check the connection.';
+        } finally {
+            now.disabled = false;
+        }
+    });
+    refresh();
+    setInterval(refresh, 30000);
 });

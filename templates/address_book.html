@@ -15,6 +15,26 @@
         <h1>📇 Address Book</h1>
         <p class="ab-intro">Every delivery address sent in a courier CSV is saved here automatically, together with how it was spelled in the Excel file. The next time that spelling turns up, Generate Labels fills in the saved address for you. Correct an entry here and every future job uses the correction.</p>
 
+        {% if shared %}
+        {# The shared address book (cloud_sync.py): status, this computer's user, Sync now. script.js section 31 #}
+        <section class="sb-bar" id="shared-book" data-status="{{ url_for('api_shared_book_status') }}"
+                 data-name="{{ url_for('api_shared_book_name') }}" data-sync="{{ url_for('api_shared_book_sync') }}">
+            <div class="sb-line">
+                <span class="sb-title">☁ Shared address book</span>
+                <span class="sb-state" id="sb-state" role="status" aria-live="polite">Checking…</span>
+                <button type="button" class="ab-btn ab-btn-plain sb-now" id="sb-now">⟳ Sync now</button>
+            </div>
+            <form class="sb-name" id="sb-name"{% if shared_name %} hidden{% endif %}>
+                <label for="sb-name-input">Your name <span class="sb-hint">— every change you make is shared with it, so others can see who changed what. Asked once on this computer.</span></label>
+                <div class="sb-name-row">
+                    <input type="text" id="sb-name-input" maxlength="60" autocomplete="name" placeholder="e.g. Sam Lee" value="{{ shared_name }}" required>
+                    <button type="submit" class="ab-btn">Save name</button>
+                </div>
+            </form>
+            <p class="sb-user"{% if not shared_name %} hidden{% endif %}>Changes from this computer are shared as <strong id="sb-user">{{ shared_name }}</strong>. <button type="button" class="sb-link" id="sb-change">Change</button></p>
+        </section>
+        {% endif %}
+
         <div class="ab-toolbar">
             <input type="search" id="ab-search" class="ab-search" placeholder="Search receiver, contact, street, suburb or postcode…" aria-label="Search the address book" autocomplete="off" autofocus>
             <button type="button" id="ab-add" class="ab-btn">+ Add address</button>
@@ -56,6 +76,23 @@
             </table>
         </div>
         <button type="button" id="ab-more" class="ab-btn ab-btn-plain ab-more" hidden>Load more</button>
+
+        {# Who collects from the warehouse, and the colour of their labels' courier region (collectors.py). Names are
+           added from the consignment preview's "Collect from warehouse" box when you generate. #}
+        <section class="cs-section" id="collectors" aria-labelledby="col-title" data-url="{{ url_for('api_collector_delete') }}">
+            <h2 class="ps-heading" id="col-title">🧍 Who collects from the warehouse</h2>
+            <p class="ab-intro">Each name keeps its colour in every job, so packers can spot whose boxes are whose. Kyle is always red on yellow, and no one else gets that colour. New names are added from the <strong>Collect from warehouse</strong> box in the consignment preview when you generate. Remove a misspelt name here; its colour goes to the next new name.</p>
+            <ul class="col-list">
+                {% for p in collectors %}
+                <li class="col-item" data-key="{{ p.key }}">
+                    <span class="col-swatch" style="--collect-fill: {{ p.fill }}; --collect-ink: {{ p.ink }};">{{ p.name|upper }} TO COLLECT</span>
+                    <span class="col-used">{% if p.use_count %}used in {{ p.use_count }} job{{ '' if p.use_count == 1 else 's' }}{% else %}not used yet{% endif %}</span>
+                    {% if p.key != 'kyle' %}<button type="button" class="ab-icon-btn col-remove" title="Remove {{ p.name }}" aria-label="Remove {{ p.name }}">🗑️</button>{% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            <span class="cs-status col-status" role="status" aria-live="polite"></span>
+        </section>
 
         {# The courier services offered in the preview, grouped; each group's logo goes on the stitched labels #}
         <section class="cs-section" id="courier-services" aria-labelledby="cs-title" data-url="{{ url_for('api_courier_services') }}">

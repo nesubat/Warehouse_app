@@ -215,6 +215,7 @@ def _import_book(book, raw, mode):
         src = other._connect()
         rows = src.execute(f"SELECT id, {', '.join(ENTRY_COLUMNS)} FROM addresses").fetchall()
         aliases = src.execute("SELECT source_key, address_id FROM aliases").fetchall()
+        collectors = src.execute("SELECT * FROM collectors").fetchall()
         src.close()
         other._local.db = None
     db = book._connect()
@@ -244,8 +245,38 @@ def _import_book(book, raw, mode):
             if target and db.execute("INSERT OR IGNORE INTO aliases (source_key, address_id) VALUES (?, ?)",
                                      (a['source_key'], target)).rowcount:
                 learned += 1
-    return (f"{added:,} added, {updated:,} already here (verified marks kept), {learned:,} learned spellings"
-            if mode == 'merge' else f"replaced: {added:,} addresses, {learned:,} learned spellings")
+        people = _import_collectors(db, collectors, mode)
+    return (f"{added:,} added, {updated:,} already here (verified marks kept), {learned:,} learned spellings, {people} collector name{'s' if people != 1 else ''} added"
+            if mode == 'merge' else f"replaced: {added:,} addresses, {learned:,} learned spellings, {people} collector names")
+
+
+def _import_collectors(db, rows, mode):
+    """Who collects from the warehouse, with their colours (collectors.py). A name already here keeps its colour
+    (packers know it); a name brought over keeps its own unless a name here has that colour, then it gets a free one.
+    Kyle is always red on yellow. Returns how many names were added."""
+    from engine.addresses.collectors import KYLE, assign
+    if mode == 'replace':
+        db.execute("DELETE FROM collectors WHERE name_key != ?", (KYLE,))
+    saved = {r['name_key']: {'fill': r['fill'], 'ink': r['ink']} for r in db.execute("SELECT * FROM collectors")}
+    added = 0
+    # Names whose own colour is free here go first, so a name given a new colour can't take one still to come
+    taken_here = {c['fill'] for c in saved.values()}
+    incoming = sorted(rows, key=lambda r: r['fill'] in taken_here)
+    for r in incoming:
+        key = r['name_key']
+        if key in saved:
+            db.execute("UPDATE collectors SET use_count = MAX(use_count, ?), last_used_at = MAX(COALESCE(last_used_at, 0), "
+                       "COALESCE(?, 0)) WHERE name_key = ?", (r['use_count'], r['last_used_at'], key))
+            continue
+        taken = {c['fill'] for c in saved.values()}
+        # Its own colour, else a free one (the names keeping their own are all in already: sorted above)
+        colour = {'fill': r['fill'], 'ink': r['ink']} if r['fill'] not in taken else assign([r['name']], saved)[key]
+        db.execute("INSERT INTO collectors (name_key, name, fill, ink, use_count, created_at, updated_at, last_used_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (key, r['name'], colour['fill'], colour['ink'], r['use_count'],
+                                                     r['created_at'], r['updated_at'], r['last_used_at']))
+        saved[key] = colour
+        added += 1
+    return added
 
 
 def _import_specs(spec_store, raw, mode):

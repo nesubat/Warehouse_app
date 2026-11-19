@@ -195,6 +195,14 @@ DIM_PARTS = (  # letter, words that name it anywhere, words that name it only on
 )
 DIM_UNIT = re.compile(r'\b(mm|cm|m|in|inch|inches)\b', re.I)
 
+# One set of words per item field, for vertical headers and horizontal row labels alike: 'Size' and 'Dimensions' are the
+# same column, and so are 'Artwork', 'Art work', 'Thumbnail', 'Image', 'Picture' and 'Visual', in either layout.
+DIMENSION_WORDS = r'\b(?:sizes?|dimensions?|dims?)\b'
+ARTWORK_WORDS = r'art\s*work|\bart\b|thumb|image|picture|visual'
+# A size that describes something other than the item ('Store Size', 'Carton Size', 'Pack Size'): not its dimensions
+NOT_ITEM_SIZE = {'store', 'retailer', 'outlet', 'site', 'receiver', 'carton', 'box', 'pack', 'packing', 'pallet', 'font',
+                 'file', 'order', 'team', 'shoe', 'clothing', 'garment', 'code', 'number', 'no', 'id', 'type', 'category'}
+
 
 def dim_part(label):
     """'W', 'B', 'L', 'H' or 'D' for a header or row label that names one part of a dimension, else None:
@@ -250,10 +258,10 @@ def _header_field(header):
     if 'job' in h: return 'job_no'
     if 'qty' in h or 'quantity' in h: return 'qty'
     if 'desc' in h: return 'desc'
-    if 'thumb' in h or 'image' in h or 'picture' in h or 'art' in words or 'artwork' in words: return 'thumbnail'
-    if 'dimension' in h: return 'dim_combined'
-    part = dim_part(h)
+    if re.search(ARTWORK_WORDS, h): return 'thumbnail'
+    part = dim_part(h)  # before the whole size: 'Size W (mm)' and 'Dimension H' are one part of it
     if part: return f"dim_{part.lower()}"  # Width / Breadth / Length / Height / Depth (dim_part)
+    if re.search(DIMENSION_WORDS, h) and not words & NOT_ITEM_SIZE: return 'dim_combined'  # 'Size' = 'Dimensions'
     if place_ok and ('address' in h or 'street' in h):
         return 'address_2' if re.search(r'(line|address|addr)\s*2\b', h) else 'address_1'
     if place_ok and ('suburb' in h or 'town' in words or 'city' in words or 'locality' in words): return 'suburb'
@@ -1372,8 +1380,9 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
     "Installer: <receiver> · Attn <contact>" line; any other pack whose
     receiver isn't the store (or has an Attn) gets "Deliver to: …". A pack left out of the courier CSV
     (sent=False) says so in the courier label region; one collected instead ('collect': 'KYLE TO COLLECT',
-    courier_export.collect_note) gets that note and 'PACK 2 OF 3' there in red on yellow, counted over its store's
-    boxes only. A pack missing from addresses shows its Excel address.
+    collectors.label_text) gets that note and 'PACK 2 OF 3' there, counted over its store's boxes only, in the
+    collector's colours ('collect_colour': {'fill', 'ink'} hex; red on yellow when not given).
+    A pack missing from addresses shows its Excel address.
     report: the job report (draw_report_pages) put in front as page 1; the page numbers returned count it.
     A Packing Spec with a box count in front ('2 x OB170170170', packing_specs.split_count) gets one full set of
     pages per box, each with a diagonal "BOX 1 OF 2" watermark over the item grid (region C) and a box chip, so the
@@ -1493,10 +1502,14 @@ def generate_packing_labels(pack_groups, output_pdf_path="packing_labels.pdf", a
                     page.draw_rect(zone_a_rect, color=(0.8, 0.8, 0.8), width=0.5, dashes="[3] 0")
                     if info.get('collect'):
                         # Collected, not sent ('Kyle collect from warehouse'): who collects, the store the packs are
-                        # for and which of its packs this is, in red on yellow where the courier label would go
+                        # for and which of its packs this is, where the courier label would go, filled with that
+                        # person's colour (collectors.py: Kyle red on yellow, everyone else their own, same every job)
+                        from engine.addresses.collectors import KYLE_COLOUR, as_rgb
+                        colour = info.get('collect_colour') or KYLE_COLOUR
                         panel = fitz.Rect(zone_a_rect.x0 + 8, zone_a_rect.y0 + 8, zone_a_rect.x1 - 8, zone_a_rect.y1 - 8)
-                        page.draw_rect(panel, color=(0.8, 0.0, 0.0), fill=(1.0, 0.92, 0.25), width=2)
-                        red, room = (0.8, 0.0, 0.0), panel.width - 20
+                        red = as_rgb(colour['ink'])  # the ink: red on Kyle's yellow
+                        page.draw_rect(panel, color=red, fill=as_rgb(colour['fill']), width=2)
+                        room = panel.width - 20
 
                         def fitted(text, size, least, most_lines):
                             # Biggest size (down to least) at which no word runs past the panel
